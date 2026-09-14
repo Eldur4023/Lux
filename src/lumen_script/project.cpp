@@ -16,6 +16,7 @@
 #include <lumen/multipart.hpp>
 #include <lumen/app.hpp>
 #include <lumen/logger.hpp>
+#include <lumen/blocking_pool.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -1537,8 +1538,15 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             mod.route_report.push_back({r.method, r.pattern, "native"});
             mod.router.add_internal(r.method, r.pattern,
                 [fn](lumen::Request& req, lumen::Response& res) -> lumen::Task<void> {
-                    fn(req, res);
-                    co_return;
+                    // No `await` anywhere in this route (that is exactly what
+                    // landed it in rutas_por_indice instead of
+                    // rutas_async_por_indice above): its whole body runs to
+                    // completion in one call, so it is safe to hand the
+                    // entire thing to the shared blocking pool instead of
+                    // running it inline and stalling this connection's event
+                    // loop -- and everyone else queued behind it -- for
+                    // however long it takes. See blocking_pool.hpp.
+                    co_await lumen::BlockingAwaitable{req.loop, [&] { fn(req, res); }};
                 });
             continue;
         }
@@ -1591,9 +1599,29 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                 // thread and save the two allocations.
                 thread_local VM shared_vm;
                 VM  own_vm;
-                VM& vm = chunk->has_await ? own_vm : shared_vm;
 
-                VM::Result result = vm.start(*chunk, std::move(args), ctx, fn_table, &native_table);
+                VM::Result result;
+                if (chunk->has_await) {
+                    result = own_vm.start(*chunk, std::move(args), ctx, fn_table, &native_table);
+                } else {
+                    // No `await` anywhere in this chunk (that is what
+                    // has_await means): vm.start() is guaranteed to return
+                    // Done/Error on this one call, never Suspended -- the
+                    // resume loop below simply will not run for this
+                    // branch -- so the whole call is safe to hand to the
+                    // shared blocking pool instead of running it inline and
+                    // stalling this connection's event loop, and everyone
+                    // else queued behind it, for however long the bytecode
+                    // takes (VM interpretation has no JIT: this is where it
+                    // hurts most). See blocking_pool.hpp. shared_vm being
+                    // thread_local means it becomes "one VM per pool
+                    // worker" here rather than "one per event loop" -- same
+                    // amortization, just relative to whichever thread pool
+                    // actually runs it.
+                    co_await lumen::BlockingAwaitable{req.loop, [&] {
+                        result = shared_vm.start(*chunk, std::move(args), ctx, fn_table, &native_table);
+                    }};
+                }
 
                 // The VM does not know how to wait: every time it stops, the real
                 // co_await happens here, on the engine, and the result is handed
@@ -1614,7 +1642,11 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         if (req.is_cancelled()) co_return;
                     }
 
-                    result = vm.resume(std::move(produced), ctx);
+                    // Only the has_await branch above can ever reach this
+                    // loop (the other one is guaranteed Done/Error, never
+                    // Suspended), so own_vm -- not shared_vm -- is the one
+                    // whose frame is actually live across this suspension.
+                    result = own_vm.resume(std::move(produced), ctx);
                 }
 
                 if (result.status == VM::Status::Error) {

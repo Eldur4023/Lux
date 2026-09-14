@@ -84,6 +84,7 @@ set_target_properties(lumen_llhttp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 set(LUMEN_SOURCES
     src/app.cpp
     src/router.cpp
+    src/blocking_pool.cpp
     src/core/event_loop.cpp
     src/core/tcp_server.cpp
     src/http/http_parser.cpp

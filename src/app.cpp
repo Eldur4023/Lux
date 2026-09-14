@@ -4,6 +4,7 @@
 #include "../include/lumen/request.hpp"
 #include "../include/lumen/response.hpp"
 #include "../include/lumen/task.hpp"
+#include "../include/lumen/blocking_pool.hpp"
 
 #include <lumen/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
@@ -389,6 +390,14 @@ void App::run(const std::string& host, uint16_t port) {
     }
     if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
     num_threads = std::max(1u, num_threads);
+
+    // Shared pool for route handlers with no `await` at all: pure CPU-bound
+    // work (see BlockingAwaitable, blocking_pool.hpp) that would otherwise
+    // run inline on whichever core's loop accepted the connection, blocking
+    // it from serving anyone else meanwhile. Sized to the same core count as
+    // the event loops themselves -- this is CPU-bound work, not blocking
+    // I/O, so oversubscribing would just add scheduling noise, not throughput.
+    blocking_pool().start(num_threads);
 
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);
