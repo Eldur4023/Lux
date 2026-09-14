@@ -394,9 +394,11 @@ void App::run(const std::string& host, uint16_t port) {
     // Shared pool for route handlers with no `await` at all: pure CPU-bound
     // work (see BlockingAwaitable, blocking_pool.hpp) that would otherwise
     // run inline on whichever core's loop accepted the connection, blocking
-    // it from serving anyone else meanwhile. Sized to the same core count as
-    // the event loops themselves -- this is CPU-bound work, not blocking
-    // I/O, so oversubscribing would just add scheduling noise, not throughput.
+    // it from serving anyone else meanwhile. Core-count core workers plus a
+    // small measured-not-guessed overflow ceiling (BlockingPool::start's own
+    // default, core+8) -- see blocking_pool.hpp for the actual numbers this
+    // was picked from: it is the knee of a real variance-vs-typical-case-cost
+    // curve, not a round number.
     blocking_pool().start(num_threads);
 
     // Shared connection counter — enforces max_connections_ across all threads.

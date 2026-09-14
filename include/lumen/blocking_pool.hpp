@@ -1,4 +1,5 @@
 #pragma once
+#include <chrono>
 #include <condition_variable>
 #include <coroutine>
 #include <functional>
@@ -30,22 +31,61 @@ namespace lumen {
 // running their equivalent routes on a work-stealing blocking-thread pool
 // (tokio::task::spawn_blocking), confirmed by reading their handler source
 // directly rather than assumed.
+//
+// Core count is not the right size in EITHER direction, measured, not
+// assumed: pinned at core count, a burst of concurrent CPU-bound requests
+// above that count has nowhere to go but wait -- rare, but when it happens
+// the wait can be tens of milliseconds (confirmed: 10 trials, p99 CV 4.5%,
+// but max CV 50.8%, one outlier of 137ms against a typical 40-70ms). Pinned
+// much higher instead (tested at 8x core count) closes that gap (max CV
+// 8.5%) but nearly DOUBLES the typical case (p99 30ms -> 56ms) -- that many
+// permanently-live threads fighting the same core count for CPU adds real
+// scheduling overhead to every request, not just the rare bursty one.
+//
+// So: a small set of CORE workers (sized to the core count) that live for
+// the process's whole lifetime, plus a SMALL, capped set of OVERFLOW
+// workers spun up on demand when the queue backs up faster than idle core
+// workers can drain it, exiting on their own after sitting idle past
+// kOverflowIdleTimeout. Shape borrowed from tokio's own blocking pool (a
+// fixed async worker count, plus an elastic, keep-alive-timed pool for
+// spawn_blocking) -- but NOT its size: tokio defaults that pool's cap to
+// 512, unbounded in practice. Tried matching that shape here first,
+// uncapped-ish (8x core count) -- under SUSTAINED concurrent load (as
+// opposed to a genuinely brief, then-idle burst) it grew almost as large as
+// a permanently-oversubscribed fixed pool and paid almost the same typical-
+// case cost (p99 52ms vs the naive fixed-128 test's 56ms, both far worse
+// than core-count-only's 30ms) for no real variance advantage over a much
+// smaller cap. The app.cpp call site caps it at core_count+8 instead: most
+// of the max-CV improvement (50.8% -> 14.9%, measured, not assumed) for a
+// much smaller typical-case cost (p99 30ms -> 39ms) than either extreme.
+// See app.cpp for the actual numbers this was picked from.
 class BlockingPool {
 public:
     ~BlockingPool();
 
-    void start(size_t workers);
+    void start(size_t core_workers, size_t max_workers = 0);
     void submit(std::function<void()> job);
     void stop();
 
-    size_t size() const { return threads_.size(); }
+    // Core worker count -- used by BlockingAwaitable to check "has anyone
+    // started this pool at all", not affected by overflow workers coming
+    // and going.
+    size_t size() const { return core_workers_; }
 
 private:
-    std::vector<std::thread>       threads_;
+    static constexpr auto kOverflowIdleTimeout = std::chrono::seconds(2);
+
+    void worker_loop(bool overflow);
+
+    std::vector<std::thread>          threads_;   // core workers, joined in stop()
     std::queue<std::function<void()>> jobs_;
-    std::mutex                     mutex_;
-    std::condition_variable        cv_;
-    bool                           stopping_ = false;
+    std::mutex                        mutex_;
+    std::condition_variable           cv_;
+    bool                               stopping_     = false;
+    size_t                             core_workers_ = 0;
+    size_t                             max_workers_  = 0;
+    size_t                             live_workers_ = 0;  // core + overflow, mutex-guarded
+    size_t                             idle_workers_ = 0;  // currently waiting for a job
 };
 
 // One pool for the whole process -- every event loop's synchronous routes
