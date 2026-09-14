@@ -1,0 +1,36 @@
+{
+  "name": "lumen-script",
+  "displayName": "Lumen Script",
+  "description": "Syntax highlighting and language configuration for Lumen Script (.lum)",
+  "version": "0.1.0",
+  "publisher": "lumen",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "lumen",
+        "aliases": [
+          "Lumen Script",
+          "lumen"
+        ],
+        "extensions": [
+          ".lum"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "lumen",
+        "scopeName": "source.lumen",
+        "path": "./syntaxes/lumen.tmLanguage.json"
+      }
+    ]
+  }
+}

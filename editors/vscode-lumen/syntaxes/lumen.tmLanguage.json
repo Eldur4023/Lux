@@ -1,0 +1,184 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Lumen Script",
+  "scopeName": "source.lumen",
+  "fileTypes": ["lum"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#triple-strings" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords-route" },
+    { "include": "#keywords-on-error" },
+    { "include": "#keywords-control" },
+    { "include": "#keywords-declaration" },
+    { "include": "#constants" },
+    { "include": "#storage-types" },
+    { "include": "#reserved-objects" },
+    { "include": "#arrow" },
+    { "include": "#functions" },
+    { "include": "#type-names" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.lumen",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "triple-strings": {
+      "name": "string.quoted.triple.lumen",
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.lumen",
+          "match": "\\\\[ntr0\"\\\\]"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.lumen",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.lumen",
+          "match": "\\\\[ntr0\"\\\\]"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.lumen",
+          "match": "\\b\\d+\\.\\d+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.lumen",
+          "match": "\\b\\d+\\b"
+        }
+      ]
+    },
+    "keywords-route": {
+      "patterns": [
+        {
+          "name": "keyword.control.route.lumen",
+          "match": "\\b(get|post|put|patch|delete|any|sse|ws)\\b(?=\\s+endpoint\\b)"
+        },
+        {
+          "name": "keyword.control.route.lumen",
+          "match": "\\bendpoint\\b"
+        },
+        {
+          "name": "keyword.other.route-modifier.lumen",
+          "match": "\\borigins\\b"
+        }
+      ]
+    },
+    "keywords-on-error": {
+      "name": "keyword.control.error-handler.lumen",
+      "match": "\\bon\\s+error\\b"
+    },
+    "keywords-control": {
+      "patterns": [
+        {
+          "name": "keyword.control.lumen",
+          "match": "\\b(if|elif|else|while|for|in|return|require|try|catch|break|continue|and|or|not)\\b"
+        }
+      ]
+    },
+    "keywords-declaration": {
+      "patterns": [
+        {
+          "name": "keyword.other.declaration.lumen",
+          "match": "\\b(import|class|fn|app|group|validate|spa)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "name": "constant.language.lumen",
+      "match": "\\b(true|false|null)\\b"
+    },
+    "storage-types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.lumen",
+          "match": "\\b(int|long|float|double|bool|string|void)\\b"
+        },
+        {
+          "name": "support.type.native.lumen",
+          "match": "\\b(Json|List|Dict|File)\\b"
+        }
+      ]
+    },
+    "reserved-objects": {
+      "patterns": [
+        {
+          "name": "variable.language.lumen",
+          "match": "\\b(request|session|state|jwt|log|this)\\b"
+        },
+        {
+          "name": "variable.language.lumen",
+          "match": "\\b(sse|ws|error)\\b(?=\\s*\\.)"
+        }
+      ]
+    },
+    "arrow": {
+      "name": "keyword.operator.arrow.lumen",
+      "match": "->"
+    },
+    "functions": {
+      "name": "entity.name.function.lumen",
+      "match": "\\b([a-z_][a-zA-Z0-9_]*)\\b(?=\\s*\\()"
+    },
+    "type-names": {
+      "name": "entity.name.type.lumen",
+      "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.lumen",
+          "match": "(==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.increment.lumen",
+          "match": "(\\+\\+|--)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.lumen",
+          "match": "(\\+|-|\\*|/|%)"
+        },
+        {
+          "name": "keyword.operator.ternary.lumen",
+          "match": "(\\?|:)"
+        },
+        {
+          "name": "keyword.operator.assignment.lumen",
+          "match": "="
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.lumen",
+          "match": ","
+        },
+        {
+          "name": "punctuation.accessor.lumen",
+          "match": "\\."
+        },
+        {
+          "name": "punctuation.section.brackets.lumen",
+          "match": "[\\[\\]{}()]"
+        }
+      ]
+    }
+  }
+}
