@@ -1,8 +1,8 @@
 # Native modules — extending Lumen Script beyond the language core
 
 > How `import <name>` grows beyond the database drivers (`sqlite`/`postgres`/`mysql`) into a
-> general mechanism for adding capability to Lumen Script — `hash`, `csv` and `pdf` today, more
-> tomorrow — and a step-by-step guide for building one. Companion to
+> general mechanism for adding capability to Lumen Script — `hash`, `csv`, `pdf` and `http`
+> today, more tomorrow — and a step-by-step guide for building one. Companion to
 > [COMPILACION-NATIVA.md](COMPILACION-NATIVA.md) (native *compilation*, a different thing) and
 > [GUIDE.md](GUIDE.md) (using an application once it is built).
 
@@ -229,6 +229,62 @@ version 1.7", `pdfinfo` reports the right page count and page size, `pdftotext` 
 exact text placed on each page, and `pdftoppm` rasterizes it to confirm the shapes and colors
 land where they were drawn, not just that *something* got written.
 
+**`http`** (`src/lumen_script/module_http.cpp`) — outbound `GET`/`POST`/`PUT`/`PATCH`/`DELETE`,
+built on libcurl — proved the fourth case: a dependency that could not be a narrow "if it's not
+there, skip the module" story, because it forces a real, deliberate exception to a stated
+project principle.
+
+```lum
+import http
+
+get endpoint("/weather/:city", string city):
+    Json r = http.get("https://api.example.com/weather?city=" + city)
+    return r["body"]
+```
+
+`README.md`/`CMakeLists.txt` commit Lumen to never linking TLS — but that principle is about not
+being an *inbound* TLS terminator ("TLS belongs to the reverse proxy"); it says nothing about
+outbound calls, because there is no reverse proxy sitting between Lumen and a third-party HTTPS
+API to delegate to. Without real TLS, `http.get()` could not reach almost any API written since
+~2018. The resolution — discussed with, and chosen by, whoever owns that principle rather than
+quietly overridden — is libcurl: it brings its own mature TLS backend, used here with its secure
+defaults never made configurable to "off" from a route (`CURLOPT_SSL_VERIFYPEER`/
+`CURLOPT_SSL_VERIFYHOST` always on). The original principle stays intact for the inbound/server
+side, which is what it was actually protecting.
+
+A response comes back as `{"status", "headers", "body"}` — `body` parsed as JSON when the
+response looks like JSON (the same `Value::parse_json()` every incoming request body already
+goes through, applied symmetrically), the raw text otherwise. A request body follows the same
+rule in reverse: a `string` argument is sent exactly as given; anything else (a `Dict`, a
+`List`) is JSON-serialized automatically with `Content-Type: application/json` set, unless the
+caller's own headers already set one.
+
+The one limitation that is not theoretical here, unlike for the first three modules: **every
+native module call is synchronous** (§2) — a slow remote server blocks the calling event-loop
+thread for the whole request, bounded by a fixed 15s timeout so a hung server cannot pin it
+forever, but still a real cost under load that `hash`/`csv`/`pdf` never had to pay (all three
+finish in microseconds regardless). A genuinely non-blocking `http.*` needs the same kind of
+worker-pool-plus-`await` plumbing `DbDriver` already has, generalized to native modules — real,
+substantial future work (§6), not something to bolt on quietly inside what was asked for as "an
+http module."
+
+*A verification note specific to this module:* it could not be built through the normal CMake
+path in the environment this was developed in (no `libcurl4-openssl-dev`, no root to install
+it) — the module still gracefully reports itself missing (confirmed: `import http` on such a
+build gives the same "not compiled into this binary" error any other absent module gives, and
+`tests/run_http.sh`'s ctest entry skips with `SKIP_RETURN_CODE 77`, verified by actually forcing
+that path, not assumed). The module's actual HTTP behavior was still verified for real, not
+skipped: real curl 8.5.0 headers (matching the system's installed runtime `.so`) were fetched
+straight from curl's own source repository, `module_http.cpp` was compiled and linked against
+them and the system's `libcurl.so.4` directly (bypassing only the missing `-dev` symlink, not
+curl itself), and the resulting real binary was run against a local echo server
+(`tests/http_echo_server.py`) — the exact compiled code this file describes, not a
+reimplementation of it, exercising every verb, header round-tripping, automatic JSON body
+serialization versus raw-string passthrough, status-code passthrough, and a genuine connection-
+refused error. On a machine with `libcurl4-openssl-dev` actually installed, `ctest -R http` (or
+`tests/run_http.sh`) is the same suite via the normal path — this workaround will not be needed
+there.
+
 ## 5. How to add a module — a worked walkthrough
 
 Say the next module is `qrcode` (`qrcode.generate(text) -> string`, no third-party dependency —
@@ -325,9 +381,12 @@ the archive's now-unresolved symbols.
 - **No per-argument static type checking.** Arity only, matching the existing convention for
   every other call shape that is not a `BuiltinMethodCall` on a value of statically-known type
   (§3.3) — not a gap unique to native modules.
-- **No async modules.** Every function is synchronous by construction (§2). A module that
-  genuinely needs to suspend (a network call, say) would need its own worker-pool story, closer
-  to `DbDriver`'s — not designed here, and not needed by anything built so far.
+- **No async modules.** Every function is synchronous by construction (§2) — theoretical for
+  `hash`/`csv`/`pdf` (microseconds regardless), real for `http`: a slow remote server blocks the
+  calling event-loop thread for the request's duration, bounded by a fixed timeout but still a
+  genuine cost under load (§4). A module that needs to suspend properly would need its own
+  worker-pool story, closer to `DbDriver`'s, generalized to native modules — the clearest
+  concrete next phase this document points to, not designed here.
 - **No native (`--native`) codegen for any module function yet.** Deliberate and safe (§3.4),
   not an oversight — falls back to bytecode per route, cleanly, with the fallback verified
   against the real binary rather than assumed.
@@ -349,5 +408,15 @@ without it: `tests/cases/pdf.lum` + `tests/run_pdf.sh`, its own `pdf` ctest entr
 happy path, the three error paths (unknown handle, drawing after the document is finished,
 double `close()`), and — the one that actually matters — decodes the route's real base64 output
 and confirms the bytes start with `%PDF-`, not just that *a* response came back.
+
+`http` follows the same optional-dependency pattern (`LUMEN_HTTP`, libcurl): its own
+`tests/cases/http.lum` + `tests/run_http.sh` + ctest entry, calling a local echo server
+(`tests/http_echo_server.py`) instead of the real internet so the suite is deterministic and
+network-flake-free while still exercising a real TCP connection and a real HTTP/1.1 round trip.
+Covers every verb, header round-tripping, the JSON-vs-raw-string body distinction, status-code
+passthrough, and both real error paths (a malformed URL, a refused connection). Both the skip
+path and the happy path were verified by actually forcing them, not assumed — see §4's
+verification note on `http` for how the happy path was confirmed on a machine that could not
+run the normal build (no `libcurl4-openssl-dev`, no root to install it).
 
 `ctest` after building runs everything above along with the rest of the suite.

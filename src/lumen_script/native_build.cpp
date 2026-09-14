@@ -314,6 +314,10 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // ("-lcairo -lpixman-1..."), and quoting it would turn them into one.
     cmd << " " << LUMEN_NATIVE_CAIRO_LIBS;
 #endif
+#ifdef LUMEN_NATIVE_CURL_LIBS
+    // Same reasoning, same fix, for module_http.cpp/libcurl.
+    cmd << " " << LUMEN_NATIVE_CURL_LIBS;
+#endif
     // liblumen.a: SOLO si hay rutas -- una funcion suelta nunca usa
     // lumen::Task/lumen::Response, asi que nunca deja un simbolo de lumen
     // sin resolver. Orden importante para un enlazado estatico: DESPUES de

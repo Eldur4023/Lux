@@ -39,7 +39,11 @@ stop_server() {
 trap 'stop_server; rm -rf "$TMP"' EXIT
 
 if ! "$LUMEN" --check "$HERE/cases/pdf.lum" > "$TMP/check" 2>&1; then
-    if grep -q "pdf" "$TMP/check" && grep -q "import" "$TMP/check"; then
+    # The exact wording project.cpp uses when LUMEN_PDF was off/cairo was
+    # missing at build time -- NOT "...contains 'import'" (that never
+    # matches this message; caught while adding the http module's own suite
+    # and finding this one had never really been exercised either).
+    if grep -q "module 'pdf' is not compiled into this binary" "$TMP/check"; then
         grey "pdf: the binary was built without the module — suite skipped"
         exit 77
     fi

@@ -1013,9 +1013,9 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, three
-so far. Unlike a DB module, a native module is always synchronous (no `await`) and usually
-needs no `<name>: { ... }` block in `app:` at all:
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, four
+so far. Every one but `http` is synchronous (no `await`) and usually needs no
+`<name>: { ... }` block in `app:` at all:
 
 - **`hash`** — `sha256(s)`, `hmac_sha256(key, msg)`, `random_hex(n)`, all hex-encoded.
 - **`csv`** — parse, filter (`filter_eq`/`filter_gt`/`filter_lt`/`filter_ge`/`filter_le`/
@@ -1029,11 +1029,23 @@ needs no `<name>: { ... }` block in `app:` at all:
   to disk or as a string ready to send in an HTTP response. Needs cairo at build time
   (`LUMEN_PDF`, on by default when `libcairo2-dev` is present) — check your build's startup log
   or `lumen --check` if `import pdf` reports itself missing.
+- **`http`** — outbound `get(url)`/`post(url, body)`/`put`/`patch`/`delete`, each with an
+  optional trailing headers `Dict`. Returns `{"status", "headers", "body"}` — `body` parsed as
+  JSON when the response looks like JSON, the raw text otherwise. A request body that is a
+  `string` is sent as-is; anything else (a `Dict`, say) is JSON-serialized automatically with
+  `Content-Type: application/json` set. Speaks real HTTPS (libcurl, `LUMEN_HTTP`, needs
+  `libcurl4-openssl-dev`) — the one deliberate, narrow exception to "Lumen never links TLS": that
+  principle is about not terminating TLS on the *inbound* side, which an outbound client has no
+  reverse proxy to delegate to. **Blocks the calling thread for the duration of the request**
+  (bounded by a fixed 15s timeout) — every native module is synchronous today (see
+  [NATIVE-MODULES.md](NATIVE-MODULES.md) §2), and this is the one module where that is a real
+  cost, not a theoretical one, under real concurrent load.
 
 ```lum
 import hash
 import csv
 import pdf
+import http
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -1046,6 +1058,10 @@ get endpoint("/invoice"):
     int doc = pdf.create(595, 842)
     pdf.text(doc, 50, 50, "Invoice", 24)
     return { "pdf_base64": pdf.to_base64(doc) }
+
+get endpoint("/weather/:city", string city):
+    Json r = http.get("https://api.example.com/weather?city=" + city)
+    return r["body"]
 ```
 
 Using a module it does not recognize, or one not `import`ed, is a compile error, the same as an

@@ -38,6 +38,7 @@ option(LUMEN_SQLITE   "Modulo sqlite"                                   ON)
 option(LUMEN_POSTGRES "Modulo postgres (libpq)"                         ON)
 option(LUMEN_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
 option(LUMEN_PDF      "Native module: pdf (cairo)"                      ON)
+option(LUMEN_HTTP     "Native module: http (libcurl)"                   ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
 # Lumen links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
@@ -230,6 +231,35 @@ if(LUMEN_PDF)
         message(STATUS "pdf module: SKIPPED (libcairo2-dev missing)")
     endif()
 endif()
+
+# `http` (NATIVE-MODULES.md): outbound HTTP(S) client on libcurl -- an
+# explicit, narrow exception to "Lumen never links TLS" (see that comment
+# at the top of this file): that principle is about not being an INBOUND
+# TLS terminator, which does not and cannot extend to outbound calls (there
+# is no reverse proxy between Lumen and a third-party HTTPS API). libcurl
+# brings a mature TLS backend rather than Lumen hand-rolling one.
+if(LUMEN_HTTP)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(LUMEN_CURL QUIET libcurl)
+    endif()
+    if(LUMEN_CURL_FOUND)
+        target_sources(lumen_script PRIVATE src/lumen_script/module_http.cpp)
+        target_compile_definitions(lumen_script PRIVATE LUMEN_HTTP)
+        target_include_directories(lumen_script PRIVATE ${LUMEN_CURL_INCLUDE_DIRS})
+        target_link_libraries(lumen_script PRIVATE ${LUMEN_CURL_LIBRARIES})
+        # Same reason as LUMEN_NATIVE_CAIRO_LIBS just above: every --native
+        # .so links the whole liblumen_script.a, so module_http.cpp's curl
+        # references need curl's link flags on EVERY --native build, not
+        # only one that happens to use `http`.
+        list(JOIN LUMEN_CURL_LDFLAGS " " LUMEN_CURL_LDFLAGS_STR)
+        target_compile_definitions(lumen_script PRIVATE
+            LUMEN_NATIVE_CURL_LIBS="${LUMEN_CURL_LDFLAGS_STR}")
+        message(STATUS "http module: enabled")
+    else()
+        message(STATUS "http module: SKIPPED (libcurl4-openssl-dev missing)")
+    endif()
+endif()
 target_compile_options(lumen_script PRIVATE -Wall -Wextra)
 
 # The Lumen binary.
@@ -368,6 +398,13 @@ add_test(NAME pdf
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_pdf.sh $<TARGET_FILE:lumen-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(pdf PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# The `http` native module needs libcurl (LUMEN_HTTP) -- same skip-if-missing
+# pattern as pdf/sqlite/postgres/mysql above.
+add_test(NAME http
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_http.sh $<TARGET_FILE:lumen-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(http PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # ── Fuzzing ───────────────────────────────────────────────────────────────────
 # No sanitizer flags here on purpose: for ASan/UBSan to be worth anything they
