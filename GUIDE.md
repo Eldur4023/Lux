@@ -933,6 +933,7 @@ string role = age >= 18 ? "adult" : "minor"
 | `status(code)` `redirect(target[, code])` `send_file(path)` | |
 | `len(v)` | Size of a string, List or Dict |
 | `str(v)` `int(v)` | Explicit conversion |
+| `range(n)` `range(start, end)` `range(start, end, step)` | A `List<int>`, Python's `range()` shape |
 | `header(name[, default])` | Request header |
 | `query(name[, default])` | Query parameter |
 | `cookie(name[, default])` | Request cookie |
@@ -1046,7 +1047,7 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, seven
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, eight
 so far. Every one but `http` is synchronous (no `await`) and usually needs no
 `<name>: { ... }` block in `app:` at all:
 
@@ -1087,6 +1088,13 @@ so far. Every one but `http` is synchronous (no `await`) and usually needs no
   `parse(s, strftime_fmt)`/`parse_iso(s)` — the last two are `null`, not an error, when `s`
   does not match. Being a plain `int` means duration arithmetic ("5 minutes from now") is just
   `time.now() + 5 * 60 * 1000` — the language's own `+` already does it, no method needed.
+- **`regex`** — `test(pattern, text)` (bool), `find`/`find_all` (first match / every match, as
+  strings), `groups(pattern, text)` (a `List` — index 0 is the whole match, 1.. are capture
+  groups — or `null` on no match), `replace(pattern, text, replacement)` (every match, `$1`/`$2`
+  backreferences), `split(pattern, text)`. ECMAScript syntax (`std::regex`'s default grammar) —
+  close enough to Python's `re` that most patterns copied from either work unchanged. Compiles
+  the pattern fresh on every call, no caching — fine for the microsecond-scale patterns most
+  routes need, a real (not yet addressed) repeated cost for a complex one reused very often.
 
 ```lum
 import hash
@@ -1096,6 +1104,7 @@ import http
 import os
 import math
 import time
+import regex
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -1118,6 +1127,9 @@ get endpoint("/token/:ttl_minutes", int ttl_minutes):
     int expires = time.now() + ttl_minutes * 60 * 1000
     os.write_file(os.path_join(os.getenv("TOKEN_DIR", "/tmp"), id), str(expires))
     return { "id": id, "expires_iso": time.format_iso(expires) }
+
+get endpoint("/valid_email/:s", string s):
+    return { "valid": regex.test("^[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}$", s) }
 ```
 
 Using a module it does not recognize, or one not `import`ed, is a compile error, the same as an

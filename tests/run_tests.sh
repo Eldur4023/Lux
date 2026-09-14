@@ -202,6 +202,13 @@ check "map/filter chain"       GET /list_map_filter_chain 200 '"r":[4,8,12,16]'
 check "callback nesting does not corrupt outer call" GET /list_map_nested 200 '"r":[3,7]'
 check "await inside a map() callback is rejected" GET /list_map_await_rejected 500 'used `await`, which is not supported'
 
+check "range(n)"              GET /range 200 '"one_arg":[0,1,2,3,4]'
+check "range(start, end)"     GET /range 200 '"two_args":[2,3,4,5]'
+check "range with step"       GET /range 200 '"step":[0,2,4,6,8]'
+check "range with negative step" GET /range 200 '"negative_step":[5,4,3,2,1]'
+check "range() in a for loop" GET /range_for_loop 200 '"total":10'
+check "range() rejects step 0" GET /range_bad_step 500 'step cannot be 0'
+
 echo "== routes and parameters =="
 start_server "$HERE/cases/routes.lum" || exit 1
 check "path parameter"   GET /echo/42           200 '"id":42'
@@ -327,6 +334,15 @@ check "time.now/now_seconds"       GET /time/basic  200 '"n_positive":true,"s_po
 check "time.format_iso/format epoch0" GET /time/basic 200 '"iso_epoch0":"1970-01-01T00:00:00Z","custom_epoch0":"1970-01-01"'
 check "time.parse_iso roundtrip"   GET /time/parse  200 '"parsed_epoch0":0'
 check "time.parse_iso invalid is null" GET /time/parse 200 '"bad_is_null":true'
+
+check "regex.test"             GET /regex/test  200 '"yes":true,"no":false'
+check "regex.find"             GET /regex/find  200 '"found":"123","missing":null'
+check "regex.find_all"         GET /regex/find_all 200 '"all":["1","22","333"]'
+check "regex.groups"           GET /regex/groups 200 '"g":["bob@example.com","bob","example"]'
+check "regex.replace"          GET /regex/replace 200 '"r":"a# b# c#"'
+check "regex.replace backreferences" GET /regex/replace_backref 200 '"r":"host@user"'
+check "regex.split"            GET /regex/split 200 '"r":["a","b","c","d"]'
+check "regex rejects an invalid pattern" GET /regex/bad_pattern 500 'invalid regex pattern'
 
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lum"

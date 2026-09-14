@@ -11,6 +11,7 @@ import csv
 import os
 import math
 import time
+import regex
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -123,3 +124,27 @@ get endpoint("/time/parse"):
     Json parsed = time.parse_iso("1970-01-01T00:00:00Z")
     Json bad = time.parse_iso("not a date")
     return { "parsed_epoch0": parsed, "bad_is_null": bad == null }
+
+get endpoint("/regex/test"):
+    return { "yes": regex.test("[0-9]+", "abc123"), "no": regex.test("^[0-9]+$", "abc123") }
+
+get endpoint("/regex/find"):
+    return { "found": regex.find("[0-9]+", "abc123def"), "missing": regex.find("[0-9]+", "abcdef") }
+
+get endpoint("/regex/find_all"):
+    return { "all": regex.find_all("[0-9]+", "a1 b22 c333") }
+
+get endpoint("/regex/groups"):
+    return { "g": regex.groups("(\\w+)@(\\w+)\\.com", "hi bob@example.com bye") }
+
+get endpoint("/regex/replace"):
+    return { "r": regex.replace("[0-9]+", "a1 b22 c333", "#") }
+
+get endpoint("/regex/replace_backref"):
+    return { "r": regex.replace("(\\w+)@(\\w+)", "user@host", "$2@$1") }
+
+get endpoint("/regex/split"):
+    return { "r": regex.split("\\s*,\\s*", "a, b,c ,  d") }
+
+get endpoint("/regex/bad_pattern"):
+    return { "r": regex.test("(unclosed", "x") }

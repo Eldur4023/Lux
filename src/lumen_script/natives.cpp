@@ -175,6 +175,30 @@ Value fn_int(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::null();
 }
 
+// range(n) -> [0, n); range(start, end) -> [start, end); range(start, end,
+// step) -> stepped, matching Python's range() shape (the one language
+// Lumen Script draws its other iteration/truthiness rules from too, see
+// GUIDE.md's Truthiness section). Eager, not lazy: it builds the whole
+// List up front, exactly what `for x in [1, 2, 3]` already does over a
+// literal, and there is no lazy-sequence concept anywhere else in the
+// language to make range() the one exception to.
+Value fn_range(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    for (auto& a : args)
+        if (!a.is_int()) { error = "range() expects int arguments"; return Value::null(); }
+
+    long long start = 0, end, step = 1;
+    if (args.size() == 1)      end = args[0].as_int();
+    else if (args.size() == 2) { start = args[0].as_int(); end = args[1].as_int(); }
+    else                       { start = args[0].as_int(); end = args[1].as_int(); step = args[2].as_int(); }
+
+    if (step == 0) { error = "range(): step cannot be 0"; return Value::null(); }
+
+    Value::List out;
+    if (step > 0) for (long long i = start; i < end; i += step) out.push_back(Value::integer(i));
+    else          for (long long i = start; i > end; i += step) out.push_back(Value::integer(i));
+    return Value::list(std::move(out));
+}
+
 Value fn_header(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "header() expects the name as a string"; return Value::null(); }
     auto h = ctx.req.header(args[0].as_str());
@@ -388,7 +412,7 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 49> kNatives = {{
+const std::array<NativeDef, 50> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -402,6 +426,7 @@ const std::array<NativeDef, 49> kNatives = {{
     {"len",       1, 1,  fn_len},
     {"str",       1, 1,  fn_str},
     {"int",       1, 1,  fn_int},
+    {"range",     1, 3,  fn_range},
     // Request
     {"header",    1, 2,  fn_header},
     {"query",     1, 2,  fn_query},

@@ -12,6 +12,7 @@ std::unique_ptr<BuiltinModule> make_csv_module();
 std::unique_ptr<BuiltinModule> make_os_module();
 std::unique_ptr<BuiltinModule> make_math_module();
 std::unique_ptr<BuiltinModule> make_time_module();
+std::unique_ptr<BuiltinModule> make_regex_module();
 #ifdef LUMEN_PDF
 std::unique_ptr<BuiltinModule> make_pdf_module();
 #endif
@@ -25,6 +26,7 @@ BuiltinModuleRegistry::BuiltinModuleRegistry() {
     { Slot s; s.module = make_os_module();   slots_["os"]   = std::move(s); }
     { Slot s; s.module = make_math_module(); slots_["math"] = std::move(s); }
     { Slot s; s.module = make_time_module(); slots_["time"] = std::move(s); }
+    { Slot s; s.module = make_regex_module(); slots_["regex"] = std::move(s); }
 #ifdef LUMEN_PDF
     { Slot s; s.module = make_pdf_module();  slots_["pdf"]  = std::move(s); }
 #endif
