@@ -1,8 +1,8 @@
 {
   "name": "lumen-script",
   "displayName": "Lumen Script",
-  "description": "Syntax highlighting and language configuration for Lumen Script (.lum)",
-  "version": "0.1.0",
+  "description": "Syntax highlighting, diagnostics and completion for Lumen Script (.lum)",
+  "version": "0.2.0",
   "publisher": "lumen",
   "license": "SEE LICENSE IN ../../LICENSE",
   "engines": {
@@ -10,6 +10,10 @@
   },
   "categories": [
     "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:lumen"
   ],
   "contributes": {
     "languages": [
@@ -31,6 +35,29 @@
         "scopeName": "source.lumen",
         "path": "./syntaxes/lumen.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Lumen Script",
+      "properties": {
+        "lumen.compilerPath": {
+          "type": "string",
+          "default": "lumen",
+          "description": "Path to the 'lumen' compiler binary used for diagnostics (defaults to 'lumen' on PATH; point this at your build's ./build/lumen during development)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p . && npm run compile --prefix server",
+    "watch": "tsc -p . --watch"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "@types/vscode": "^1.75.0",
+    "@types/node": "^20.0.0"
   }
 }

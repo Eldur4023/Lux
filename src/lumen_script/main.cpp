@@ -3,6 +3,7 @@
 #include <lumen_script/vm.hpp>
 #include <lumen_script/autotest.hpp>
 #include <lumen_script/db.hpp>
+#include <lumen_script/value.hpp>
 
 #include <lumen/app.hpp>
 #include <lumen/middleware.hpp>
@@ -54,6 +55,10 @@ void usage() {
         "\n"
         "options:\n"
         "  --check         compile and exit, without starting the server\n"
+        "  --json          like --check, but the diagnostics (if any) print to\n"
+        "                  stdout as a JSON array [{file,line,col,message}],\n"
+        "                  instead of the human-readable format -- meant for\n"
+        "                  tooling (see editors/vscode-lumen), not for reading\n"
         "  --port N        override the port from the app: block\n"
         "  --no-watch      do not watch files for changes\n"
         "  --verbose       log every incoming request to the console\n"
@@ -118,12 +123,13 @@ void watch_loop(std::vector<fs::path> inputs) {
 
 int main(int argc, char** argv) {
     std::vector<std::string> args;
-    bool check_only = false, watch = true, verbose = false, native = false;
+    bool check_only = false, watch = true, verbose = false, native = false, json_output = false;
     int  port_override = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if      (a == "--check")    check_only = true;
+        else if (a == "--json")     { check_only = true; json_output = true; }
         else if (a == "--no-watch") watch = false;
         else if (a == "--verbose")  verbose = true;
         else if (a == "--native")   { native = true; watch = false; }
@@ -147,12 +153,41 @@ int main(int argc, char** argv) {
     std::vector<fs::path> inputs;
     std::string error;
     if (!lumen_script::resolve_inputs(args, inputs, error)) {
+        if (json_output) {
+            lumen_script::Value::List one;
+            lumen_script::Value::Dict d;
+            d["file"] = lumen_script::Value::str("");
+            d["line"] = lumen_script::Value::integer(0);
+            d["col"]  = lumen_script::Value::integer(0);
+            d["message"] = lumen_script::Value::str("lumen: " + error);
+            one.push_back(lumen_script::Value::dict(std::move(d)));
+            std::cout << lumen_script::Value::list(std::move(one)).to_json_text() << "\n";
+            return 2;
+        }
         std::cerr << "lumen: " << error << "\n";
         return 2;
     }
 
     lumen_script::DiagnosticBag diags;
     auto mod = lumen_script::compile(inputs, diags, native);
+    if (json_output) {
+        // Un unico camino de salida, reusando el mismo Value/to_json_text()
+        // que ya sirve cualquier respuesta HTTP -- nada de un serializador
+        // JSON aparte solo para esto. Vacio ([]) en exito: el cliente LSP
+        // (editors/vscode-lumen) siempre puede parsear stdout como JSON, sin
+        // distinguir "sin errores" de "no hay salida".
+        lumen_script::Value::List items;
+        for (const auto& diag : diags.items()) {
+            lumen_script::Value::Dict d;
+            d["file"] = lumen_script::Value::str(diag.loc.file ? *diag.loc.file : std::string());
+            d["line"] = lumen_script::Value::integer(diag.loc.line);
+            d["col"]  = lumen_script::Value::integer(diag.loc.col);
+            d["message"] = lumen_script::Value::str(diag.message);
+            items.push_back(lumen_script::Value::dict(std::move(d)));
+        }
+        std::cout << lumen_script::Value::list(std::move(items)).to_json_text() << "\n";
+        return diags.empty() ? 0 : 1;
+    }
     if (!diags.empty()) {
         std::cerr << lumen_script::format_errors(diags, mod->files)
                   << "\n" << diags.size() << " error(s)\n";
