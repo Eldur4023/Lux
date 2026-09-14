@@ -8,6 +8,7 @@
 # it belongs in the always-runs regression suite too.
 import hash
 import csv
+import os
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -58,3 +59,40 @@ get endpoint("/csv/closed_handle"):
     csv.close(h)
     List<Json> rows = csv.rows(h)
     return { "unreachable": rows }
+
+get endpoint("/os/env"):
+    string missing = os.getenv("LUMEN_DEFINITELY_NOT_SET_XYZ", "fallback")
+    Json present = os.getenv("LUMEN_TEST_TMP")
+    return { "missing_uses_default": missing, "present_is_not_null": present != null }
+
+get endpoint("/os/path"):
+    string joined = os.path_join("a", "b", "c.txt")
+    string base = os.path_basename("/x/y/z.txt")
+    string dir = os.path_dirname("/x/y/z.txt")
+    return { "joined": joined, "base": base, "dir": dir }
+
+get endpoint("/os/file_roundtrip"):
+    string tmp = os.getenv("LUMEN_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_test")
+    os.make_dir(dir)
+    string path = os.path_join(dir, "hello.txt")
+    os.write_file(path, "hola mundo")
+    bool existed_before = os.path_exists(path)
+    string content = os.read_file(path)
+    List<Json> entries = os.list_dir(dir)
+    bool removed = os.remove_file(path)
+    bool exists_after = os.path_exists(path)
+    return { "existed_before": existed_before, "content": content, "entries": entries,
+              "removed": removed, "exists_after": exists_after }
+
+get endpoint("/os/missing_file"):
+    Json content = os.read_file("/definitely/does/not/exist/xyz123")
+    return { "content_is_null": content == null }
+
+get endpoint("/os/run_echo"):
+    Json r = os.run("/bin/echo", ["hello", "from", "os.run"])
+    return r
+
+get endpoint("/os/run_missing"):
+    Json r = os.run("/definitely/not/a/real/command/xyz123")
+    return r

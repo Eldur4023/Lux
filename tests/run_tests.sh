@@ -17,6 +17,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 PORT=${LUMEN_TEST_PORT:-8790}
 SRV=""
+# For the `os` module's file-I/O tests (cases/modules.lum): a writable
+# scratch dir the server can see via os.getenv(), cleaned up by the same
+# trap that removes $TMP itself -- no test-only directory left behind.
+export LUMEN_TEST_TMP="$TMP"
 
 passed=0
 failed=0
@@ -276,6 +280,16 @@ check "csv.group_sum"              GET /csv/filter_and_aggregate  200 '"group":"
 check "csv quoted fields (RFC4180)" GET /csv/quoted               200 '"name":"Smith, John","note":"He said \"hi\""'
 check "csv.to_csv roundtrip"       GET /csv/roundtrip             200 'a,b\r\n1,2\r\n3,4\r\n'
 check "csv closed handle errors"   GET /csv/closed_handle         500 'unknown handle'
+
+check "os.getenv default"          GET /os/env                    200 '"missing_uses_default":"fallback"'
+check "os.getenv present"          GET /os/env                    200 '"present_is_not_null":true'
+check "os.path_join/basename/dirname" GET /os/path                200 '"joined":"a/b/c.txt","base":"z.txt","dir":"/x/y"'
+check "os file round-trip"         GET /os/file_roundtrip         200 '"content":"hola mundo"'
+check "os file round-trip cleans up" GET /os/file_roundtrip       200 '"removed":true,"exists_after":false'
+check "os.read_file missing is null, not an error" GET /os/missing_file 200 '"content_is_null":true'
+check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
+check "os.run exit status"         GET /os/run_echo               200 '"status":0'
+check "os.run missing command errors" GET /os/run_missing         500 'could not start'
 
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lum"
