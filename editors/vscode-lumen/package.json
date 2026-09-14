@@ -62,7 +62,7 @@
           },
           {
             "scope": "support.type.property-name.lumen",
-            "settings": { "foreground": "#CE9178" }
+            "settings": { "foreground": "#FFA657" }
           }
         ]
       }

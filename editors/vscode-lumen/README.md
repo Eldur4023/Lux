@@ -30,9 +30,12 @@ Syntax highlighting, live diagnostics and completion for `.lum` files. See
   isn't the one it actually intends for strings/functions. Sets
   `editor.semanticHighlighting.enabled: false` for `[lumen]` (there is no semantic data to
   lose) and a `textMateRules` default for `string.quoted.double.lumen`/
-  `string.quoted.triple.lumen` and `support.type.property-name.lumen` (both `#CE9178`) and
-  `entity.name.function.lumen` (`#DCDCAA`) — VS Code's own Dark+ colors for those roles, not
-  anything Lumen-specific. **A real limitation, not glossed over:** VS Code does not merge
+  `string.quoted.triple.lumen` (`#CE9178`), `support.type.property-name.lumen` (`#FFA657`),
+  and `entity.name.function.lumen` (`#DCDCAA`) — the first and third are VS Code's own Dark+
+  colors for those roles; the second matches GitHub Dark's `variable` color instead, chosen
+  to match `variable.parameter.lumen` (named call arguments, e.g. `title=` in
+  `render(..., title="...")`) which app-block config keys are meant to read as visually
+  related to, not identical to strings. **A real limitation, not glossed over:** VS Code does not merge
   `configurationDefaults` with a user's own `editor.tokenColorCustomizations` — a user
   setting for that key replaces the extension's default *entirely*, not just the rules that
   overlap. If you already customize `tokenColorCustomizations` for other languages, the
