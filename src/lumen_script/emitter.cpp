@@ -683,11 +683,27 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
         case ExprKind::Ident: {
             int slot = resolve_local(e.text);
             if (slot < 0) {
-                if (native_id(e.text) >= 0)
+                if (native_id(e.text) >= 0) {
                     shadow.error(e.loc, "'" + e.text + "' is a builtin: it must be called, "
                                  "not to use it as a value");
-                else
-                    shadow.error(e.loc, "'" + e.text + "' is not declared");
+                    return nullptr;
+                }
+                // Not a local, not a builtin -- a bare reference to a
+                // user-defined `fn` used as a VALUE (e.g. `list.map(my_func)`),
+                // not a call (`my_func()` never reaches here: ExprKind::Call
+                // does, via check_call/UserFunctionCall instead). No captured
+                // environment, no closure -- see Value::Type::Func's comment
+                // (value.hpp) for why that is a deliberate, smaller feature.
+                auto it = functions_ ? functions_->find(e.text) : FunctionSigs::const_iterator();
+                if (functions_ && it != functions_->end()) {
+                    auto r = nodo();
+                    r->kind = IrExprKind::FuncRef;
+                    r->text = e.text;
+                    r->call_index = static_cast<int>(it->second.index);
+                    r->type = Type::from_legacy_name("Func");
+                    return r;
+                }
+                shadow.error(e.loc, "'" + e.text + "' is not declared");
                 return nullptr;
             }
             auto r = nodo();
@@ -1477,6 +1493,15 @@ void Emitter::emit_expr(const IrExpr& e) {
             break;
         case IrExprKind::FloatLit:
             chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::real(e.float_value)));
+            break;
+        case IrExprKind::FuncRef:
+            // A function reference is a compile-time-known index, exactly
+            // like a string/int literal is a compile-time-known value -- so
+            // it rides the SAME Const/constant-pool mechanism instead of
+            // needing a new opcode: Value::func(index) just sits in the
+            // pool like any other Value.
+            chunk_->emit(Op::Const, e.loc,
+                        chunk_->add_constant(Value::func(e.call_index)));
             break;
         case IrExprKind::BoolLit:
             chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::boolean(e.bool_value)));

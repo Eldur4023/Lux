@@ -18,6 +18,7 @@ const char* Value::type_name() const {
         case Type::Str:   return "string";
         case Type::List:  return "List";
         case Type::Dict:  return "Dict";
+        case Type::Func:  return "Func";
     }
     return "?";
 }
@@ -36,6 +37,7 @@ std::string Value::to_string() const {
         case Type::Str:   return as_str();
         case Type::List:
         case Type::Dict:  return to_json_text();
+        case Type::Func:  return "<function>";
     }
     return {};
 }
@@ -297,6 +299,14 @@ void Value::write_json(std::string& out) const {
             out.push_back('}');
             return;
         }
+        // A function reference has no JSON representation -- silently
+        // written as null, the same thing JSON.stringify() does with a
+        // function value in JavaScript, rather than failing write_json()
+        // (which has no error channel; the caller already had every chance
+        // to keep a Func out of a JSON-returning context, since it is only
+        // ever meant to be passed to map()/filter()/reduce()/for_each(),
+        // never returned).
+        case Type::Func: out += "null"; return;
     }
     out += "null";
 }
@@ -328,6 +338,7 @@ bool Value::equals(const Value& o) const {
             }
             return true;
         }
+        case Type::Func: return i_ == o.i_;
         default: return false;
     }
 }

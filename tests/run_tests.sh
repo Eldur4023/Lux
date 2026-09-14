@@ -193,6 +193,15 @@ check "Dict.get present/missing" GET /dicts2 200 '"get_present":1,"get_missing":
 check "Dict.remove"            GET /dicts2   200 '"removed":true,"after_remove":{"b":2}'
 check "Dict.merge"             GET /dicts2   200 '"merged":{"x":1,"y":2}'
 
+check "bare fn name is a Func value, not null" GET /func_ref 200 '"is_not_null":true'
+check "List.map"               GET /list_map    200 '"doubled":[2,4,6,8]'
+check "List.filter"            GET /list_filter 200 '"evens":[2,4,6]'
+check "List.reduce"            GET /list_reduce 200 '"sum":15'
+check "List.for_each"          GET /list_for_each 200 '"total":6'
+check "map/filter chain"       GET /list_map_filter_chain 200 '"r":[4,8,12,16]'
+check "callback nesting does not corrupt outer call" GET /list_map_nested 200 '"r":[3,7]'
+check "await inside a map() callback is rejected" GET /list_map_await_rejected 500 'used `await`, which is not supported'
+
 echo "== routes and parameters =="
 start_server "$HERE/cases/routes.lum" || exit 1
 check "path parameter"   GET /echo/42           200 '"id":42'

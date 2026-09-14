@@ -432,6 +432,15 @@ public:
             case IrExprKind::NullLit:
                 return std::nullopt;
 
+            // Un Value::Type::Func no tiene representacion nativa (no hay
+            // NativeValue::Tag para "indice de funcion") -- igual que
+            // NativeModuleCall (NATIVE-MODULES.md §3.4), cae aqui sin caso
+            // dedicado y el fallback de mas abajo (std::nullopt) basta: la
+            // ruta que use list.map/filter/reduce/for_each con un FuncRef
+            // simplemente se queda en bytecode, no es un error.
+            case IrExprKind::FuncRef:
+                return std::nullopt;
+
             // Fase 5/5.5/5.6: los awaits que esta fase sabe representar --
             // `await sleep(ms)` (traducido a `co_await lumen::sleep(...)`
             // de verdad) y `await <modulo>.query/exec/last_id/begin/commit/

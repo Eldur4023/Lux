@@ -88,7 +88,14 @@ Recycler<N>& recycler() {
 // of the VM moved those 72 bytes.
 class Value {
 public:
-    enum class Type { Null, Bool, Int, Float, Str, List, Dict };
+    // Func: a reference to a user-defined `fn`, used to pass one to
+    // List.map/filter/reduce/for_each (natives.cpp) -- NOT a closure: it
+    // carries no captured environment, just which function, the same way a
+    // C function pointer does. Stored inline in `i_` (the function's index
+    // into the module's FunctionTable, exactly what Op::CallFunction's
+    // operand already encodes at compile time for an ordinary call) --
+    // never on_heap(), same as Int/Bool/Float: there is nothing to free.
+    enum class Type { Null, Bool, Int, Float, Str, List, Dict, Func };
 
     using List = std::vector<Value>;
 
@@ -210,6 +217,9 @@ public:
     static Value dict(Dict d = {}) {
         Value v; v.type_ = Type::Dict; v.o_ = new_box<CDict>(std::move(d)); return v;
     }
+    static Value func(long long index) {
+        Value v; v.type_ = Type::Func; v.i_ = index; return v;
+    }
 
     Type type() const { return type_; }
 
@@ -221,6 +231,7 @@ public:
     bool is_str()   const { return type_ == Type::Str; }
     bool is_list()  const { return type_ == Type::List; }
     bool is_dict()  const { return type_ == Type::Dict; }
+    bool is_func()  const { return type_ == Type::Func; }
 
     bool               as_bool()  const { return b_; }
     long long          as_int()   const { return i_; }
@@ -228,6 +239,7 @@ public:
     const std::string& as_str()   const { return static_cast<CStr*>(o_)->v;  }
     List&              as_list()  const { return static_cast<CList*>(o_)->v; }
     Dict&              as_dict()  const { return static_cast<CDict*>(o_)->v; }
+    long long          as_func_index() const { return i_; }
 
     // Lumen Script truthiness, Python style: null, false, 0, 0.0, the empty
     // string and the empty containers are false.
@@ -245,6 +257,7 @@ public:
             case Type::Str:   return !as_str().empty();
             case Type::List:  return !as_list().empty();
             case Type::Dict:  return !as_dict().empty();
+            case Type::Func:  return true;
         }
         return false;
     }

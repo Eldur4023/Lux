@@ -798,6 +798,32 @@ class Signup:
 
 Declaring a function with a builtin's name is a compile error.
 
+### Function references
+
+A bare function name, used where a value is expected instead of being called, is a
+reference to that function:
+
+```lum
+fn int double_it(int x):
+    return x * 2
+
+get endpoint("/doubled"):
+    List<int> l = [1, 2, 3, 4]
+    return { "r": l.map(double_it) }
+```
+
+**Not a closure.** It carries no captured environment — just which function, the way a C
+function pointer does. There is no lambda syntax (`fn(x) => x * 2`) and no way to reference a
+function that reads an outer local variable it does not receive as a parameter; it can still
+reach `state`/`log`/other reserved objects, since those are not "outer locals," they are always
+in scope. This is deliberately the smaller of two possible features — see the comment on
+`Value::Type::Func` (`value.hpp`) for why full closures were not built instead.
+
+The only place a function reference is currently useful is `List.map`/`filter`/`reduce`/
+`for_each` (§20). A function passed to one of them **must not use `await`** — it runs
+synchronously, with no event loop to suspend onto, and a callback that tries gives a clear
+error instead of hanging.
+
 ---
 
 ## 19. The language
@@ -806,7 +832,7 @@ Declaring a function with a builtin's name is a compile error.
 
 ```
 int  long  float  double  bool  string        primitives, lowercase
-Json  List<T>  Dict<K,V>  File                native classes, uppercase
+Json  List<T>  Dict<K,V>  File  Func           native classes, uppercase
 ```
 
 `T?` marks that the value may be missing. Generics are **erased**: the checker verifies them
@@ -936,7 +962,7 @@ asynchronous: they are called with `await`.
 |---|---|
 | Any | `status(code)` `header(k, v)` `cookie(k, v, ...)` |
 | `string` | `starts_with` `ends_with` `contains` `upper` `lower` `trim` `index_of` `replace` `split` `slice` `repeat` |
-| `List` | `add(v)` `contains(v)` `index_of(v)` `remove_at(i)` `sort()` `reverse()` `slice(start[, end])` `concat(other)` `join(sep)` |
+| `List` | `add(v)` `contains(v)` `index_of(v)` `remove_at(i)` `sort()` `reverse()` `slice(start[, end])` `concat(other)` `join(sep)` `map(fn)` `filter(fn)` `reduce(fn, initial)` `for_each(fn)` |
 | `Dict` | `has(key)` `keys()` `values()` `get(key[, default])` `remove(key)` `merge(other)` |
 | `File` | `save(directory)` |
 
@@ -944,8 +970,8 @@ asynchronous: they are called with `await`.
 multi-byte UTF-8 as long as a slice does not land mid-sequence. `slice` accepts negative
 indices (counted from the end, like Python) on both `string` and `List`; out-of-range bounds
 are clamped, not an error. `List.sort()` is natural order only (numbers ascending, strings
-lexicographic) — there is no custom-comparator form, because Lumen Script has no function
-values to pass one with (§23).
+lexicographic) — no custom-comparator form: `map`/`filter`/`reduce`/`for_each` are, for now,
+the only methods that take a function reference (§18) as an argument.
 
 When the receiver's type is known at compile time —a declared parameter, a typed variable, a
 literal— the name and the argument count are checked **there**, not at run time:

@@ -1,6 +1,7 @@
 #include <lumen_script/natives.hpp>
 #include <lumen_script/template.hpp>
 #include <lumen_script/crypto.hpp>
+#include <lumen_script/vm.hpp>
 
 #include <lumen/request.hpp>
 #include <lumen/response.hpp>
@@ -550,6 +551,51 @@ void clamp_range(long long len, long long& start, long long& end) {
     if (end < start) end = start;
 }
 
+// Invokes a Value::Func (List.map/filter/reduce/for_each's callback)
+// synchronously, from inside call_method() -- itself already a synchronous
+// C++ function called from the VM's own opcode dispatch loop, so there is
+// no "suspend and let the driver resume us later" available here the way a
+// real route handler has. A NESTED, re-entrant VM::start() is the answer:
+// the same idea render_plantilla() (template.cpp) uses to let a template
+// expression call a user function.
+//
+// A FRESH VM per call, not a shared/thread_local one: VM::start() clears
+// frames_/stack_ unconditionally on entry (vm.cpp), so a shared instance
+// reused for a NESTED call -- a callback passed to .map() that itself calls
+// .map() again, on the same thread, easy to write by accident -- would wipe
+// the outer call's still-in-progress state out from under it while it is
+// blocked waiting for the inner call to return. A fresh VM costs a few
+// small allocations per call; that is a real, provable bug otherwise, not
+// a hypothetical one, so correctness wins over an optimization this new
+// feature never had a measured need for in the first place.
+//
+// `error` covers two different failures: the callback threw a normal Lumen
+// Script runtime error (division by zero, wrong arity, ...) -- passed
+// straight through, so a callback's own error is what the caller sees, not
+// a wrapper -- or the callback tried to `await` something. That second one
+// cannot work here (Status::Suspended has nowhere to go: this call has no
+// event loop, no coroutine, nothing to resume it later) and is reported
+// with a clear, specific message instead of hanging, crashing, or silently
+// returning null.
+Value call_func_value(NativeCtx& ctx, const Value& fn, std::vector<Value> args,
+                      const char* caller, std::string& error) {
+    if (!ctx.functions || fn.as_func_index() < 0 ||
+        static_cast<size_t>(fn.as_func_index()) >= ctx.functions->size()) {
+        error = std::string(caller) + "(): the function reference is not valid here";
+        return Value::null();
+    }
+    VM vm;
+    const Chunk& chunk = *(*ctx.functions)[static_cast<size_t>(fn.as_func_index())];
+    VM::Result r = vm.start(chunk, std::move(args), ctx, ctx.functions);
+    if (r.status == VM::Status::Suspended) {
+        error = std::string(caller) + "(): the function passed to it used `await`, "
+                "which is not supported here";
+        return Value::null();
+    }
+    if (r.status == VM::Status::Error) { error = r.error; return Value::null(); }
+    return std::move(r.value);
+}
+
 } // namespace
 
 Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
@@ -777,6 +823,56 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             }
             return Value::str(std::move(out));
         }
+        // map/filter/reduce/for_each: the one place Value::Type::Func
+        // (value.hpp) is actually used -- a `fn` passed by reference, no
+        // captured environment (it is not a closure), invoked once per
+        // element via call_func_value() above. That is also why there is
+        // no sort-by-key or a custom comparator anywhere in this file: the
+        // language could not express one before these four existed, and
+        // these are deliberately the smallest, most-asked-for slice of
+        // "pass a function around" rather than the full feature.
+        if (name == "map") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'map()' expects a function"; return Value::null(); }
+            Value::List out;
+            out.reserve(l.size());
+            for (auto& item : l) {
+                Value r = call_func_value(ctx, args[0], {item}, "map", error);
+                if (!error.empty()) return Value::null();
+                out.push_back(std::move(r));
+            }
+            return Value::list(std::move(out));
+        }
+        if (name == "filter") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'filter()' expects a function"; return Value::null(); }
+            Value::List out;
+            for (auto& item : l) {
+                Value keep = call_func_value(ctx, args[0], {item}, "filter", error);
+                if (!error.empty()) return Value::null();
+                if (keep.truthy()) out.push_back(item);
+            }
+            return Value::list(std::move(out));
+        }
+        if (name == "reduce") {
+            if (!want(args.size(), 2, 2, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'reduce()' expects a function"; return Value::null(); }
+            Value acc = args[1];
+            for (auto& item : l) {
+                acc = call_func_value(ctx, args[0], {acc, item}, "reduce", error);
+                if (!error.empty()) return Value::null();
+            }
+            return acc;
+        }
+        if (name == "for_each") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'for_each()' expects a function"; return Value::null(); }
+            for (auto& item : l) {
+                call_func_value(ctx, args[0], {item}, "for_each", error);
+                if (!error.empty()) return Value::null();
+            }
+            return recv;
+        }
         error = "Lists have no method '" + name + "'";
         return Value::null();
     }
@@ -932,6 +1028,8 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
         {"sort", 0, 0, nullptr},       {"reverse", 0, 0, nullptr},
         {"slice", 1, 2, "List"},       {"concat", 1, 1, "List"},
         {"join", 1, 1, "string"},
+        {"map", 1, 1, "List"},         {"filter", 1, 1, "List"},
+        {"reduce", 2, 2, "Json"},      {"for_each", 1, 1, nullptr},
     });
     static const std::vector<BuiltinMethod> kDict = with_own({
         {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},

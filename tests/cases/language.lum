@@ -138,3 +138,64 @@ get endpoint("/dicts2"):
         "values": d.values(), "get_present": d.get("a", -1), "get_missing": d.get("z", -1),
         "removed": e.remove("a"), "after_remove": e, "merged": {"x": 1}.merge({"y": 2})
     }
+
+# Function references (NOT closures -- no captured environment, just which
+# function, see Value::Type::Func, value.hpp): a bare `fn` name used where a
+# value is expected, consumed by List.map/filter/reduce/for_each.
+fn int double_it(int x):
+    return x * 2
+
+fn bool is_even(int x):
+    return x % 2 == 0
+
+fn int add(int acc, int x):
+    return acc + x
+
+fn Json side_effect(int x):
+    int cur = state.get("func_total")
+    state.set("func_total", cur + x)
+    return null
+
+fn Json calls_await(int x):
+    Json r = await sleep(1)
+    return r
+
+get endpoint("/func_ref"):
+    Json f = double_it
+    return { "is_not_null": f != null }
+
+get endpoint("/list_map"):
+    List<int> l = [1, 2, 3, 4]
+    return { "doubled": l.map(double_it) }
+
+get endpoint("/list_filter"):
+    List<int> l = [1, 2, 3, 4, 5, 6]
+    return { "evens": l.filter(is_even) }
+
+get endpoint("/list_reduce"):
+    List<int> l = [1, 2, 3, 4, 5]
+    return { "sum": l.reduce(add, 0) }
+
+get endpoint("/list_for_each"):
+    List<int> l = [1, 2, 3]
+    state.set("func_total", 0)
+    l.for_each(side_effect)
+    return { "total": state.get("func_total") }
+
+get endpoint("/list_map_filter_chain"):
+    List<int> l = [1, 2, 3, 4, 5, 6, 7, 8]
+    return { "r": l.filter(is_even).map(double_it) }
+
+# A callback that itself calls .reduce() again -- the case that would
+# corrupt a shared/thread_local VM (see call_func_value's comment,
+# natives.cpp) if call_func_value reused one instead of a fresh VM per call.
+fn int sum_list(List<int> l):
+    return l.reduce(add, 0)
+
+get endpoint("/list_map_nested"):
+    List<List<int>> ll = [[1, 2], [3, 4]]
+    return { "r": ll.map(sum_list) }
+
+get endpoint("/list_map_await_rejected"):
+    List<int> l = [1]
+    return { "r": l.map(calls_await) }

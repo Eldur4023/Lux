@@ -39,6 +39,12 @@ enum class IrExprKind {
     Unary, Binary, Ternary, Await,
     PreStep, PostStep,
     ListLit, DictLit,
+    // A bare reference to a user `fn` used as a value -- `my_func` where an
+    // expression is expected, not `my_func(...)` (that stays a Call). NOT a
+    // closure: no captured environment, just which function -- see
+    // Value::Type::Func (value.hpp). `call_index` (below) carries which one,
+    // resolved the same way UserFunctionCall already resolves it.
+    FuncRef,
 };
 
 // Las 9 formas de llamada que distingue emit_call hoy (COMPILACION-NATIVA.md
