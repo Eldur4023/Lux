@@ -1,0 +1,122 @@
+#pragma once
+#include <map>
+#include <string>
+#include <vector>
+
+#include "natives.hpp"
+
+namespace lumen_script {
+
+// A native module -- Lumen's equivalent of a Python C-extension: a chunk of
+// C++ exposed to Lumen Script under `import <name>`, compiled into the
+// `lumen` binary (not loaded dynamically -- see NATIVE-MODULES.md for why).
+//
+// Deliberately narrower than DbDriver: every function is SYNCHRONOUS (no
+// `await`, no worker pool) and shares the exact calling convention of any
+// other builtin (NativeFn, natives.hpp) -- a module function IS a builtin,
+// just namespaced under an `import`ed name instead of always being present.
+// That is what lets it reuse Op::CallBuiltinModule's dispatch (vm.cpp) as a
+// near copy of Op::CallNative's, instead of inventing a second calling
+// convention.
+struct BuiltinModuleFn {
+    std::string name;         // "sha256" (used as `hash.sha256(...)`)
+    int         min_args;
+    int         max_args;     // -1 = no limit
+    NativeFn    fn;           // same signature as any other builtin
+};
+
+// What a module needs to describe itself.  `configure()` is optional --
+// most modules (hash, and most stdlib-shaped modules generally) need no
+// `<name>: { ... }` block in `app:` at all; a future module that DOES need
+// one (an API key, a directory, a limit) overrides it exactly like
+// DbDriver::configure().
+class BuiltinModule {
+public:
+    virtual ~BuiltinModule() = default;
+
+    virtual const char*                        name() const = 0;
+    virtual const std::vector<BuiltinModuleFn>&  functions() const = 0;
+
+    // Called once, right after `import`, with whatever `<name>: { ... }`
+    // block exists in `app:` (empty if there is none).  The default accepts
+    // silently -- a module with nothing to configure does not have to
+    // override this just to say so.
+    virtual bool configure(const std::map<std::string, std::string>& options,
+                           std::string& error) {
+        (void)options; (void)error;
+        return true;
+    }
+};
+
+// ─── Registry ──────────────────────────────────────────────────────────────
+//
+// Mirrors DbRegistry (db.hpp) on purpose: which modules exist depends on
+// cmake options (see NATIVE-MODULES.md, "adding a module" -- most modules
+// need none, since they carry no external dependency), so an `import` of one
+// not compiled in has to say so plainly, the same way a missing DB driver
+// already does.
+//
+// Unlike DbRegistry, there is no per-connection pool and no `activate()`
+// step tied to a thread count: a native module's functions run inline, on
+// whatever thread calls them (the event loop thread, same as any other
+// builtin) -- there is nothing to start.
+class BuiltinModuleRegistry {
+public:
+    static BuiltinModuleRegistry& instance();
+
+    std::vector<std::string> available() const;
+    bool                     has(const std::string& name) const;
+
+    // Marks a module imported: runs its configure() with the `app:` block
+    // (or an empty map if there is none) and remembers it as active so a
+    // stray function call before `import` is still caught.
+    bool activate(const std::string& name,
+                  const std::map<std::string, std::string>& options,
+                  std::string& error);
+    bool is_active(const std::string& name) const;
+
+    // Resolves `<module>.<function>` to its BuiltinModuleFn, or nullptr.
+    // Used at COMPILE time (Emitter::check_call) to validate the call and
+    // assign it a flat, stable id -- see builtin_module_function_at() below,
+    // which is what the id from THIS lookup indexes into.
+    const BuiltinModuleFn* find(const std::string& module, const std::string& function) const;
+
+    // The same lookup, but returning the flat id CallBuiltinModule's operand
+    // carries (module functions across every registered module share one
+    // id-space, exactly like native_id() does for the core builtins) --
+    // -1 if the pair does not exist.
+    int id_of(const std::string& module, const std::string& function) const;
+
+    // The flat-id counterpart of find(): what CallBuiltinModule's handler
+    // (vm.cpp) actually calls at runtime. Out of range is a logic error, not
+    // guarded here -- see builtin_module_function_at() below.
+    const BuiltinModuleFn& function_at(int id) const { return flat_[static_cast<size_t>(id)].fn; }
+
+private:
+    BuiltinModuleRegistry();
+
+    struct Slot {
+        std::unique_ptr<BuiltinModule> module;
+        bool                          activated = false;
+    };
+    std::map<std::string, Slot> slots_;
+
+    // Flat table every id_of()/builtin_module_function_at() indexes into,
+    // built once at construction from every registered module's
+    // functions(), in registration order.
+    struct FlatEntry {
+        std::string      module;
+        BuiltinModuleFn    fn;
+    };
+    std::vector<FlatEntry> flat_;
+
+    void build_flat_table();
+};
+
+// Stable id -> BuiltinModuleFn, the CallBuiltinModule counterpart of
+// native_at() (natives.hpp).  Out-of-range is a logic error (the emitter
+// only ever hands out ids id_of() returned), so it is not defensive here,
+// exactly like native_at() is not.
+const BuiltinModuleFn& builtin_module_function_at(int id);
+
+} // namespace lumen_script

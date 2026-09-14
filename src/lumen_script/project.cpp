@@ -6,6 +6,7 @@
 #include <lumen_script/vm.hpp>
 #include <lumen_script/auth.hpp>
 #include <lumen_script/db.hpp>
+#include <lumen_script/builtin_module.hpp>
 
 #include <lumen/request.hpp>
 #include <lumen/response.hpp>
@@ -1678,24 +1679,40 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     // Modules are checked before anything else: importing one this binary does
     // not carry, or using it unconfigured, has to be said plainly.
     if (diags.empty()) {
-        auto& reg = DbRegistry::instance();
+        auto& reg      = DbRegistry::instance();
+        auto& mod_reg  = BuiltinModuleRegistry::instance();
         for (const auto& m : mod->program.imports) {
-            if (!reg.has(m)) {
-                auto disponibles = reg.available();
-                std::string list_;
-                for (const auto& d : disponibles) list_ += (list_.empty() ? "" : ", ") + d;
-                diags.error({}, "module '" + m + "' is not compiled into this binary" +
-                                (list_.empty() ? "" : "; disponibles: " + list_));
+            if (reg.has(m)) {
+                auto it = mod->program.app.modules.find(m);
+                if (it == mod->program.app.modules.end()) {
+                    diags.error(mod->program.app.loc,
+                                "'import " + m + "' without its '" + m + ":' en app:");
+                    continue;
+                }
+                std::string err;
+                if (!reg.activate(m, it->second, err)) diags.error(mod->program.app.loc, err);
                 continue;
             }
-            auto it = mod->program.app.modules.find(m);
-            if (it == mod->program.app.modules.end()) {
-                diags.error(mod->program.app.loc,
-                            "'import " + m + "' without its '" + m + ":' en app:");
+            if (mod_reg.has(m)) {
+                // Native modules (NATIVE-MODULES.md), unlike DB drivers, do
+                // not require an `<name>: { ... }` block in `app:` -- most
+                // need no configuration at all (hash does not), so an
+                // absent block is not an error, just no options.
+                auto it = mod->program.app.modules.find(m);
+                static const std::map<std::string, std::string> sin_opciones;
+                std::string err;
+                if (!mod_reg.activate(m, it == mod->program.app.modules.end() ? sin_opciones
+                                                                              : it->second,
+                                      err))
+                    diags.error(mod->program.app.loc, err);
                 continue;
             }
-            std::string err;
-            if (!reg.activate(m, it->second, err)) diags.error(mod->program.app.loc, err);
+            auto disponibles = reg.available();
+            for (const auto& d : mod_reg.available()) disponibles.push_back(d);
+            std::string list_;
+            for (const auto& d : disponibles) list_ += (list_.empty() ? "" : ", ") + d;
+            diags.error({}, "module '" + m + "' is not compiled into this binary" +
+                            (list_.empty() ? "" : "; disponibles: " + list_));
         }
     }
 
@@ -1715,7 +1732,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         // --native (Fase 3): despues de las firmas/cuerpos de clase (necesita
         // ClassSigs para constructores/metodos) y antes de construir rutas,
         // para que puedan capturar mod->native.get() ya resuelto -- ver el
-        // comentario sobre NativeModule en project.hpp. Solo si lo demas
+        // comentario sobre BuiltinModule en project.hpp. Solo si lo demas
         // compilo limpio: no tiene sentido invocar g++ sobre un programa que
         // de todas formas no se va a publicar.
         if (native && diags.empty())

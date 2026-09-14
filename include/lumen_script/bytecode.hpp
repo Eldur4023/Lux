@@ -62,6 +62,11 @@ enum class Op : uint8_t {
     CallFunction, // operand = (indice-de-funcion << 8) | argc
     CallMethod,   // operand = (name-constant-index << 8) | argc
     CallNative,   // operand = (id << 8) | argc
+    // A native module function (NATIVE-MODULES.md), e.g. hash.sha256(...).
+    // Same shape as CallNative, but `id` indexes BuiltinModuleRegistry's flat
+    // table (builtin_module_function_at()) instead of kNatives -- a separate
+    // id-space, and a separate opcode, so the two never collide.
+    CallBuiltinModule,
     CallAsync,    // same, but suspends: the driver does the real co_await
     Return,       // returns the top
     ReturnNull,

@@ -260,6 +260,15 @@ check "rollback"            POST /undo         200 '"deshecho":true'
 check "balances after rollback" GET /balances          200 '"balance":70'
 check "engine error"     GET  /bad            200 'no such table'
 
+echo "== native modules =="
+start_server "$HERE/cases/modules.lum" || exit 1
+check "hash.sha256"       GET /hash/test              200 '"sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"'
+check "hash.hmac_sha256"  GET /hmac/mykey/mymsg       200 '"mac":"131b7d67f083953569aa6d777328a10cf618900e9d261397d750ec30df3c9654"'
+check "hash.random_hex length" GET /random/8         200
+random_hex_len=$(curl -sS --max-time 10 "http://127.0.0.1:$PORT/random/8" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['hex']))")
+if [ "$random_hex_len" = "16" ]; then ok "hash.random_hex(8) is 16 hex chars"
+else fail "hash.random_hex(8) is 16 hex chars" "16" "$random_hex_len"; fi
+
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lum"
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lum"   "no parameter binds it"
@@ -271,6 +280,7 @@ fails_to_compile "unknown method"    "$HERE/cases/bad/method.lum"   "has no meth
 fails_to_compile "method on a string"   "$HERE/cases/bad/method_type.lum" "have no method"
 fails_to_compile "field of a class"    "$HERE/cases/bad/field_type.lum"  "has no field"
 fails_to_compile "module not imported"   "$HERE/cases/bad/import.lum"   "missing 'import sqlite'"
+fails_to_compile "native module not imported" "$HERE/cases/bad/module_import.lum" "missing 'import hash'"
 # Expression types are checked at RUN TIME: the compiler
 # it verifies names, arity, context, and the methods and fields of a receiver
 # whose type it knows -- but not that `s - 1` adds up.

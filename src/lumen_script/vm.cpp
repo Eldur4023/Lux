@@ -1,4 +1,5 @@
 #include <lumen_script/vm.hpp>
+#include <lumen_script/builtin_module.hpp>
 
 namespace lumen_script {
 
@@ -521,6 +522,20 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
 
                 std::string error;
                 Value out = native_at(id).fn(ctx, args, error);
+                if (!error.empty()) return fail(std::move(error), in.loc);
+                push(std::move(out));
+                break;
+            }
+
+            case Op::CallBuiltinModule: {
+                int id   = static_cast<int>(in.operand >> 8);
+                int argc = static_cast<int>(in.operand & 0xFF);
+
+                std::vector<Value> args(static_cast<size_t>(argc));
+                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+
+                std::string error;
+                Value out = builtin_module_function_at(id).fn(ctx, args, error);
                 if (!error.empty()) return fail(std::move(error), in.loc);
                 push(std::move(out));
                 break;

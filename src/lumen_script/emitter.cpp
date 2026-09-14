@@ -4,6 +4,7 @@
 #include <iostream>
 #include <lumen_script/template.hpp>
 #include <lumen_script/natives.hpp>
+#include <lumen_script/builtin_module.hpp>
 
 #include <algorithm>
 
@@ -968,6 +969,75 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
     int          id = -1;
     IrCallShape  shape = IrCallShape::Invalid;
 
+    // hash.sha256(...) — a native module function (NATIVE-MODULES.md).
+    // Checked BEFORE the reserved-object branch below, and completely
+    // separately from it: a native module's functions live in their own
+    // flat id-space (BuiltinModuleRegistry), never in kMembers/kNatives, so
+    // this cannot fall through into member_native_id() below and must
+    // return on every path once it starts.
+    if (e.object->kind == ExprKind::Member &&
+        e.object->object->kind == ExprKind::Ident &&
+        resolve_local(e.object->object->text) < 0 &&
+        BuiltinModuleRegistry::instance().has(e.object->object->text)) {
+
+        const std::string& obj    = e.object->object->text;
+        const std::string& member = e.object->text;
+
+        if (!imports_ || !imports_->count(obj)) {
+            shadow.error(e.object->loc, "missing 'import " + obj + "' in order to use '" +
+                                 obj + "." + member + "'");
+            return nullptr;
+        }
+        const BuiltinModuleFn* fn = BuiltinModuleRegistry::instance().find(obj, member);
+        if (!fn) {
+            shadow.error(e.object->loc, "'" + obj + "' has no member '" + member + "'");
+            return nullptr;
+        }
+        if (awaited) {
+            shadow.error(e.loc, "'" + obj + "." + member + "()' is not asynchronous: "
+                         "the 'await' is unnecessary");
+            return nullptr;
+        }
+
+        IrExprPtr r = llamada(IrCallShape::BuiltinModuleCall);
+        r->call_name  = obj;
+        r->call_index = BuiltinModuleRegistry::instance().id_of(obj, member);
+
+        size_t argc = 0;
+        for (const auto& a : e.args) {
+            if (!a.name.empty()) {
+                shadow.error(a.loc, "'" + obj + "." + member +
+                             "()' does not accept named arguments");
+                return nullptr;
+            }
+            IrExprPtr v = check_expr(*a.value, shadow);
+            if (!v) return nullptr;
+            r->args.push_back({std::string(), std::move(v), a.loc});
+            ++argc;
+        }
+        if (argc < static_cast<size_t>(fn->min_args)) {
+            shadow.error(e.loc, "'" + obj + "." + member + "()' expects at least " +
+                         std::to_string(fn->min_args) + " argument(s)");
+            return nullptr;
+        }
+        if (fn->max_args >= 0 && argc > static_cast<size_t>(fn->max_args)) {
+            shadow.error(e.loc, "'" + obj + "." + member + "()' takes at most " +
+                         std::to_string(fn->max_args) + " argument(s)");
+            return nullptr;
+        }
+        // Every module function returns a plain, concrete value today (no
+        // module has shipped one returning Json/List<Json> yet) -- Json is
+        // still the honest, conservative type to hand the checker: it means
+        // "this must be proven as JSON-constructible" (Comprobador::
+        // es_valor_json) rather than claiming a specific type this call
+        // cannot back up. See NATIVE-MODULES.md on why native codegen for
+        // these calls is not attempted yet: with type Json, native_gen.cpp's
+        // tipo_provable() simply never proves this shape, and the route
+        // falls back to bytecode like any other unsupported construct.
+        r->type = Type::json();
+        return r;
+    }
+
     // sse.send(...) — miembro de un objeto reservado.
     if (e.object->kind == ExprKind::Member &&
         e.object->object->kind == ExprKind::Ident &&
@@ -1677,6 +1747,18 @@ void Emitter::emit_native_call(const IrExpr& e) {
 
 void Emitter::emit_call(const IrExpr& e) {
     switch (e.call_shape) {
+        case IrCallShape::BuiltinModuleCall: {
+            // No module-name constant to push, unlike DbModuleCall: the
+            // (module, function) pair is already resolved to a single flat
+            // id at check time (BuiltinModuleRegistry::id_of()), so the VM
+            // never has to look either up by name.
+            for (const auto& a : e.args) emit_expr(*a.value);
+            chunk_->emit(Op::CallBuiltinModule, e.loc,
+                         (static_cast<uint32_t>(e.call_index) << 8) |
+                         static_cast<uint32_t>(e.args.size()));
+            break;
+        }
+
         case IrCallShape::DbModuleCall: {
             chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::str(e.call_name)));
             for (const auto& a : e.args) emit_expr(*a.value);

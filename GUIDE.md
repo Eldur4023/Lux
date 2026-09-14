@@ -28,6 +28,7 @@
 20. [Builtin reference](#20-builtin-reference)
 21. [Common errors](#21-common-errors)
 22. [How it works inside](#22-how-it-works-inside)
+23. [Native modules](#23-native-modules)
 
 ---
 
@@ -1009,3 +1010,27 @@ If the new version does not compile, it is not published.
 **Step cap.** An infinite loop in a `.lum` is cut with an error instead of pinning an event
 loop thread, which would take down every connection on that core. The counter resets on every
 suspension, so a legitimate SSE loop can live for hours.
+
+## 23. Native modules
+
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules —
+`hash` today (`sha256`, `hmac_sha256`, `random_hex`), more over time. Unlike a DB module, a
+native module is always synchronous (no `await`) and usually needs no `<name>: { ... }` block
+in `app:` at all:
+
+```lum
+import hash
+
+get endpoint("/hash/:s", string s):
+    return { "sha256": hash.sha256(s) }
+```
+
+Using one it does not recognize, or one not `import`ed, is a compile error, the same as an
+undeclared name anywhere else:
+
+```
+./app.lum:2:23: error: missing 'import hash' in order to use 'hash.sha256'
+```
+
+Full architecture, the reasoning behind the design, and a step-by-step guide to adding a new
+module: [NATIVE-MODULES.md](NATIVE-MODULES.md).

@@ -1,0 +1,15 @@
+# Native modules (NATIVE-MODULES.md): a compiled-in, `import`-gated
+# capability, distinct from the DB drivers (sqlite/postgres/mysql) -- always
+# synchronous, no `app:` configuration block required. `hash` is the proof
+# module: three thin wrappers over crypto.hpp (already exercised indirectly
+# by the session/jwt suite), here checked directly and hex-encoded.
+import hash
+
+get endpoint("/hash/:s", string s):
+    return { "sha256": hash.sha256(s) }
+
+get endpoint("/hmac/:key/:msg", string key, string msg):
+    return { "mac": hash.hmac_sha256(key, msg) }
+
+get endpoint("/random/:n", int n):
+    return { "hex": hash.random_hex(n) }

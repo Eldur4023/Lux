@@ -41,7 +41,7 @@ enum class IrExprKind {
     ListLit, DictLit,
 };
 
-// Las 8 formas de llamada que distingue emit_call hoy (COMPILACION-NATIVA.md
+// Las 9 formas de llamada que distingue emit_call hoy (COMPILACION-NATIVA.md
 // §1.2). No es "una llamada generica con argumentos": cada forma tiene su
 // propia regla de aridad/nombrados, su propia necesidad de await, y su propio
 // opcode/backend de destino, asi que el checker tiene que decidir CUAL es
@@ -54,7 +54,11 @@ enum class IrCallShape {
     ClassMethodCall,     // 5. metodo con receptor de tipo estatico conocido
     BuiltinGlobalCall,   // 6. len(...)/sleep(...)/render(...)
     BuiltinMethodCall,   // 7. s.upper()/xs.add(v)... estatico o dinamico
-    Invalid,             // 8. ninguna de las anteriores: error de compilacion
+    BuiltinModuleCall,    // 8. hash.sha256(...) (NATIVE-MODULES.md) -> CallBuiltinModule.
+                          //    Sincrona a proposito -- ver el porque en ese documento --
+                          //    y por eso NO comparte forma con DbModuleCall aunque las dos
+                          //    vengan de un `import`: cada una necesita su propio opcode.
+    Invalid,             // 9. ninguna de las anteriores: error de compilacion
 };
 
 // Argumento ya resuelto: el checker ya comprobo que los nombrados son
