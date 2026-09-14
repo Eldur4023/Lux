@@ -22,6 +22,21 @@ Syntax highlighting, live diagnostics and completion for `.lum` files. See
   given file's own classes, functions or locals — see "What is not here yet" below.
 - **Editor configuration** — `#` comments, bracket/quote auto-closing, indentation rules
   for Lumen's Python-style indented blocks.
+- **Default colors for strings and function names** (`package.json`'s
+  `contributes.configurationDefaults`) — shipped because a theme that defines *semantic*
+  token colors (GitHub Dark, One Dark Pro, and most modern themes) only applies them to
+  languages with a real semantic token provider, which this extension does not have yet;
+  without a default, such a theme silently falls back to a color that usually isn't the
+  one it actually intends for strings/functions. Sets `editor.semanticHighlighting.enabled:
+  false` for `[lumen]` (there is no semantic data to lose) and a `textMateRules` default for
+  `string.quoted.double.lumen`/`string.quoted.triple.lumen` (`#CE9178`) and
+  `entity.name.function.lumen` (`#DCDCAA`) — VS Code's own Dark+ colors for those roles, not
+  anything Lumen-specific. **A real limitation, not glossed over:** VS Code does not merge
+  `configurationDefaults` with a user's own `editor.tokenColorCustomizations` — a user
+  setting for that key replaces the extension's default *entirely*, not just the rules that
+  overlap. If you already customize `tokenColorCustomizations` for other languages, the
+  Lumen defaults above will not apply until you copy those two rules into your own
+  `textMateRules` array by hand.
 
 ## How diagnostics actually work
 
@@ -71,7 +86,7 @@ npm run compile
 npm install -g @vscode/vsce
 cd editors/vscode-lumen
 vsce package
-code --install-extension lumen-script-0.2.0.vsix
+code --install-extension lumen-script-0.3.0.vsix
 ```
 
 ## Verifying it works, without opening VS Code

@@ -2,7 +2,7 @@
   "name": "lumen-script",
   "displayName": "Lumen Script",
   "description": "Syntax highlighting, diagnostics and completion for Lumen Script (.lum)",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "lumen",
   "license": "SEE LICENSE IN ../../LICENSE",
   "engines": {
@@ -44,6 +44,23 @@
           "default": "lumen",
           "description": "Path to the 'lumen' compiler binary used for diagnostics (defaults to 'lumen' on PATH; point this at your build's ./build/lumen during development)."
         }
+      }
+    },
+    "configurationDefaults": {
+      "[lumen]": {
+        "editor.semanticHighlighting.enabled": false
+      },
+      "editor.tokenColorCustomizations": {
+        "textMateRules": [
+          {
+            "scope": ["string.quoted.double.lumen", "string.quoted.triple.lumen"],
+            "settings": { "foreground": "#CE9178" }
+          },
+          {
+            "scope": "entity.name.function.lumen",
+            "settings": { "foreground": "#DCDCAA" }
+          }
+        ]
       }
     }
   },
