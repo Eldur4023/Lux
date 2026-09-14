@@ -304,6 +304,16 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     cmd << "-I" << std::quoted(std::string(LUMEN_NATIVE_INCLUDE_DIR)) << " ";
     cmd << std::quoted(src_path.string()) << " -o " << std::quoted(so_path.string());
     cmd << " " << std::quoted(std::string(LUMEN_NATIVE_SCRIPT_LIB));
+#ifdef LUMEN_NATIVE_CAIRO_LIBS
+    // liblumen_script.a carries module_pdf.cpp's object file unconditionally
+    // (it is part of the archive regardless of which .lum is being compiled
+    // right now), so cairo's own link flags are needed on EVERY --native
+    // build, not only one that happens to use `pdf` -- see the comment next
+    // to LUMEN_NATIVE_CAIRO_LIBS in CMakeLists.txt for how this was found.
+    // Not std::quoted: this can be several space-separated flags
+    // ("-lcairo -lpixman-1..."), and quoting it would turn them into one.
+    cmd << " " << LUMEN_NATIVE_CAIRO_LIBS;
+#endif
     // liblumen.a: SOLO si hay rutas -- una funcion suelta nunca usa
     // lumen::Task/lumen::Response, asi que nunca deja un simbolo de lumen
     // sin resolver. Orden importante para un enlazado estatico: DESPUES de

@@ -8,9 +8,17 @@ namespace lumen_script {
 // is unconditional; see NATIVE-MODULES.md for a module that would need a
 // cmake option).
 std::unique_ptr<BuiltinModule> make_hash_module();
+std::unique_ptr<BuiltinModule> make_csv_module();
+#ifdef LUMEN_PDF
+std::unique_ptr<BuiltinModule> make_pdf_module();
+#endif
 
 BuiltinModuleRegistry::BuiltinModuleRegistry() {
     { Slot s; s.module = make_hash_module(); slots_["hash"] = std::move(s); }
+    { Slot s; s.module = make_csv_module();  slots_["csv"]  = std::move(s); }
+#ifdef LUMEN_PDF
+    { Slot s; s.module = make_pdf_module();  slots_["pdf"]  = std::move(s); }
+#endif
 
     build_flat_table();
 }

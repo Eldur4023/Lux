@@ -268,6 +268,14 @@ check "hash.random_hex length" GET /random/8         200
 random_hex_len=$(curl -sS --max-time 10 "http://127.0.0.1:$PORT/random/8" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['hex']))")
 if [ "$random_hex_len" = "16" ]; then ok "hash.random_hex(8) is 16 hex chars"
 else fail "hash.random_hex(8) is 16 hex chars" "16" "$random_hex_len"; fi
+check "csv.parse/columns/rows"     GET /csv/basic                 200 '"name":"ana","age":30,"city":"madrid"'
+check "csv row_count"              GET /csv/basic                 200 '"row_count":3'
+check "csv.filter_eq"              GET /csv/filter_and_aggregate  200 '"name":"cleo","age":35,"city":"madrid"'
+check "csv.sum/mean"               GET /csv/filter_and_aggregate  200 '"total_age":90.0,"avg_age":30.0'
+check "csv.group_sum"              GET /csv/filter_and_aggregate  200 '"group":"paris","sum":25.0'
+check "csv quoted fields (RFC4180)" GET /csv/quoted               200 '"name":"Smith, John","note":"He said \"hi\""'
+check "csv.to_csv roundtrip"       GET /csv/roundtrip             200 'a,b\r\n1,2\r\n3,4\r\n'
+check "csv closed handle errors"   GET /csv/closed_handle         500 'unknown handle'
 
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lum"

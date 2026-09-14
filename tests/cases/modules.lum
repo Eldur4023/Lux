@@ -2,8 +2,12 @@
 # capability, distinct from the DB drivers (sqlite/postgres/mysql) -- always
 # synchronous, no `app:` configuration block required. `hash` is the proof
 # module: three thin wrappers over crypto.hpp (already exercised indirectly
-# by the session/jwt suite), here checked directly and hex-encoded.
+# by the session/jwt suite), here checked directly and hex-encoded. `csv`
+# has no external dependency either (unlike `pdf`, which has its own suite
+# -- run_pdf.sh -- to skip gracefully on a binary built without cairo), so
+# it belongs in the always-runs regression suite too.
 import hash
+import csv
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -13,3 +17,44 @@ get endpoint("/hmac/:key/:msg", string key, string msg):
 
 get endpoint("/random/:n", int n):
     return { "hex": hash.random_hex(n) }
+
+get endpoint("/csv/basic"):
+    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
+    int h = csv.parse(data)
+    List<Json> cols = csv.columns(h)
+    List<Json> rows = csv.rows(h)
+    int n = csv.row_count(h)
+    csv.close(h)
+    return { "columns": cols, "rows": rows, "row_count": n }
+
+get endpoint("/csv/filter_and_aggregate"):
+    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
+    int h = csv.parse(data)
+    int madrid = csv.filter_eq(h, "city", "madrid")
+    List<Json> rows = csv.rows(madrid)
+    double total = csv.sum(h, "age")
+    double avg = csv.mean(h, "age")
+    List<Json> grouped = csv.group_sum(h, "city", "age")
+    csv.close(h)
+    csv.close(madrid)
+    return { "madrid_rows": rows, "total_age": total, "avg_age": avg, "grouped": grouped }
+
+get endpoint("/csv/quoted"):
+    string data = "name,note\n\"Smith, John\",\"He said \"\"hi\"\"\"\nplain,ok\n"
+    int h = csv.parse(data)
+    List<Json> rows = csv.rows(h)
+    csv.close(h)
+    return { "rows": rows }
+
+get endpoint("/csv/roundtrip"):
+    string data = "a,b\n1,2\n3,4\n"
+    int h = csv.parse(data)
+    string back = csv.to_csv(h)
+    csv.close(h)
+    return { "csv": back }
+
+get endpoint("/csv/closed_handle"):
+    int h = csv.parse("a,b\n1,2\n")
+    csv.close(h)
+    List<Json> rows = csv.rows(h)
+    return { "unreachable": rows }

@@ -1,8 +1,8 @@
 # Native modules — extending Lumen Script beyond the language core
 
 > How `import <name>` grows beyond the database drivers (`sqlite`/`postgres`/`mysql`) into a
-> general mechanism for adding capability to Lumen Script — a hash module today, a PDF module
-> or anything else tomorrow — and a step-by-step guide for building one. Companion to
+> general mechanism for adding capability to Lumen Script — `hash`, `csv` and `pdf` today, more
+> tomorrow — and a step-by-step guide for building one. Companion to
 > [COMPILACION-NATIVA.md](COMPILACION-NATIVA.md) (native *compilation*, a different thing) and
 > [GUIDE.md](GUIDE.md) (using an application once it is built).
 
@@ -164,15 +164,13 @@ about the mechanism in this document needs to change for that to happen — it i
 because proving the *mechanism* first, with a module too small to need it, was more important
 than optimizing before there was anything to measure.
 
-## 4. The proof: `hash`
+## 4. Three modules, three points proven
 
-`src/lumen_script/module_hash.cpp` is deliberately the *smallest* module that could exercise
-every part of this mechanism: zero external dependencies (three thin wrappers over
-`crypto.hpp`, which already existed for session/JWT signing), a fixed small function count, no
-configuration. It exists to prove the mechanism works before anything bigger — a PDF library,
-say — gets built on top of it. Do not mistake it for the interesting part of this document; the
-interesting part is that adding it required no change to `kNatives`, no change to `DbDriver`,
-and no change to anything `--native`-specific beyond "gracefully do not support it yet."
+**`hash`** (`src/lumen_script/module_hash.cpp`) is deliberately the *smallest* module that could
+exercise the mechanism: zero external dependencies (three thin wrappers over `crypto.hpp`,
+which already existed for session/JWT signing), stateless, no configuration. Adding it required
+no change to `kNatives`, no change to `DbDriver`, and no change to anything `--native`-specific
+beyond "gracefully do not support it yet."
 
 ```lum
 import hash
@@ -189,60 +187,134 @@ $ curl localhost:8080/hash/hello
 Matches Python's `hashlib.sha256(b"hello").hexdigest()` byte for byte — checked directly, not
 assumed.
 
+**`csv`** (`src/lumen_script/module_csv.cpp`) proved the harder case §5.2 originally left open:
+*state*. It parses CSV text into an internal table and hands back an opaque `int` handle instead
+of the data itself — `filter_eq`/`filter_gt`/`sort_by`/`select`/`slice` each take a handle and
+return a *new* one, `rows`/`get`/`sum`/`mean`/`group_sum`/`to_csv` read one without consuming
+it, `close` frees it. Twenty-two functions, still zero external dependencies, still no core
+mechanism change — see §5.2 for the pattern that made that true, filled in once there was a
+real module to draw it from rather than guess at it.
+
+```lum
+import csv
+
+get endpoint("/report"):
+    int h = csv.parse(request_body_or_file_contents)
+    int in_madrid = csv.filter_eq(h, "city", "madrid")
+    return { "avg_age": csv.mean(in_madrid, "age"), "by_city": csv.group_sum(h, "city", "age") }
+```
+
+Pandas-*shaped*, deliberately not pandas-*equivalent*: Lumen Script has no function values, so
+there is no `df[df.age > 18]` — `filter_gt(h, "age", 18)` is the honest equivalent a language
+without closures can actually offer (§5.2 argues this is a fair trade, not a shortfall).
+
+**`pdf`** (`src/lumen_script/module_pdf.cpp`) proved the third case: a module with a real
+external dependency (cairo's PDF surface — already liberally licensed and already installed
+almost everywhere that does graphics work, so no new library had to be vetted). It surfaced a
+genuine bug in the `--native` build path that neither `hash` nor `csv` could have (§5.2).
+
+```lum
+import pdf
+
+get endpoint("/invoice/:id"):
+    int doc = pdf.create(595, 842)
+    pdf.set_font(doc, "Sans", true, false)
+    pdf.text(doc, 50, 50, "Invoice #" + str(id), 20)
+    return { "pdf_base64": pdf.to_base64(doc) }
+```
+
+Verified as an actual PDF, not just a response that looks like one: decoded straight from the
+route's own base64 output and checked against real tooling —`file`(1) reports "PDF document,
+version 1.7", `pdfinfo` reports the right page count and page size, `pdftotext` recovers the
+exact text placed on each page, and `pdftoppm` rasterizes it to confirm the shapes and colors
+land where they were drawn, not just that *something* got written.
+
 ## 5. How to add a module — a worked walkthrough
 
-Say the next module is `csv` (`csv.parse(text) -> List<Json>`, no third-party dependency —
-follow §5.1 as written). If it instead needs an external library (a PDF writer, say), the only
-difference is §5.1 step 1 and the cmake option in step 6 — everything else is identical, and
-§5.2 spells that difference out.
+Say the next module is `qrcode` (`qrcode.generate(text) -> string`, no third-party dependency —
+follow §5.1 as written; it is deliberately parallel to how `hash` was actually added). If it
+instead needs an external library (like `pdf`'s cairo dependency), the only difference is §5.1
+step 1 and the cmake option in step 6 — everything else is identical, and §5.2 spells that
+difference out, now with a real example (`pdf`) instead of a hypothetical one.
 
 ### 5.1 Steps
 
-1. **Write the module.** A new file, `src/lumen_script/module_csv.cpp`, following
+1. **Write the module.** A new file, `src/lumen_script/module_qrcode.cpp`, following
    `module_hash.cpp`'s shape: free functions matching `NativeFn`'s signature
-   (`Value fn_csv_parse(NativeCtx&, std::vector<Value>& args, std::string& error)`), a class
-   implementing `BuiltinModule`, a factory function (`make_csv_module()`) the registry calls.
-   `NativeCtx&` can be ignored if the module needs no request/response/session access, the way
-   `hash`'s functions do — accept it, do not use it.
+   (`Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string& error)`), a
+   class implementing `BuiltinModule`, a factory function (`make_qrcode_module()`) the registry
+   calls. `NativeCtx&` can be ignored if the module needs no request/response/session access,
+   the way `hash`'s and `csv`'s functions do — accept it, do not use it. If the module needs to
+   carry state across calls (`csv`'s tables, `pdf`'s documents), see §5.2 for the pattern that
+   answers that — it is not a core-mechanism change, just a convention inside the module's own
+   file.
 2. **Register it.** `builtin_module.cpp`'s `BuiltinModuleRegistry::BuiltinModuleRegistry()`:
-   declare the factory (`std::unique_ptr<BuiltinModule> make_csv_module();`) and add
-   `{ Slot s; s.module = make_csv_module(); slots_["csv"] = std::move(s); }` — one line, same
-   pattern as `hash`'s.
+   declare the factory (`std::unique_ptr<BuiltinModule> make_qrcode_module();`) and add
+   `{ Slot s; s.module = make_qrcode_module(); slots_["qrcode"] = std::move(s); }` — one line,
+   same pattern as `hash`'s and `csv`'s.
 3. **Add it to the build.** `CMakeLists.txt`, `lumen_script`'s `add_library` sources:
-   `src/lumen_script/module_csv.cpp`.
-4. **Write the corpus test.** `tests/cases/modules.lum` (or a new file, if the module is
-   substantial enough to deserve its own) plus a `check` block in `tests/run_tests.sh` — see
-   §7 for what already exists to extend.
+   `src/lumen_script/module_qrcode.cpp`.
+4. **Write the corpus test.** `tests/cases/modules.lum` (or a new file with its own `run_*.sh`,
+   if the module carries an optional external dependency the way `pdf`'s does — see §7) plus a
+   `check` block in `tests/run_tests.sh`.
 5. **Rebuild and check the error paths, not just the happy path**, before trusting it:
-   - `import csv` missing → `"missing 'import csv' in order to use 'csv.parse'"`.
-   - Wrong arity → `"'csv.parse()' takes at most N argument(s)"`.
-   - `await csv.parse(...)` → `"is not asynchronous"`.
+   - `import qrcode` missing → `"missing 'import qrcode' in order to use 'qrcode.generate'"`.
+   - Wrong arity → `"'qrcode.generate()' takes at most N argument(s)"`.
+   - `await qrcode.generate(...)` → `"is not asynchronous"`.
    - `lumen app.lum --native --check` → reports the route `-> bytecode`, not a compile error
-     and not a crash. This is the one step it is easy to skip and easy to get catastrophically
-     wrong (§3.4) — verify it, do not assume it.
-6. **That's it for a dependency-free module.** For one that needs a third-party library, add a
-   cmake `option()` the way `LUMEN_SQLITE`/`LUMEN_POSTGRES` do (`CMakeLists.txt`, near
-   `option(LUMEN_SQLITE ...)`), `find_path`/`find_library` it, `#ifdef` the factory declaration
-   and the registration line in `builtin_module.cpp` on that option (mirroring exactly how
-   `db.cpp`'s `DbRegistry` constructor gates `make_postgres_driver()`), and link the library
-   only into that one `.cpp`'s compilation, not the whole `lumen_script` target.
+     and not a crash. This is the one step it is easy to skip — and, if the module carries a
+     third-party dependency, the one step that actually caught a real bug: see §5.2.
+6. **That's it for a dependency-free module.** For one that needs a third-party library —
+   `pdf`'s cairo is the real, worked example, not a hypothetical one — add a cmake `option()`
+   the way `LUMEN_SQLITE`/`LUMEN_PDF` do (`CMakeLists.txt`), locate the library
+   (`pkg_check_modules`/`find_path`+`find_library`), `#ifdef` the factory declaration and the
+   registration line in `builtin_module.cpp` on that option (mirroring exactly how `db.cpp`'s
+   `DbRegistry` constructor gates `make_postgres_driver()`) — and then read §5.2 before calling
+   it done, because linking the library into `lumen_script` is not the only place it is needed.
 
-### 5.2 What is genuinely harder for a module with real state or a third-party dependency
+### 5.2 What was actually harder: state, and a third-party dependency
 
-`hash` is stateless: every call is independent, nothing survives between requests. A module
-wrapping a stateful library (a PDF *document* being built up over several calls: `create()`,
-then `add_page()`, then `save()`) needs a way to carry that state across calls without changing
-Lumen Script's type system — no new `Type::Kind` is added per module (§3.4 already commits to
-`Json`-typed calls; adding a real native type per module would mean touching the core type
-system for every module, defeating the point of a *general* mechanism). The intended pattern,
-not yet built or proven: an **opaque handle** — a plain `int` a module hands back from
-`create()` and expects as the first argument to every later call, with the actual C++ object
-kept in the module's own internal table (`std::unordered_map<int, std::unique_ptr<PdfDoc>>`),
-freed either explicitly (`.save()` doubling as the release point) or left for a future
-request-scoped cleanup hook. This is a real, open design question — flagged here honestly
-rather than solved speculatively, exactly the "no generar en base a una suposición sin
-verificar" rule COMPILACION-NATIVA.md holds itself to (§14): the right shape for a stateful
-module should come from building one, not from guessing what it will need in the abstract.
+**State — answered by `csv` and `pdf`, and simpler than expected.** `hash` is stateless: every
+call is independent, nothing survives between requests. `csv` needs a table to survive from
+`parse()` to `rows()`; `pdf` needs a document to survive from `create()` through several
+`text()`/`rect()` calls to `save()`. Neither needed a change to Lumen Script's type system (no
+new `Type::Kind` per module — §3.4 already commits every module call to `Json`, and a per-module
+native type would mean touching the core type system for every module, defeating the point of a
+*general* mechanism). The pattern that worked, in both: an **opaque handle** — a plain `int` the
+module hands back from its "create" function and expects as the first argument to every later
+call — with the real C++ object kept in a mutex-protected table *inside that module's own file*
+(`module_csv.cpp`'s `HandleTable`, `std::unordered_map<int, CsvTable>`; `module_pdf.cpp`'s,
+`std::unordered_map<int, std::unique_ptr<PdfDoc>>`). The mutex matters and is not optional: a
+module's state outlives any single request and every event-loop thread can reach it (GUIDE.md
+§22, "N threads: event loop + its own VM") — `SharedState` (`state.*`, `natives.hpp`) already
+faces the identical requirement and is the precedent this follows. No change to `BuiltinModule`,
+`BuiltinModuleRegistry`, or anything compiler-side was needed for either module — this really is
+just a convention an individual module's `.cpp` can adopt on its own, not a mechanism to build.
+
+What is still genuinely unsolved: **handle lifetime.** Lumen Script values carry no destructor a
+module could hook into — nothing runs automatically when a handle's last reference in the script
+goes out of scope. `csv` and `pdf` both require an *explicit* `close(handle)`; forgetting it
+leaks the C++ object for the life of the process, exactly like forgetting to close a file handle
+in a language without RAII. `pdf.save()`/`pdf.to_base64()` do NOT auto-close, on purpose — either
+one might legitimately be called, then the other, on the same document. Neither module attempts
+request-scoped auto-cleanup (freeing every handle a request opened when that request ends) —
+plausible, not yet built, flagged here rather than assumed to be fine.
+
+**A third-party dependency — the thing `hash` and `csv` could not have caught, because neither
+carries one.** `liblumen_script.a` is linked as a whole archive into every `--native`-generated
+`.so` (`native_build.cpp`) — not just into routes that use a particular module. The moment
+`module_pdf.cpp`'s object file (referencing cairo) became part of that archive, loading *any*
+`--native`-compiled `.so` — including one for a route with nothing to do with `pdf` — started
+failing with `undefined symbol: cairo_pdf_surface_create_for_stream`. Caught immediately by the
+existing `native_route_shadow` test suite, not discovered later: adding `LUMEN_PDF` regressed a
+test that has nothing to do with PDFs, which is exactly what a good test suite is for. The fix
+is one more compile-time string, threaded through the same way `LUMEN_NATIVE_SCRIPT_LIB` already
+is: `CMakeLists.txt` bakes `LUMEN_NATIVE_CAIRO_LIBS` (cairo's own link flags) into `lumen_script`
+whenever `LUMEN_PDF` is enabled, and `native_build.cpp` appends it to every `.so` build,
+`#ifdef`-guarded, right after `LUMEN_NATIVE_SCRIPT_LIB`. **Any future module with an external
+dependency needs this same step** — it is not `pdf`-specific, and skipping it does not fail
+loudly at build time, only later, when `--native` tries to load a `.so` that happens to pull in
+the archive's now-unresolved symbols.
 
 ## 6. What this deliberately does not solve
 
@@ -259,11 +331,23 @@ module should come from building one, not from guessing what it will need in the
 - **No native (`--native`) codegen for any module function yet.** Deliberate and safe (§3.4),
   not an oversight — falls back to bytecode per route, cleanly, with the fallback verified
   against the real binary rather than assumed.
+- **No request-scoped handle cleanup.** `csv`/`pdf` handles live until explicitly `close()`d or
+  the process exits (§5.2) — nothing frees a request's leftover handles when it ends.
 
 ## 7. How this is validated
 
-`tests/cases/modules.lum` + the `"== native modules =="` suite in `tests/run_tests.sh`: real
-HTTP requests against a real running `lumen` binary, checked byte-for-byte against Python's
-`hashlib`/`hmac` for `sha256`/`hmac_sha256`, and the exact hex length for `random_hex`. Plus,
-in `"== compile errors =="`, the missing-`import` case. All of it is part of the `regression`
-ctest suite — `ctest` after building runs it along with everything else.
+`hash` and `csv` are dependency-free, so they live in the always-runs suite:
+`tests/cases/modules.lum` + the `"== native modules =="` block in `tests/run_tests.sh` — real
+HTTP requests against a real running `lumen` binary, `hash` checked byte-for-byte against
+Python's `hashlib`/`hmac`, `csv` checked against hand-computed filter/sum/mean/group_sum
+results and RFC 4180 quoted-field parsing, plus (in `"== compile errors =="`) the missing-
+`import` case. All of it is part of the `regression` ctest suite.
+
+`pdf` carries an optional dependency (cairo, `LUMEN_PDF`), so — like `sqlite`/`postgres`/`mysql`
+— it gets its own suite that skips (`SKIP_RETURN_CODE 77`) rather than fails on a binary built
+without it: `tests/cases/pdf.lum` + `tests/run_pdf.sh`, its own `pdf` ctest entry. It checks the
+happy path, the three error paths (unknown handle, drawing after the document is finished,
+double `close()`), and — the one that actually matters — decodes the route's real base64 output
+and confirms the bytes start with `%PDF-`, not just that *a* response came back.
+
+`ctest` after building runs everything above along with the rest of the suite.

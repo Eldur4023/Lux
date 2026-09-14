@@ -1013,19 +1013,42 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules —
-`hash` today (`sha256`, `hmac_sha256`, `random_hex`), more over time. Unlike a DB module, a
-native module is always synchronous (no `await`) and usually needs no `<name>: { ... }` block
-in `app:` at all:
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, three
+so far. Unlike a DB module, a native module is always synchronous (no `await`) and usually
+needs no `<name>: { ... }` block in `app:` at all:
+
+- **`hash`** — `sha256(s)`, `hmac_sha256(key, msg)`, `random_hex(n)`, all hex-encoded.
+- **`csv`** — parse, filter (`filter_eq`/`filter_gt`/`filter_lt`/`filter_ge`/`filter_le`/
+  `filter_contains`), `select`, `sort_by`, `slice`, aggregate (`sum`/`mean`/`min`/`max`/`count`/
+  `group_sum`), and `to_csv` to serialize back — pandas-*shaped*, not pandas-equivalent: with no
+  function values in the language, filtering is explicit verbs (`filter_gt(h, "age", 18)`)
+  instead of an arbitrary predicate. Every operation takes and/or returns an opaque `int`
+  handle; free one with `csv.close(handle)` when done with it.
+- **`pdf`** — `create`/`add_page`, `text`/`rect`/`line`, `set_color`/`set_font`/
+  `set_line_width`, and `save(handle, path)`/`to_base64(handle)` to get the document out, either
+  to disk or as a string ready to send in an HTTP response. Needs cairo at build time
+  (`LUMEN_PDF`, on by default when `libcairo2-dev` is present) — check your build's startup log
+  or `lumen --check` if `import pdf` reports itself missing.
 
 ```lum
 import hash
+import csv
+import pdf
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
+
+get endpoint("/report"):
+    int h = csv.parse(some_csv_text)
+    return { "by_city": csv.group_sum(h, "city", "revenue") }
+
+get endpoint("/invoice"):
+    int doc = pdf.create(595, 842)
+    pdf.text(doc, 50, 50, "Invoice", 24)
+    return { "pdf_base64": pdf.to_base64(doc) }
 ```
 
-Using one it does not recognize, or one not `import`ed, is a compile error, the same as an
+Using a module it does not recognize, or one not `import`ed, is a compile error, the same as an
 undeclared name anywhere else:
 
 ```

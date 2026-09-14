@@ -37,6 +37,7 @@ option(LUMEN_FUZZ "Build the fuzzing harnesses in fuzz/" OFF)
 option(LUMEN_SQLITE   "Modulo sqlite"                                   ON)
 option(LUMEN_POSTGRES "Modulo postgres (libpq)"                         ON)
 option(LUMEN_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
+option(LUMEN_PDF      "Native module: pdf (cairo)"                      ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
 # Lumen links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
@@ -129,6 +130,7 @@ add_library(lumen_script STATIC
     src/lumen_script/natives.cpp
     src/lumen_script/builtin_module.cpp
     src/lumen_script/module_hash.cpp
+    src/lumen_script/module_csv.cpp
     src/lumen_script/emitter.cpp
     src/lumen_script/native_gen.cpp
     src/lumen_script/native_build.cpp
@@ -196,6 +198,36 @@ if(LUMEN_MYSQL)
         message(STATUS "mysql module: enabled")
     else()
         message(STATUS "mysql module: SKIPPED (libmysqlclient-dev missing)")
+    endif()
+endif()
+
+# `pdf` (NATIVE-MODULES.md): built on cairo's PDF surface -- a well-established,
+# already-liberally-licensed 2D graphics library with native PDF output, so
+# there was no need to hunt for a PDF-specific dependency.
+if(LUMEN_PDF)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(CAIRO QUIET cairo)
+    endif()
+    if(CAIRO_FOUND)
+        target_sources(lumen_script PRIVATE src/lumen_script/module_pdf.cpp)
+        target_compile_definitions(lumen_script PRIVATE LUMEN_PDF)
+        target_include_directories(lumen_script PRIVATE ${CAIRO_INCLUDE_DIRS})
+        target_link_libraries(lumen_script PRIVATE ${CAIRO_LIBRARIES})
+        # native_build.cpp compiles each --native .so with a fresh g++
+        # invocation that links the WHOLE liblumen_script.a (see
+        # LUMEN_NATIVE_SCRIPT_LIB below) -- since module_pdf.cpp's object
+        # file is in that archive and references cairo, that g++ invocation
+        # needs cairo's link flags too, or loading ANY generated .so (not
+        # just a route using `pdf`) fails with "undefined symbol:
+        # cairo_pdf_surface_create_for_stream". Found by the native_route_
+        # shadow suite immediately after enabling LUMEN_PDF, not guessed.
+        list(JOIN CAIRO_LDFLAGS " " CAIRO_LDFLAGS_STR)
+        target_compile_definitions(lumen_script PRIVATE
+            LUMEN_NATIVE_CAIRO_LIBS="${CAIRO_LDFLAGS_STR}")
+        message(STATUS "pdf module: enabled")
+    else()
+        message(STATUS "pdf module: SKIPPED (libcairo2-dev missing)")
     endif()
 endif()
 target_compile_options(lumen_script PRIVATE -Wall -Wextra)
@@ -329,6 +361,13 @@ add_test(NAME postgres
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_postgres.sh $<TARGET_FILE:lumen-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(postgres PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+# The `pdf` native module needs cairo (LUMEN_PDF) -- same skip-if-missing
+# pattern as the DB modules above.
+add_test(NAME pdf
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_pdf.sh $<TARGET_FILE:lumen-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(pdf PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # ── Fuzzing ───────────────────────────────────────────────────────────────────
 # No sanitizer flags here on purpose: for ASan/UBSan to be worth anything they

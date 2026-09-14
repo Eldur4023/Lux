@@ -1,0 +1,42 @@
+# Native module `pdf` (NATIVE-MODULES.md) -- separate suite (run_pdf.sh),
+# the same reason sqlite/postgres/mysql each have their own: an optional
+# compiled-in dependency (cairo) has to skip gracefully, not fail, on a
+# binary built without it.
+import pdf
+
+get endpoint("/health"):
+    return { "ok": true }
+
+get endpoint("/make"):
+    int doc = pdf.create(200, 200)
+    pdf.set_color(doc, 10, 10, 10)
+    pdf.text(doc, 10, 20, "hello", 12)
+    pdf.rect(doc, 10, 30, 50, 20, false)
+    pdf.line(doc, 10, 60, 60, 60)
+    string b64 = pdf.to_base64(doc)
+    pdf.close(doc)
+    return { "len": len(b64), "b64": b64 }
+
+get endpoint("/pages"):
+    int doc = pdf.create(100, 100)
+    pdf.text(doc, 5, 5, "one", 10)
+    pdf.add_page(doc, 100, 100)
+    pdf.text(doc, 5, 5, "two", 10)
+    string b64 = pdf.to_base64(doc)
+    pdf.close(doc)
+    return { "len": len(b64) }
+
+get endpoint("/unknown_handle"):
+    return { "ok": pdf.to_base64(99999) }
+
+get endpoint("/draw_after_finish"):
+    int doc = pdf.create(50, 50)
+    pdf.to_base64(doc)
+    pdf.text(doc, 1, 1, "x", 8)
+    return { "unreachable": true }
+
+get endpoint("/close_twice"):
+    int doc = pdf.create(50, 50)
+    bool first = pdf.close(doc)
+    bool second = pdf.close(doc)
+    return { "first": first, "second": second }
