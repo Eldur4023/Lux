@@ -134,6 +134,8 @@ add_library(lumen_script STATIC
     src/lumen_script/module_hash.cpp
     src/lumen_script/module_csv.cpp
     src/lumen_script/module_os.cpp
+    src/lumen_script/module_math.cpp
+    src/lumen_script/module_time.cpp
     src/lumen_script/emitter.cpp
     src/lumen_script/native_gen.cpp
     src/lumen_script/native_build.cpp

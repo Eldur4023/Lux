@@ -332,6 +332,17 @@ bool Value::equals(const Value& o) const {
     }
 }
 
+bool Value::less_than(const Value& o, bool& ok) const {
+    ok = true;
+    if (is_num() && o.is_num()) {
+        if (is_int() && o.is_int()) return i_ < o.i_;
+        return as_float() < o.as_float();
+    }
+    if (is_str() && o.is_str()) return as_str() < o.as_str();
+    ok = false;
+    return false;
+}
+
 const char* op_name(Op op) {
     switch (op) {
         case Op::Const:            return "CONST";

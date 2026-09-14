@@ -19,38 +19,19 @@ bool numeric_pair(const Value& a, const Value& b) {
     return a.is_num() && b.is_num();
 }
 
-// Ordering comparison: only between numbers, or between strings.
+// Ordering comparison: only between numbers, or between strings -- the
+// actual logic is Value::less_than() (value.hpp/.cpp), shared with
+// natives.cpp's List.sort() so the two never quietly diverge. Le/Gt/Ge are
+// derived from Lt the usual way (a<=b is !(b<a), a>b is b<a, a>=b is
+// !(a<b)): valid for any domain where `ok` comes back true, since numbers
+// and strings are both total orders.
 bool compare(const Value& a, const Value& b, Op op, bool& ok) {
-    ok = true;
-    if (numeric_pair(a, b)) {
-        if (a.is_int() && b.is_int()) {
-            long long x = a.as_int(), y = b.as_int();
-            switch (op) {
-                case Op::Lt: return x <  y;
-                case Op::Le: return x <= y;
-                case Op::Gt: return x >  y;
-                default:     return x >= y;
-            }
-        }
-        double x = a.as_float(), y = b.as_float();
-        switch (op) {
-            case Op::Lt: return x <  y;
-            case Op::Le: return x <= y;
-            case Op::Gt: return x >  y;
-            default:     return x >= y;
-        }
+    switch (op) {
+        case Op::Lt: return a.less_than(b, ok);
+        case Op::Gt: return b.less_than(a, ok);
+        case Op::Le: { bool r = b.less_than(a, ok); return ok && !r; }
+        default:     { bool r = a.less_than(b, ok); return ok && !r; } // Ge
     }
-    if (a.is_str() && b.is_str()) {
-        int c = a.as_str().compare(b.as_str());
-        switch (op) {
-            case Op::Lt: return c <  0;
-            case Op::Le: return c <= 0;
-            case Op::Gt: return c >  0;
-            default:     return c >= 0;
-        }
-    }
-    ok = false;
-    return false;
 }
 
 // Un valor de Lumen Script solo puede ser Int/Float/Bool al cruzar hacia

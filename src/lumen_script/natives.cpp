@@ -9,6 +9,7 @@
 #include <lumen/logger.hpp>
 #include <lumen/multipart.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cerrno>
@@ -535,6 +536,20 @@ std::pair<std::string, std::string> split_ext(const std::string& name) {
     return {name.substr(0, dot), name.substr(dot)};
 }
 
+// Clamps a [start, end) range to a valid slice of something `len` long --
+// shared by string.slice() and List.slice(). A negative or out-of-range
+// bound is clamped rather than rejected (Python's own slicing does the
+// same: s[-100:100] on a 5-char string is not an error, it is the whole
+// string) -- errors are for genuinely wrong TYPES of argument, not for a
+// range that simply does not need clamping.
+void clamp_range(long long len, long long& start, long long& end) {
+    if (start < 0) start = std::max<long long>(0, len + start);
+    if (end   < 0) end   = std::max<long long>(0, len + end);
+    start = std::min(start, len);
+    end   = std::min(end, len);
+    if (end < start) end = start;
+}
+
 } // namespace
 
 Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
@@ -616,16 +631,151 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             size_t b = s.find_last_not_of(" \t\r\n");
             return Value::str(s.substr(a, b - a + 1));
         }
+        // Byte offsets, not Unicode codepoints -- matching how the rest of
+        // the runtime already treats strings (value.cpp's escape_json/
+        // utf8_seq_len work byte-wise too). Correct for ASCII, and for
+        // multi-byte UTF-8 as long as a cut does not land mid-sequence --
+        // the same tradeoff the language already made, not a new one.
+        if (name == "index_of") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_str()) { error = "'index_of()' expects a string"; return Value::null(); }
+            size_t pos = s.find(args[0].as_str());
+            return Value::integer(pos == std::string::npos ? -1 : static_cast<long long>(pos));
+        }
+        if (name == "replace") {
+            if (!want(args.size(), 2, 2, name, error)) return Value::null();
+            if (!args[0].is_str() || !args[1].is_str()) {
+                error = "'replace()' expects two strings"; return Value::null();
+            }
+            const std::string& from = args[0].as_str();
+            if (from.empty()) { error = "'replace()': the text to replace cannot be empty"; return Value::null(); }
+            const std::string& to = args[1].as_str();
+            std::string out;
+            size_t pos = 0, prev = 0;
+            while ((pos = s.find(from, prev)) != std::string::npos) {
+                out.append(s, prev, pos - prev);
+                out += to;
+                prev = pos + from.size();
+            }
+            out.append(s, prev, std::string::npos);
+            return Value::str(std::move(out));
+        }
+        if (name == "split") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_str()) { error = "'split()' expects a string"; return Value::null(); }
+            const std::string& sep = args[0].as_str();
+            if (sep.empty()) { error = "'split()': the separator cannot be empty"; return Value::null(); }
+            Value::List out;
+            size_t pos = 0, prev = 0;
+            while ((pos = s.find(sep, prev)) != std::string::npos) {
+                out.push_back(Value::str(s.substr(prev, pos - prev)));
+                prev = pos + sep.size();
+            }
+            out.push_back(Value::str(s.substr(prev)));
+            return Value::list(std::move(out));
+        }
+        if (name == "slice") {
+            if (!want(args.size(), 1, 2, name, error)) return Value::null();
+            if (!args[0].is_int() || (args.size() > 1 && !args[1].is_int())) {
+                error = "'slice()' expects int bounds"; return Value::null();
+            }
+            long long len = static_cast<long long>(s.size());
+            long long start = args[0].as_int();
+            long long end   = args.size() > 1 ? args[1].as_int() : len;
+            clamp_range(len, start, end);
+            return Value::str(s.substr(static_cast<size_t>(start), static_cast<size_t>(end - start)));
+        }
+        if (name == "repeat") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_int()) { error = "'repeat()' expects an int"; return Value::null(); }
+            long long n = args[0].as_int();
+            if (n < 0) { error = "'repeat()': the count cannot be negative"; return Value::null(); }
+            std::string out;
+            out.reserve(s.size() * static_cast<size_t>(n));
+            for (long long i = 0; i < n; ++i) out += s;
+            return Value::str(std::move(out));
+        }
         error = "strings have no method '" + name + "'";
         return Value::null();
     }
 
     // ── List ─────────────────────────────────────────────────────────────────
     if (recv.is_list()) {
+        auto& l = recv.as_list();
         if (name == "add") {
             if (!want(args.size(), 1, 1, name, error)) return Value::null();
-            recv.as_list().push_back(args[0]);
+            l.push_back(args[0]);
             return recv;
+        }
+        if (name == "contains" || name == "index_of") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            for (size_t i = 0; i < l.size(); ++i) {
+                if (l[i].equals(args[0]))
+                    return name == "contains" ? Value::boolean(true) : Value::integer(static_cast<long long>(i));
+            }
+            return name == "contains" ? Value::boolean(false) : Value::integer(-1);
+        }
+        if (name == "remove_at") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_int()) { error = "'remove_at()' expects an int"; return Value::null(); }
+            long long i = args[0].as_int();
+            if (i < 0 || i >= static_cast<long long>(l.size())) return Value::boolean(false);
+            l.erase(l.begin() + i);
+            return Value::boolean(true);
+        }
+        // In-place, natural order only: numbers ascending, strings
+        // lexicographic, via Value::less_than() -- the same comparison `<`
+        // itself uses (see vm.cpp's compare()). There is no custom-
+        // comparator overload (sort by a key, reverse order via a callback)
+        // because Lumen Script has no function values to pass one with
+        // (NATIVE-MODULES.md) -- reverse() right below covers the one
+        // custom order that matters often enough to special-case.
+        if (name == "sort") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            bool ok = true;
+            std::stable_sort(l.begin(), l.end(), [&ok](const Value& a, const Value& b) {
+                bool this_ok = true;
+                bool r = a.less_than(b, this_ok);
+                if (!this_ok) ok = false;
+                return r;
+            });
+            if (!ok) { error = "sort(): the List has values that cannot be compared with each other"; return Value::null(); }
+            return recv;
+        }
+        if (name == "reverse") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            std::reverse(l.begin(), l.end());
+            return recv;
+        }
+        if (name == "slice") {
+            if (!want(args.size(), 1, 2, name, error)) return Value::null();
+            if (!args[0].is_int() || (args.size() > 1 && !args[1].is_int())) {
+                error = "'slice()' expects int bounds"; return Value::null();
+            }
+            long long len = static_cast<long long>(l.size());
+            long long start = args[0].as_int();
+            long long end   = args.size() > 1 ? args[1].as_int() : len;
+            clamp_range(len, start, end);
+            return Value::list(Value::List(l.begin() + start, l.begin() + end));
+        }
+        if (name == "concat") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_list()) { error = "'concat()' expects a List"; return Value::null(); }
+            Value::List out = l;
+            const auto& other = args[0].as_list();
+            out.insert(out.end(), other.begin(), other.end());
+            return Value::list(std::move(out));
+        }
+        if (name == "join") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_str()) { error = "'join()' expects a string separator"; return Value::null(); }
+            const std::string& sep = args[0].as_str();
+            std::string out;
+            for (size_t i = 0; i < l.size(); ++i) {
+                if (i) out += sep;
+                out += l[i].to_string();
+            }
+            return Value::str(std::move(out));
         }
         error = "Lists have no method '" + name + "'";
         return Value::null();
@@ -714,6 +864,31 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             for (const auto& [k, _] : d) if (k.rfind("__", 0) != 0) ks.push_back(Value::str(k));
             return Value::list(std::move(ks));
         }
+        if (name == "values") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            Value::List vs;
+            for (const auto& [k, v] : d) if (k.rfind("__", 0) != 0) vs.push_back(v);
+            return Value::list(std::move(vs));
+        }
+        if (name == "get") {
+            if (!want(args.size(), 1, 2, name, error)) return Value::null();
+            auto it = d.find(args[0].to_string());
+            if (it != d.end()) return it->second;
+            return args.size() > 1 ? args[1] : Value::null();
+        }
+        if (name == "remove") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            return Value::boolean(d.erase(args[0].to_string()) > 0);
+        }
+        // Mutates and returns the receiver, same convention as add(): a
+        // key present in both wins from `other`, matching how Lumen's own
+        // Dict literal would behave if the same key were written twice.
+        if (name == "merge") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_dict()) { error = "'merge()' expects a Dict"; return Value::null(); }
+            for (const auto& [k, v] : args[0].as_dict()) d[k] = v;
+            return recv;
+        }
         error = "Dicts have no method '" + name + "'";
         return Value::null();
     }
@@ -747,10 +922,21 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
         {"starts_with", 1, 1, "bool"}, {"ends_with", 1, 1, "bool"},
         {"contains", 1, 1, "bool"},    {"upper", 0, 0, "string"},
         {"lower", 0, 0, "string"},     {"trim", 0, 0, "string"},
+        {"index_of", 1, 1, "int"},     {"replace", 2, 2, "string"},
+        {"split", 1, 1, "List"},       {"slice", 1, 2, "string"},
+        {"repeat", 1, 1, "string"},
     });
-    static const std::vector<BuiltinMethod> kList = with_own({{"add", 1, 1, nullptr}});
+    static const std::vector<BuiltinMethod> kList = with_own({
+        {"add", 1, 1, nullptr},        {"contains", 1, 1, "bool"},
+        {"index_of", 1, 1, "int"},     {"remove_at", 1, 1, "bool"},
+        {"sort", 0, 0, nullptr},       {"reverse", 0, 0, nullptr},
+        {"slice", 1, 2, "List"},       {"concat", 1, 1, "List"},
+        {"join", 1, 1, "string"},
+    });
     static const std::vector<BuiltinMethod> kDict = with_own({
-        {"has", 1, 1, "bool"}, {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
+        {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
+        {"values", 0, 0, "List"}, {"get", 1, 2, "Json"}, {"remove", 1, 1, "bool"},
+        {"merge", 1, 1, nullptr},
     });
 
     if (type == "string") return &kString;

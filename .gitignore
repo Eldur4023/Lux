@@ -7,7 +7,7 @@ build/
 # Artifacts left behind by the test suite.
 tests-suite.db*
 tests-sqlite-types.db*
-
+pruebas-suite.db*
 # Benchmark scratch data, not part of the project.
 bench
 

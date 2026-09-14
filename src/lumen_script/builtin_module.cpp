@@ -10,6 +10,8 @@ namespace lumen_script {
 std::unique_ptr<BuiltinModule> make_hash_module();
 std::unique_ptr<BuiltinModule> make_csv_module();
 std::unique_ptr<BuiltinModule> make_os_module();
+std::unique_ptr<BuiltinModule> make_math_module();
+std::unique_ptr<BuiltinModule> make_time_module();
 #ifdef LUMEN_PDF
 std::unique_ptr<BuiltinModule> make_pdf_module();
 #endif
@@ -21,6 +23,8 @@ BuiltinModuleRegistry::BuiltinModuleRegistry() {
     { Slot s; s.module = make_hash_module(); slots_["hash"] = std::move(s); }
     { Slot s; s.module = make_csv_module();  slots_["csv"]  = std::move(s); }
     { Slot s; s.module = make_os_module();   slots_["os"]   = std::move(s); }
+    { Slot s; s.module = make_math_module(); slots_["math"] = std::move(s); }
+    { Slot s; s.module = make_time_module(); slots_["time"] = std::move(s); }
 #ifdef LUMEN_PDF
     { Slot s; s.module = make_pdf_module();  slots_["pdf"]  = std::move(s); }
 #endif

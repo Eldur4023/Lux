@@ -9,6 +9,8 @@
 import hash
 import csv
 import os
+import math
+import time
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -96,3 +98,28 @@ get endpoint("/os/run_echo"):
 get endpoint("/os/run_missing"):
     Json r = os.run("/definitely/not/a/real/command/xyz123")
     return r
+
+get endpoint("/math/basic"):
+    return {
+        "abs": math.abs(-7), "abs_f": math.abs(-2.5),
+        "min": math.min(3, 9), "max": math.max(3, 9),
+        "round": math.round(2.6), "floor": math.floor(2.9), "ceil": math.ceil(2.1),
+        "sqrt": math.sqrt(16), "pow": math.pow(2, 10), "log": math.log(1)
+    }
+
+get endpoint("/math/random"):
+    double r = math.random()
+    int n = math.random_int(5, 5)
+    return { "in_range": r >= 0.0 and r < 1.0, "fixed_range": n }
+
+get endpoint("/time/basic"):
+    int n = time.now()
+    int s = time.now_seconds()
+    string iso = time.format_iso(0)
+    string custom = time.format(0, "%Y-%m-%d")
+    return { "n_positive": n > 0, "s_positive": s > 0, "iso_epoch0": iso, "custom_epoch0": custom }
+
+get endpoint("/time/parse"):
+    Json parsed = time.parse_iso("1970-01-01T00:00:00Z")
+    Json bad = time.parse_iso("not a date")
+    return { "parsed_epoch0": parsed, "bad_is_null": bad == null }

@@ -175,6 +175,24 @@ check "ternary"            GET /ternary/20      200 '"role":"adult"'
 check "try catches"         GET /captura          200 'division by zero'
 check "uncaught error"  GET /boom         500 'division by zero'
 
+check "string.index_of"        GET /strings2 200 '"index_of":7,"index_of_missing":-1'
+check "string.replace"         GET /strings2 200 '"replace":"Hell0, W0rld"'
+check "string.split"           GET /strings2 200 '"split":["Hello","World"]'
+check "string.slice"           GET /strings2 200 '"slice":"Hello","slice_neg":"World"'
+check "string.repeat"          GET /strings2 200 '"repeat":"ababab"'
+check "List.contains/index_of" GET /lists2   200 '"contains":true,"index_of":2'
+check "List.sort"              GET /lists2   200 '"sorted":[1,1,3,4,5]'
+check "List.reverse"           GET /lists2   200 '"reversed":[5,1,4,1,3]'
+check "List.slice"             GET /lists2   200 '"slice":[20,30]'
+check "List.concat"            GET /lists2   200 '"concat":[1,2,3,4]'
+check "List.join"              GET /lists2   200 '"join":"1-2-3"'
+check "List.remove_at"         GET /list_remove_at 200 '"removed":true,"out_of_range":false,"after":[10,30]'
+check "List.sort rejects mixed types" GET /sort_mixed_types 500 'cannot be compared'
+check "Dict.values"            GET /dicts2   200 '"values":[1,2]'
+check "Dict.get present/missing" GET /dicts2 200 '"get_present":1,"get_missing":-1'
+check "Dict.remove"            GET /dicts2   200 '"removed":true,"after_remove":{"b":2}'
+check "Dict.merge"             GET /dicts2   200 '"merged":{"x":1,"y":2}'
+
 echo "== routes and parameters =="
 start_server "$HERE/cases/routes.lum" || exit 1
 check "path parameter"   GET /echo/42           200 '"id":42'
@@ -290,6 +308,16 @@ check "os.read_file missing is null, not an error" GET /os/missing_file 200 '"co
 check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
 check "os.run exit status"         GET /os/run_echo               200 '"status":0'
 check "os.run missing command errors" GET /os/run_missing         500 'could not start'
+
+check "math.abs/min/max"           GET /math/basic  200 '"abs":7,"abs_f":2.5,"min":3,"max":9'
+check "math.round/floor/ceil"      GET /math/basic  200 '"round":3,"floor":2,"ceil":3'
+check "math.sqrt/pow/log"          GET /math/basic  200 '"sqrt":4.0,"pow":1024.0,"log":0.0'
+check "math.random is in [0,1)"    GET /math/random 200 '"in_range":true'
+check "math.random_int inclusive edge" GET /math/random 200 '"fixed_range":5'
+check "time.now/now_seconds"       GET /time/basic  200 '"n_positive":true,"s_positive":true'
+check "time.format_iso/format epoch0" GET /time/basic 200 '"iso_epoch0":"1970-01-01T00:00:00Z","custom_epoch0":"1970-01-01"'
+check "time.parse_iso roundtrip"   GET /time/parse  200 '"parsed_epoch0":0'
+check "time.parse_iso invalid is null" GET /time/parse 200 '"bad_is_null":true'
 
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lum"

@@ -127,6 +127,20 @@ public:
         void   reserve(size_t n) { v_.reserve(n); }
         size_t count(std::string_view k) const { return find(k) == end() ? 0 : 1; }
 
+        // Removes a key if present, returns whether it was. `idx_` maps key
+        // -> position in v_, so erasing shifts every later position by one --
+        // rebuilding it wholesale (build_index()) is the same "do not patch
+        // incrementally" choice insertion already makes above the threshold,
+        // just for removal instead. Below the threshold there is no index to
+        // worry about.
+        bool erase(std::string_view k) {
+            auto it = find(k);
+            if (it == v_.end()) return false;
+            v_.erase(it);
+            if (!idx_.empty()) build_index();
+            return true;
+        }
+
         iterator       find(std::string_view k);
         const_iterator find(std::string_view k) const;
         Value&         operator[](std::string_view k);
@@ -247,6 +261,19 @@ public:
     static bool parse_json(std::string_view text, Value& out);
 
     bool equals(const Value& o) const;
+
+    // Ordering: `this < o`. `ok` is false for anything not both numbers or
+    // both strings -- no coercion, same rule equals() already follows.
+    // <=, >, >= are all derivable from this plus equals() (a<=b is
+    // !(b<a), etc.) for any domain where `ok` is true, since numbers and
+    // strings are both total orders -- so this is the ONE place ordering
+    // logic lives. It used to be a second, separate implementation inside
+    // vm.cpp's Lt/Le/Gt/Ge handling; List.sort() (natives.cpp) needed the
+    // exact same comparison and duplicating it would have been exactly the
+    // kind of silent-divergence risk this project has already been burned
+    // by once (db.hpp's DbOp comment) -- so it moved here instead, and
+    // vm.cpp now calls this too.
+    bool less_than(const Value& o, bool& ok) const;
 
 private:
     // Box with its own counter.  Atomic because a value can be born on a

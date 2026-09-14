@@ -935,10 +935,17 @@ asynchronous: they are called with `await`.
 | Receiver | Methods |
 |---|---|
 | Any | `status(code)` `header(k, v)` `cookie(k, v, ...)` |
-| `string` | `starts_with` `ends_with` `contains` `upper` `lower` `trim` |
-| `List` | `add(v)` |
-| `Dict` | `has(key)` `keys()` |
+| `string` | `starts_with` `ends_with` `contains` `upper` `lower` `trim` `index_of` `replace` `split` `slice` `repeat` |
+| `List` | `add(v)` `contains(v)` `index_of(v)` `remove_at(i)` `sort()` `reverse()` `slice(start[, end])` `concat(other)` `join(sep)` |
+| `Dict` | `has(key)` `keys()` `values()` `get(key[, default])` `remove(key)` `merge(other)` |
 | `File` | `save(directory)` |
+
+`index_of` is a byte offset, not a Unicode codepoint index — correct for ASCII and for
+multi-byte UTF-8 as long as a slice does not land mid-sequence. `slice` accepts negative
+indices (counted from the end, like Python) on both `string` and `List`; out-of-range bounds
+are clamped, not an error. `List.sort()` is natural order only (numbers ascending, strings
+lexicographic) — there is no custom-comparator form, because Lumen Script has no function
+values to pass one with (§23).
 
 When the receiver's type is known at compile time —a declared parameter, a typed variable, a
 literal— the name and the argument count are checked **there**, not at run time:
@@ -1013,7 +1020,7 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, four
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, seven
 so far. Every one but `http` is synchronous (no `await`) and usually needs no
 `<name>: { ... }` block in `app:` at all:
 
@@ -1040,12 +1047,29 @@ so far. Every one but `http` is synchronous (no `await`) and usually needs no
   (bounded by a fixed 15s timeout) — every native module is synchronous today (see
   [NATIVE-MODULES.md](NATIVE-MODULES.md) §2), and this is the one module where that is a real
   cost, not a theoretical one, under real concurrent load.
+- **`os`** — environment (`getenv(name[, default])`), paths (`cwd()`, `path_join(...)`,
+  `path_exists`/`path_basename`/`path_dirname`/`path_abs`), file I/O
+  (`read_file`/`write_file`/`list_dir`/`remove_file`/`make_dir`), and running external commands
+  (`run(command[, args])`, an argv `List`, never a shell string — see [NATIVE-MODULES.md](
+  NATIVE-MODULES.md) §4 for why). `run()` shares `http`'s blocking-thread limitation, bounded by
+  the same kind of fixed timeout (15s). No path sandboxing — trusts the caller exactly as much as
+  Python's `os`/`open()`/`subprocess` do.
+- **`math`** — `abs`/`min`/`max`/`round`/`floor`/`ceil`/`sqrt`/`pow`/`log`, plus
+  `random()` (`[0.0, 1.0)`) and `random_int(lo, hi)` (inclusive on both ends).
+- **`time`** — a timestamp is a plain `int` (milliseconds since the Unix epoch, UTC always, no
+  local timezone anywhere): `now()`/`now_seconds()`, `format(ms, strftime_fmt)`/`format_iso(ms)`,
+  `parse(s, strftime_fmt)`/`parse_iso(s)` — the last two are `null`, not an error, when `s`
+  does not match. Being a plain `int` means duration arithmetic ("5 minutes from now") is just
+  `time.now() + 5 * 60 * 1000` — the language's own `+` already does it, no method needed.
 
 ```lum
 import hash
 import csv
 import pdf
 import http
+import os
+import math
+import time
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -1062,6 +1086,12 @@ get endpoint("/invoice"):
 get endpoint("/weather/:city", string city):
     Json r = http.get("https://api.example.com/weather?city=" + city)
     return r["body"]
+
+get endpoint("/token/:ttl_minutes", int ttl_minutes):
+    string id = str(math.random_int(100000, 999999))
+    int expires = time.now() + ttl_minutes * 60 * 1000
+    os.write_file(os.path_join(os.getenv("TOKEN_DIR", "/tmp"), id), str(expires))
+    return { "id": id, "expires_iso": time.format_iso(expires) }
 ```
 
 Using a module it does not recognize, or one not `import`ed, is a compile error, the same as an
