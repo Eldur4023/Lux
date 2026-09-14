@@ -514,7 +514,8 @@ struct ClassInfo {
 using ClassTable = std::map<std::string, std::shared_ptr<ClassInfo>>;
 
 void build_classes(const Program& program, const FunctionSigs& fns,
-                   const ClassSigs& sigs, const std::set<std::string>* imports,
+                   const ClassSigs& sigs, const EnumSigs& enums,
+                   const std::set<std::string>* imports,
                    ClassTable& out, DiagnosticBag& diags) {
     for (const auto& c : program.classes) {
         if (out.count(c.name)) {
@@ -545,7 +546,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         // that does not exist, the error comes out here and not in production.
         for (const auto& r : c.rules) {
             auto    chunk = std::make_shared<Chunk>();
-            Emitter emitter(diags, &fns, &sigs, imports);
+            Emitter emitter(diags, &fns, &sigs, imports, nullptr, &enums);
             size_t  antes = diags.size();
             if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
             if (shadow_check_enabled()) {
@@ -1130,6 +1131,22 @@ FnSig make_sig(size_t index, const std::vector<Param>& params, DiagnosticBag& di
     return sig;
 }
 
+// Just the member-name sets `Color.RED`-style access checks against --
+// nothing to resolve by index the way a function/class needs, since a
+// member compiles straight to its own name as a string constant (EnumDecl's
+// comment, ast.hpp).
+EnumSigs build_enum_signatures(Module& mod, DiagnosticBag& diags) {
+    EnumSigs out;
+    for (const auto& e : mod.program.enums) {
+        if (out.count(e.name)) {
+            diags.error(e.loc, "enum '" + e.name + "' is already declared");
+            continue;
+        }
+        out[e.name] = std::set<std::string>(e.members.begin(), e.members.end());
+    }
+    return out;
+}
+
 // Methods and constructors are compiled as functions with `this` as the first
 // parameter, so they go into the same table as standalone functions.
 ClassSigs build_class_signatures(Module& mod, DiagnosticBag& diags) {
@@ -1164,7 +1181,7 @@ ClassSigs build_class_signatures(Module& mod, DiagnosticBag& diags) {
 }
 
 void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs& fns,
-                       DiagnosticBag& diags) {
+                       const EnumSigs& enums, DiagnosticBag& diags) {
     const std::set<std::string>* imports = &mod.program.imports;
     for (const auto& c : mod.program.classes) {
         auto it = classes.find(c.name);
@@ -1174,7 +1191,7 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
         for (const auto& m : c.methods) {
             auto ms = sig.methods.find(m.name);
             if (ms == sig.methods.end()) continue;
-            Emitter emitter(diags, &fns, &classes, imports);
+            Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
             size_t  antes = diags.size();
             emitter.emit_method(c.name, m, *mod.functions[ms->second.index]);
             if (shadow_check_enabled()) {
@@ -1186,7 +1203,7 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
         for (const auto& ct : c.ctors) {
             auto cs = sig.ctors.find(ct.params.size());
             if (cs == sig.ctors.end()) continue;
-            Emitter emitter(diags, &fns, &classes, imports);
+            Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
             size_t  antes = diags.size();
             emitter.emit_ctor(c.name, sig.fields, ct, *mod.functions[cs->second]);
             if (shadow_check_enabled()) {
@@ -1210,7 +1227,7 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
             }
             auto cs = sig.ctors.find(c.fields.size());
             if (cs != sig.ctors.end()) {
-                Emitter emitter(diags, &fns, &classes, imports);
+                Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
                 size_t  antes = diags.size();
                 emitter.emit_ctor(c.name, sig.fields, implicito,
                                   *mod.functions[cs->second]);
@@ -1256,12 +1273,13 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
 }
 
 void build_error_handlers(Module& mod, const FunctionSigs& fns,
-                          const ClassSigs& sigs, DiagnosticBag& diags) {
+                          const ClassSigs& sigs, const EnumSigs& enums,
+                          DiagnosticBag& diags) {
     // An error handler can render a page too.
     TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates};
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
+        Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
         size_t  antes = diags.size();
         if (!emitter.emit_error_handler(e, *chunk)) continue;
         if (shadow_check_enabled()) {
@@ -1275,7 +1293,7 @@ void build_error_handlers(Module& mod, const FunctionSigs& fns,
 
 void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth,
                   const FunctionSigs& fns, const ClassSigs& sigs,
-                  DiagnosticBag& diags) {
+                  const EnumSigs& enums, DiagnosticBag& diags) {
     // The Module owns the table and outlives any in-flight request: the
     // dispatcher keeps its shared_ptr alive while the handler runs.
     const FunctionTable* fn_table = &mod.functions;
@@ -1553,7 +1571,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
         // Nivel 2: ruta con logica → bytecode sobre el VM.
         auto    chunk = std::make_shared<Chunk>();
-        Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
+        Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
         size_t  antes = diags.size();
         if (!emitter.emit_route(r, *chunk)) continue;
         if (shadow_check_enabled()) {
@@ -1755,11 +1773,12 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         // Order: first the signatures of everything callable —standalone
         // functions, methods and constructors— and only then the bodies.  That
         // way anyone can call anyone regardless of declaration order.
-        auto fns  = build_functions(*mod, diags);
+        auto fns   = build_functions(*mod, diags);
         mod->function_sigs = fns;
+        auto enums = build_enum_signatures(*mod, diags);
 
         auto sigs = build_class_signatures(*mod, diags);
-        emit_class_bodies(*mod, sigs, fns, diags);
+        emit_class_bodies(*mod, sigs, fns, enums, diags);
 
         // --native (Fase 3): despues de las firmas/cuerpos de clase (necesita
         // ClassSigs para constructores/metodos) y antes de construir rutas,
@@ -1772,7 +1791,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
                                           mod->native_warning);
 
         ClassTable classes;
-        build_classes(mod->program, fns, sigs, &mod->program.imports, classes, diags);
+        build_classes(mod->program, fns, sigs, enums, &mod->program.imports, classes, diags);
 
         AuthConfig auth;
         auth.session_secret  = mod->program.app.session_secret;
@@ -1781,8 +1800,8 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
 
-        if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, diags);
-        if (diags.empty()) build_error_handlers(*mod, fns, sigs, diags);
+        if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, enums, diags);
+        if (diags.empty()) build_error_handlers(*mod, fns, sigs, enums, diags);
         if (diags.empty()) mod->openapi = build_openapi(mod->program, classes);
     }
 

@@ -214,3 +214,88 @@ get endpoint("/range_for_loop"):
 
 get endpoint("/range_bad_step"):
     return { "r": range(0, 5, 0) }
+
+# switch: sugar for an if/elif chain (see parse_switch_into, parser.cpp) --
+# nothing downstream ever sees a switch, only an If.
+get endpoint("/switch_basic/:n", int n):
+    string r = "?"
+    switch n:
+        case 1:
+            r = "one"
+        case 2:
+            r = "two"
+        else:
+            r = "many"
+    return { "r": r }
+
+get endpoint("/switch_no_else/:n", int n):
+    string r = "unset"
+    switch n:
+        case 1:
+            r = "one"
+    return { "r": r }
+
+get endpoint("/switch_multi_value/:n", int n):
+    string r = "?"
+    switch n:
+        case 1, 2, 3:
+            r = "low"
+        case 4, 5:
+            r = "mid"
+        else:
+            r = "high"
+    return { "r": r }
+
+fn int switch_side_effect_count():
+    int c = state.get("switch_calls")
+    state.set("switch_calls", c + 1)
+    return c
+
+# The subject is evaluated exactly once into a synthetic temp, not once per
+# case: if this were re-evaluating it, "calls" would be 2 or 3, not 1.
+get endpoint("/switch_eval_once"):
+    state.set("switch_calls", 0)
+    string r = "?"
+    switch switch_side_effect_count():
+        case 0:
+            r = "zero"
+        case 1:
+            r = "one"
+    return { "r": r, "calls": state.get("switch_calls") }
+
+# enum: a member is a plain string constant (its own name), not an index --
+# see EnumDecl's comment (ast.hpp).
+enum Color:
+    RED
+    GREEN
+    BLUE
+
+enum Status:
+    PENDING, ACTIVE, DONE
+
+get endpoint("/enum_basic"):
+    return { "c": Color.RED, "s": Status.ACTIVE }
+
+get endpoint("/enum_compare/:c", string c):
+    return { "is_red": c == Color.RED }
+
+get endpoint("/enum_switch"):
+    string status = Status.ACTIVE
+    string label = "?"
+    switch status:
+        case Status.PENDING:
+            label = "waiting"
+        case Status.ACTIVE:
+            label = "in progress"
+        case Status.DONE:
+            label = "finished"
+    return { "label": label }
+
+class EnumOrder:
+    string status
+
+    validate:
+        status == Status.PENDING or status == Status.ACTIVE or status == Status.DONE   "status: invalid"
+
+post endpoint("/enum_order", EnumOrder o):
+    return { "status": o.status }

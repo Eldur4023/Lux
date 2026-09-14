@@ -21,14 +21,14 @@ enum class Tok {
 
     // Declaraciones
     KwImport, KwClass, KwFn, KwApp, KwGroup, KwEndpoint, KwOn, KwError,
-    KwOrigins, KwValidate, KwStatic, KwSpa,
+    KwOrigins, KwValidate, KwStatic, KwSpa, KwEnum,
 
     // Metodos de path
     KwGet, KwPost, KwPut, KwPatch, KwDelete, KwAny, KwSse, KwWs,
 
     // Sentencias
     KwIf, KwElse, KwElif, KwWhile, KwFor, KwIn, KwReturn, KwRequire,
-    KwTry, KwCatch, KwBreak, KwContinue,
+    KwTry, KwCatch, KwBreak, KwContinue, KwSwitch, KwCase,
 
     // Expresiones y tipos
     KwAnd, KwOr, KwNot, KwTrue, KwFalse, KwNull, KwThis, KwAwait, KwVoid,

@@ -209,6 +209,18 @@ check "range with negative step" GET /range 200 '"negative_step":[5,4,3,2,1]'
 check "range() in a for loop" GET /range_for_loop 200 '"total":10'
 check "range() rejects step 0" GET /range_bad_step 500 'step cannot be 0'
 
+check "switch basic case"      GET /switch_basic/1 200 '"r":"one"'
+check "switch else fallback"   GET /switch_basic/99 200 '"r":"many"'
+check "switch no else, no match leaves variable untouched" GET /switch_no_else/99 200 '"r":"unset"'
+check "switch multi-value case" GET /switch_multi_value/2 200 '"r":"low"'
+check "switch multi-value case, second group" GET /switch_multi_value/5 200 '"r":"mid"'
+check "switch subject evaluated exactly once" GET /switch_eval_once 200 '"r":"zero","calls":1'
+check "enum member is a plain string" GET /enum_basic 200 '"c":"RED","s":"ACTIVE"'
+check "comparing a string against an enum member" GET /enum_compare/RED 200 '"is_red":true'
+check "switch over an enum-valued variable" GET /enum_switch 200 '"label":"in progress"'
+check "class validate: rule using an enum, valid" POST /enum_order 200 '"status":"ACTIVE"' '{"status":"ACTIVE"}'
+check "class validate: rule using an enum, invalid" POST /enum_order 422 'status: invalid' '{"status":"BOGUS"}'
+
 echo "== routes and parameters =="
 start_server "$HERE/cases/routes.lum" || exit 1
 check "path parameter"   GET /echo/42           200 '"id":42'

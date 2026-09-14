@@ -123,6 +123,9 @@ void Parser::parse_declaration(Program& out) {
         case Tok::KwClass:
             parse_class(out);
             return;
+        case Tok::KwEnum:
+            parse_enum(out);
+            return;
         case Tok::KwOn:
             parse_error(out);
             return;
@@ -483,6 +486,48 @@ void Parser::parse_class(Program& out) {
     out.classes.push_back(std::move(c));
 }
 
+// enum Color:
+//     RED, GREEN
+//     BLUE
+//
+// One member per line or comma-separated on the same line, both accepted --
+// whichever reads better for how many there are. See EnumDecl's comment
+// (ast.hpp) for why a member is a plain string constant at runtime, not a
+// new type or an integer index.
+void Parser::parse_enum(Program& out) {
+    EnumDecl e;
+    e.loc = advance().loc;   // 'enum'
+
+    if (check(Tok::Ident)) e.name = advance().text;
+    else { error_here("expected the enum name"); synchronize(); return; }
+
+    if (!expect(Tok::Colon, "after the enum name")) { synchronize(); return; }
+    skip_newlines();
+    if (!expect(Tok::Indent, "opening the enum body")) { synchronize(); return; }
+
+    while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+        skip_newlines();
+        if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+
+        for (;;) {
+            if (!check(Tok::Ident)) { error_here("expected a member name"); break; }
+            const Token& tok = advance();
+            bool dup = false;
+            for (const auto& m : e.members) if (m == tok.text) { dup = true; break; }
+            if (dup) diags_.error(tok.loc, "'" + tok.text + "' is already a member of '" + e.name + "'");
+            else     e.members.push_back(tok.text);
+            if (!match(Tok::Comma)) break;
+        }
+        skip_newlines();
+    }
+    match(Tok::Dedent);
+
+    if (e.members.empty())
+        diags_.error(e.loc, "enum '" + e.name + "' declares no members");
+
+    out.enums.push_back(std::move(e));
+}
+
 // ─── app: block ──────────────────────────────────────────────────────────────
 
 // kind: 0 string, 1 number, 2 boolean.  env("VAR") is resolved right here and
@@ -669,7 +714,12 @@ Block Parser::parse_block() {
         skip_newlines();
         if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
         size_t before = i_;
-        if (auto s = parse_statement()) body.push_back(std::move(s));
+        // switch desugars to more than one statement (a temp var plus an
+        // if/elif chain, see parse_switch_into) -- it cannot return a single
+        // StmtPtr the way every other statement does, so it is intercepted
+        // here instead of inside parse_statement().
+        if (check(Tok::KwSwitch)) parse_switch_into(body);
+        else if (auto s = parse_statement()) body.push_back(std::move(s));
         skip_newlines();
         if (i_ == before) advance();
     }
@@ -882,6 +932,116 @@ StmtPtr Parser::parse_try() {
     expect(Tok::Colon, "after 'catch'");
     s->orelse = parse_block();
     return s;
+}
+
+// `switch` is sugar, not a new mechanism: it desugars here, at parse time,
+// into exactly what a hand-written if/elif chain already is -- an If Stmt
+// whose `orelse` holds another complete If, the same shape parse_if()
+// already builds for `elif` ("else-if chain: every link is a complete If
+// inside `orelse`", ast.hpp). Nothing downstream (the checker, the
+// emitter, --native's codegen) ever sees a switch: it is only ever an If.
+//
+//   switch subject:
+//       case v1, v2:
+//           B1
+//       case v3:
+//           B2
+//       else:
+//           BE
+//
+// becomes (subject evaluated exactly once, into a compiler-generated local,
+// so an expression with a side effect -- a function call, an increment --
+// is not repeated once per case the way naively re-evaluating it in every
+// comparison would):
+//
+//   Json __switch_0 = subject
+//   if __switch_0 == v1 or __switch_0 == v2:
+//       B1
+//   elif __switch_0 == v3:
+//       B2
+//   else:
+//       BE
+//
+// Case values are ordinary expressions, not restricted to literals (C's
+// restriction doesn't apply here: there is no jump table to build, this is
+// just `==`), and Value::equals() decides equality exactly like `==`
+// anywhere else in the language would -- there is no separate "switch
+// equality" rule to keep in sync with it.
+void Parser::parse_switch_into(Block& out) {
+    SourceLoc switch_loc = advance().loc;   // 'switch'
+    ExprPtr subject = parse_expr();
+    expect(Tok::Colon, "after the switch subject");
+    skip_newlines();
+    if (!expect(Tok::Indent, "opening the switch block")) return;
+
+    std::string tmp_name = "__switch_" + std::to_string(switch_count_++);
+    auto decl   = std::make_unique<Stmt>();
+    decl->kind  = StmtKind::VarDecl;
+    decl->loc   = switch_loc;
+    decl->type.name = "Json";   // the subject can be any comparable type
+    decl->type.loc  = switch_loc;
+    decl->name  = tmp_name;
+    decl->value = std::move(subject);
+
+    struct Arm { ExprPtr cond; Block body; SourceLoc loc; };
+    std::vector<Arm> arms;
+    Block else_block;
+    bool  has_else = false;
+
+    skip_newlines();
+    if (!check(Tok::KwCase))
+        diags_.error(switch_loc, "a 'switch' needs at least one 'case'");
+
+    while (check(Tok::KwCase)) {
+        SourceLoc case_loc = advance().loc;
+        // One or more comma-separated values per case, joined with 'or' --
+        // `case 1, 2:` matches either, same as writing it out by hand would.
+        ExprPtr cond;
+        for (;;) {
+            auto ref = make(ExprKind::Ident, case_loc);
+            ref->text = tmp_name;
+            auto eq = make(ExprKind::Binary, case_loc);
+            eq->text = "==";
+            eq->lhs  = std::move(ref);
+            eq->rhs  = parse_expr();
+            if (!cond) cond = std::move(eq);
+            else {
+                auto or_expr = make(ExprKind::Binary, case_loc);
+                or_expr->text = "or";
+                or_expr->lhs  = std::move(cond);
+                or_expr->rhs  = std::move(eq);
+                cond = std::move(or_expr);
+            }
+            if (!match(Tok::Comma)) break;
+        }
+        expect(Tok::Colon, "after the case value(s)");
+        arms.push_back({std::move(cond), parse_block(), case_loc});
+        skip_newlines();
+    }
+    if (check(Tok::KwElse)) {
+        advance();
+        expect(Tok::Colon, "after 'else'");
+        else_block = parse_block();
+        has_else   = true;
+        skip_newlines();
+    }
+    match(Tok::Dedent);
+
+    out.push_back(std::move(decl));
+    if (arms.empty()) return;   // already reported above; nothing to chain
+
+    Block chain = has_else ? std::move(else_block) : Block{};
+    for (auto it = arms.rbegin(); it != arms.rend(); ++it) {
+        auto if_stmt    = std::make_unique<Stmt>();
+        if_stmt->kind   = StmtKind::If;
+        if_stmt->loc    = it->loc;
+        if_stmt->value  = std::move(it->cond);
+        if_stmt->body   = std::move(it->body);
+        if_stmt->orelse = std::move(chain);
+        chain = Block{};
+        chain.push_back(std::move(if_stmt));
+    }
+    out.push_back(std::move(chain[0]));
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────

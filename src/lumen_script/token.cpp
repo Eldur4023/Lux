@@ -26,6 +26,7 @@ const char* tok_name(Tok t) {
         case Tok::KwValidate: return "validate";
         case Tok::KwStatic:   return "static";
         case Tok::KwSpa:      return "spa";
+        case Tok::KwEnum:     return "enum";
 
         case Tok::KwGet:    return "get";
         case Tok::KwPost:   return "post";
@@ -48,6 +49,8 @@ const char* tok_name(Tok t) {
         case Tok::KwCatch:    return "catch";
         case Tok::KwBreak:    return "break";
         case Tok::KwContinue: return "continue";
+        case Tok::KwSwitch:   return "switch";
+        case Tok::KwCase:     return "case";
 
         case Tok::KwAnd:   return "and";
         case Tok::KwOr:    return "or";
@@ -99,6 +102,7 @@ Tok keyword_or_ident(std::string_view s) {
         {"app", Tok::KwApp}, {"group", Tok::KwGroup}, {"endpoint", Tok::KwEndpoint},
         {"on", Tok::KwOn}, {"error", Tok::KwError}, {"origins", Tok::KwOrigins},
         {"validate", Tok::KwValidate}, {"static", Tok::KwStatic}, {"spa", Tok::KwSpa},
+        {"enum", Tok::KwEnum},
 
         {"get", Tok::KwGet}, {"post", Tok::KwPost}, {"put", Tok::KwPut},
         {"patch", Tok::KwPatch}, {"delete", Tok::KwDelete}, {"any", Tok::KwAny},
@@ -108,6 +112,7 @@ Tok keyword_or_ident(std::string_view s) {
         {"for", Tok::KwFor}, {"in", Tok::KwIn}, {"return", Tok::KwReturn},
         {"require", Tok::KwRequire}, {"try", Tok::KwTry}, {"catch", Tok::KwCatch},
         {"break", Tok::KwBreak}, {"continue", Tok::KwContinue},
+        {"switch", Tok::KwSwitch}, {"case", Tok::KwCase},
 
         {"and", Tok::KwAnd}, {"or", Tok::KwOr}, {"not", Tok::KwNot},
         {"true", Tok::KwTrue}, {"false", Tok::KwFalse}, {"null", Tok::KwNull},

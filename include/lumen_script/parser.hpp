@@ -28,6 +28,10 @@ private:
     std::vector<Token> toks_;
     DiagnosticBag&     diags_;
     size_t             i_ = 0;
+    // Every switch needs a name for the temp local holding its
+    // once-evaluated subject; counting up keeps two switches in the same
+    // function (or nested ones) from colliding on the same synthetic name.
+    size_t             switch_count_ = 0;
 
     // ── Navegacion ───────────────────────────────────────────────────────────
     const Token& peek(size_t ahead = 0) const;
@@ -50,6 +54,7 @@ private:
     // Resuelve un value de configuracion: string_value, number, booleano o env("VAR").
     bool config_value(std::string& text, long long& number, bool& flag, int& kind);
     void parse_class(Program& out);
+    void parse_enum(Program& out);
     void parse_error(Program& out);
     void parse_fn(Program& out);
 
@@ -65,6 +70,12 @@ private:
     ExprPtr clone_target(const Expr& e);
     StmtPtr parse_require();
     StmtPtr parse_try();
+    // `switch` is not a real AST node: it desugars straight to an if/elif
+    // chain (see the .cpp comment) and pushes its result(s) directly into
+    // the enclosing block, which is why this takes the Block by reference
+    // instead of returning a single StmtPtr like every other parse_*
+    // statement function does.
+    void parse_switch_into(Block& out);
 
     // ── Tipos y parametros ───────────────────────────────────────────────────
     bool    looks_like_type() const;

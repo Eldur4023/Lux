@@ -836,6 +836,34 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                 r->call_index = id;
                 return r;
             }
+
+            // `Color.RED`: an enum member, resolved here the same way a
+            // reserved object's member is above -- by NAME, before ever
+            // treating `e.object` as a value to evaluate -- because an enum
+            // name is not a value in scope, it is a compile-time-only
+            // namespace, exactly like `hash`/`math`/... are for a module.
+            // Compiles straight to a StringLit IrExpr (the member's own
+            // name as a string, see EnumDecl's comment) -- no new IrExprKind
+            // needed, this rides Op::Const the same way a function reference
+            // does (check_expr's Ident case).
+            if (e.object->kind == ExprKind::Ident &&
+                resolve_local(e.object->text) < 0 &&
+                enums_ && enums_->count(e.object->text)) {
+                const auto& members = enums_->at(e.object->text);
+                if (!members.count(e.text)) {
+                    std::string list;
+                    for (const auto& m : members) { if (!list.empty()) list += ", "; list += m; }
+                    shadow.error(e.loc, "enum '" + e.object->text + "' has no member '" +
+                                 e.text + "'; it has " + list);
+                    return nullptr;
+                }
+                auto r = nodo();
+                r->kind = IrExprKind::StringLit;
+                r->text = e.text;
+                r->type = Type::from_legacy_name("string");
+                return r;
+            }
+
             if (!check_field(*e.object, e.text, e.loc, shadow)) return nullptr;
             IrExprPtr obj = check_expr(*e.object, shadow);
             if (!obj) return nullptr;

@@ -838,6 +838,26 @@ Json  List<T>  Dict<K,V>  File  Func           native classes, uppercase
 `T?` marks that the value may be missing. Generics are **erased**: the checker verifies them
 and they disappear before the bytecode. There are no user-defined generic classes.
 
+### Enums
+
+```lum
+enum Status:
+    PENDING, ACTIVE, DONE
+
+get endpoint("/orders/:id/status", int id):
+    return { "status": Status.ACTIVE }
+```
+
+A member (`Status.ACTIVE`) is a plain `string` — its own name, `"ACTIVE"`, not an index —
+so it needs no separate representation anywhere: it serializes straight into a JSON
+response exactly like any other string would, and compares with `==` like one too.
+One member per line or comma-separated on the same line, whichever reads better for how
+many there are. A typo in the member name is a compile error, listing the real ones:
+
+```
+./app.lum:8:20: error: enum 'Status' has no member 'ACTVE'; it has ACTIVE, DONE, PENDING
+```
+
 ### Multi-line strings
 
 Three quotes, for SQL or HTML without fighting the line breaks:
@@ -905,11 +925,29 @@ catch e:
 break
 continue
 return value
+
+switch n:
+    case 1, 2:
+        ...
+    case 3:
+        ...
+    else:
+        ...
 ```
 
-`for` walks lists and a dictionary's keys. `try/catch` is resolved with a range table
-computed at compile time, so a `return` or a `break` inside the `try` does not leave a
-handler dangling. The error reaches the `catch` as a value with `message`.
+`for` walks lists and a dictionary's keys, `range(...)` included: `for int i in range(5):`.
+`try/catch` is resolved with a range table computed at compile time, so a `return` or a
+`break` inside the `try` does not leave a handler dangling. The error reaches the `catch`
+as a value with `message`.
+
+`switch` is not a separate mechanism — it desugars, at parse time, into exactly the
+if/elif chain writing it out by hand would be. The subject (`n` above) is evaluated
+**once**, into a compiler-generated local, no matter how many `case`s there are — an
+expression with a side effect in the subject position is not repeated per case. A `case`
+takes one or more comma-separated values (`case 1, 2:` matches either); values are
+ordinary expressions, not restricted to literals, compared with the subject using the
+same `==` the rest of the language uses. `else` is optional — with no match and no
+`else`, nothing in the switch runs, same as an `if` with no matching branch and no `else`.
 
 ### Expressions
 

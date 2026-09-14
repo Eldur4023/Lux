@@ -142,6 +142,18 @@ struct ClassDecl {
     SourceLoc                 loc;
 };
 
+// `enum Color: RED, GREEN, BLUE` (or one member per line, both accepted --
+// see parse_enum). Members compile to a plain string constant (their own
+// name, "RED" not an index) wherever `Color.RED` is used as a value: no new
+// runtime representation, no new Value type, just a string riding the
+// existing Const/constant-pool mechanism the same way a function reference
+// (Value::Type::Func) does -- see Emitter::check_expr's Member case.
+struct EnumDecl {
+    std::string              name;
+    std::vector<std::string> members;
+    SourceLoc                loc;
+};
+
 // A `require X else Y` guard declared at group level.  It is prepended to the
 // body of every route in the group, from the outside in.
 // They are shared instead of copied: a guard declared once is used by every
@@ -206,6 +218,7 @@ struct Program {
     // `import sqlite`.
     std::set<std::string>  imports;
     std::vector<ClassDecl> classes;
+    std::vector<EnumDecl>  enums;
     std::vector<FnDecl>    functions;
     std::vector<RouteDecl> routes;
     std::vector<ErrorDecl> errors;

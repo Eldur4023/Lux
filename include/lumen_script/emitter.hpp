@@ -34,6 +34,13 @@ struct ClassSig {
 };
 using ClassSigs = std::map<std::string, ClassSig>;
 
+// What the emitter needs to know about an `enum`: its name, and the set of
+// member names `Name.MEMBER` may resolve to -- resolving to the member's
+// own name as a plain string constant (EnumDecl's comment, ast.hpp), not an
+// index, so this is all the checker needs to validate access and nothing
+// else has to carry a "the enum's runtime representation" concept at all.
+using EnumSigs = std::map<std::string, std::set<std::string>>;
+
 struct Template;
 
 // A name visible inside a standalone expression, with its declared type.
@@ -70,9 +77,10 @@ public:
     explicit Emitter(DiagnosticBag& diags, const FunctionSigs* functions = nullptr,
                      const ClassSigs* classes = nullptr,
                      const std::set<std::string>* imports = nullptr,
-                     TemplateCtx* templates = nullptr)
+                     TemplateCtx* templates = nullptr,
+                     const EnumSigs* enums = nullptr)
         : diags_(diags), functions_(functions), classes_(classes), imports_(imports),
-          templates_(templates) {}
+          templates_(templates), enums_(enums) {}
 
     // The route parameters take the first slots, in order.
     // Returns false if something in the body cannot be compiled yet.
@@ -195,6 +203,7 @@ private:
     const ClassSigs*                     classes_   = nullptr;
     const std::set<std::string>*         imports_   = nullptr;
     TemplateCtx*                        templates_ = nullptr;
+    const EnumSigs*                      enums_     = nullptr;
     Chunk*         chunk_ = nullptr;
     bool           failed_ = false;
 
