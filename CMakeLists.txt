@@ -109,9 +109,11 @@ target_link_libraries(lumen PUBLIC
 )
 
 if(LUMEN_IO_URING)
-    find_library(URING_LIB uring REQUIRED)
+    # io_uring_loop.cpp calls io_uring_setup/io_uring_enter via raw
+    # syscall(__NR_io_uring_*, ...) (see its own comment: "Raw syscalls
+    # only -- no liburing dependency"), confirmed by grep -- nothing here
+    # includes or links liburing. No find_library/link needed.
     target_compile_definitions(lumen PUBLIC LUMEN_IO_URING)
-    target_link_libraries(lumen PUBLIC ${URING_LIB})
 endif()
 
 target_compile_options(lumen PRIVATE -Wall -Wextra -Wno-unused-parameter)

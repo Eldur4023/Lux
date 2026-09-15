@@ -295,7 +295,38 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     const std::string cxx = (cxx_env && *cxx_env) ? cxx_env : "g++";
 
     std::ostringstream cmd;
-    cmd << cxx << " -O2 -shared -fPIC -std=c++20 ";
+    // -fno-semantic-interposition: sin ella, GCC bajo -fPIC asume que
+    // cualquier funcion exportada del .so podria ser interpuesta por otra
+    // biblioteca cargada antes, y por eso enruta CADA llamada entre
+    // funciones Lumen -- y cada salto del wrapper ABI (extern "C"
+    // lumen_native_*) a la funcion real -- a traves de la PLT, perdiendo
+    // toda oportunidad de inlining incluso cuando el cuerpo entero es
+    // visible en la misma unidad de traduccion. Verificado con objdump: sin
+    // esta flag, `l_user() { return l_add(x,x) + l_add(x,1); }` compila a
+    // dos `call ...@plt`; con ella, GCC inlinea y reduce el cuerpo entero a
+    // una sola instruccion. No cambia la visibilidad de ningun simbolo (los
+    // wrappers extern "C" siguen exportados igual, dlsym() no se entera),
+    // solo la asuncion de codegen -- no hay ningun escenario de
+    // LD_PRELOAD/interposicion real que este .so necesite soportar.
+    cmd << cxx << " -O2 -shared -fPIC -fno-semantic-interposition -std=c++20 ";
+#ifdef LUMEN_IO_URING
+    // lumen::core::EventLoop (event_loop.hpp) resuelve a IoUringLoop o
+    // EpollLoop segun si ESTE macro esta definido en el momento en que se
+    // incluye la cabecera -- y sin esta flag aqui, la unica que faltaba,
+    // esta invocacion de g++ (un proceso NUEVO, que no hereda las flags con
+    // las que se compilo el propio `lumen`) lo compilaba siempre como si
+    // LUMEN_IO_URING NO estuviera definido, aunque el binario que lo invoca
+    // (y liblumen_script.a/liblumen.a, a las que este .so enlaza) SI lo
+    // tuviera -- el .so generado quedaba pidiendo la sobrecarga de
+    // await_db()/etc. con EpollLoop* mientras las bibliotecas estaticas
+    // solo ofrecian la de IoUringLoop*, y dlopen() fallaba con "undefined
+    // symbol" en CUALQUIER ruta con `await` (encontrado por
+    // native_route_shadow al construir con -DLUMEN_IO_URING=ON, no
+    // adivinado de antemano) -- el mismo tipo de descuido de "una flag que
+    // un proceso nuevo no hereda sola" que ya motivo LUMEN_NATIVE_CAIRO_LIBS/
+    // LUMEN_NATIVE_CURL_LIBS mas abajo.
+    cmd << "-DLUMEN_IO_URING ";
+#endif
     // LUMEN_NATIVE_INCLUDE_DIR/LUMEN_NATIVE_SCRIPT_LIB: horneadas por CMake
     // (ver CMakeLists.txt) -- el binario `lumen` no tiene otra forma de
     // saber, en tiempo de ejecucion, donde viven las cabeceras del proyecto
