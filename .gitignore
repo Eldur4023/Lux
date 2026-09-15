@@ -8,6 +8,7 @@ build-iouring/
 tests-suite.db*
 tests-sqlite-types.db*
 pruebas-suite.db*
+example/notes.db*
 # Benchmark scratch data, not part of the project.
 bench
 

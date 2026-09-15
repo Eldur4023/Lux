@@ -1,5 +1,38 @@
 <!doctype html>
 <title>{{ title }}</title>
-<link rel="stylesheet" href="/static/estilo.css">
+<link rel="stylesheet" href="/static/style.css">
+
 <h1>{{ title }}</h1>
-<p>{{ nota }}</p>
+<p>{{ total }} note{{ total == 1 ? "" : "s" }} — see also <a href="/docs">/docs</a>, <a href="/api">/api</a>, <a href="/stats">/stats</a>.</p>
+
+<form id="new-note">
+    <input id="title" name="title" placeholder="a new note" required>
+    <button type="submit">add</button>
+</form>
+
+{% if total == 0 %}
+<p><em>no notes yet — add one above.</em></p>
+{% endif %}
+
+<ul id="notes">
+{% for n in notes %}
+    <li>
+        <span class="status status-{{ n.status }}">{{ n.status }}</span>
+        <a href="/notes/{{ n.id }}">{{ n.title }}</a>
+        {% if loop.first %}<span class="latest">latest</span>{% endif %}
+    </li>
+{% endfor %}
+</ul>
+
+<script>
+document.getElementById("new-note").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const title = document.getElementById("title").value;
+    const res = await fetch("/notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+    });
+    if (res.ok) location.reload();
+});
+</script>

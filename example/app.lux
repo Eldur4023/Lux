@@ -1,18 +1,48 @@
-# Lux example project.
+# Lux example project — a tiny sqlite-backed notes app.
 #   $ lux ./example
+#
+# Touches most of the language in one place: the app: block, sqlite,
+# classes with validation, an enum, switch, session + a guarded group,
+# native modules (hash/time/math/regex) and templates.
+
+import sqlite
+import hash
+import time
+import math
+import regex
 
 app:
-    name      "Lux Example"
-    version   "2.0.0"
+    name      "Lux Notes"
+    version   "1.0.0"
     port      8080
     templates "./example/templates"
 
     static "/static" -> "./example/public"
+
+    docs
     health
 
+    session:
+        secret  "cambia-esto-en-produccion-0123456789"  # env("SESSION_SECRET") in real use
+        max_age 86400
 
-get endpoint("/"):
-    return render("index.html", title="Lux 2.0", nota="edit me and save")
+    sqlite:
+        file "./example/notes.db"
+        pool 4
+
+enum Status:
+    OPEN, DONE, ARCHIVED
+
+class Note:
+    string  title
+    string? body
+
+    validate:
+        title != ""         "title: required"
+        len(title) <= 120   "title: too long (max 120 characters)"
+
+# ── The basics: declarative routes, resolved at compile time with zero
+#    bytecode (GUIDE.md §4). ──────────────────────────────────────────────────
 
 get endpoint("/hello"):
     return text("hello from lux_script")
@@ -23,5 +53,110 @@ get endpoint("/api"):
 get endpoint("/ir"):
     return redirect("/")
 
-fn waos()
+# ── Notes: sqlite-backed CRUD, search, stats and a share token. ─────────────
+#
+# `notes` is created with `if not exists` at the top of every handler that
+# touches it, not only "/": each endpoint has to work on a fresh notes.db
+# even if "/" is never visited, and the check is cheap enough to not bother
+# with a separate migration step for a demo this size.
 
+get endpoint("/"):
+    await sqlite.exec("""
+        create table if not exists notes (
+            id      integer primary key autoincrement,
+            title   text not null,
+            body    text,
+            status  text not null default 'OPEN',
+            author  text,
+            created integer not null
+        )
+        """)
+    List<Json> notes = await sqlite.query("select id, title, status from notes order by id desc")
+    return render("index.html", title="Lux Notes", notes=notes, total=len(notes))
+
+post endpoint("/notes", Note n):
+    await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+    await sqlite.exec(
+        "insert into notes (title, body, status, author, created) values (?, ?, ?, ?, ?)",
+        n.title, n.body, Status.OPEN, session.user, time.now())
+    int id = await sqlite.last_id()
+    return { "id": id, "title": n.title, "status": Status.OPEN }.status(201)
+
+get endpoint("/notes/:id", int id):
+    await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+    List<Json> rows = await sqlite.query(
+        "select id, title, body, status, author, created from notes where id = ?", id)
+    if len(rows) == 0:
+        return status(404)
+    Json note = rows[0]
+    return {
+        "id":          note["id"],
+        "title":       note["title"],
+        "body":        note["body"],
+        "status":      note["status"],
+        "author":      note["author"],
+        "created_iso": time.format_iso(note["created"]),
+        "share_token": hash.sha256(str(id) + note["title"]).slice(0, 12)
+    }
+
+post endpoint("/notes/:id/status/:new_status", int id, string new_status):
+    await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+    switch new_status:
+        case "OPEN", "DONE", "ARCHIVED":
+            await sqlite.exec("update notes set status = ? where id = ?", new_status, id)
+            return { "id": id, "status": new_status }
+        else:
+            return { "error": "invalid status", "allowed": ["OPEN", "DONE", "ARCHIVED"] }.status(400)
+
+delete endpoint("/notes/:id", int id):
+    await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+    await sqlite.exec("delete from notes where id = ?", id)
+    return status(204)
+
+get endpoint("/notes/search", string q = ""):
+    await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+    if not regex.test("^[\\w ]*$", q):
+        return { "error": "invalid characters in search" }.status(400)
+    List<Json> rows = await sqlite.query(
+        "select id, title from notes where title like ?", "%" + q + "%")
+    return { "query": q, "count": len(rows), "results": rows }
+
+get endpoint("/stats"):
+    await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+    List<Json> rows = await sqlite.query("select status from notes")
+    int total = len(rows)
+    int done = 0
+    for Json r in rows:
+        if r["status"] == "DONE":
+            done = done + 1
+    double done_pct = total == 0 ? 0.0 : math.round((done * 100.0) / total)
+    return { "total": total, "done": done, "done_pct": done_pct }
+
+# ── Session: log in, see who you are, and a guard that needs it. ────────────
+
+post endpoint("/login", string name):
+    session.user = name
+    return { "logged_in": name }
+
+post endpoint("/logout"):
+    session.clear()
+    return redirect("/")
+
+get endpoint("/whoami"):
+    return { "user": session.user }
+
+group("/admin"):
+    require session.user != null else status(401)
+
+    get endpoint("/notes/count"):
+        await sqlite.exec("create table if not exists notes (id integer primary key autoincrement, title text not null, body text, status text not null default 'OPEN', author text, created integer not null)")
+        List<Json> rows = await sqlite.query("select id from notes")
+        return { "count": len(rows) }
+
+# ── Error handlers ───────────────────────────────────────────────────────────
+
+on error 404:
+    return { "error": "not found", "path": request.path }
+
+on error 422:
+    return { "error": "validation failed", "details": error.messages }

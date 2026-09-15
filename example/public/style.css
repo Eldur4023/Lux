@@ -1,1 +1,19 @@
-body { font-family: system-ui; margin: 3rem; }
+body { font-family: system-ui; margin: 3rem auto; max-width: 40rem; }
+
+ul#notes { list-style: none; padding: 0; }
+ul#notes li { padding: 0.4rem 0; border-bottom: 1px solid #eee; }
+
+.status {
+    display: inline-block;
+    min-width: 5.5rem;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    color: #666;
+}
+.status-DONE     { color: #2a7a2a; }
+.status-ARCHIVED { color: #999; }
+
+.latest { margin-left: 0.5rem; font-size: 0.7rem; color: #999; }
+
+form#new-note { display: flex; gap: 0.5rem; margin: 1rem 0; }
+form#new-note input { flex: 1; padding: 0.3rem 0.5rem; }
