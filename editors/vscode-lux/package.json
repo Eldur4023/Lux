@@ -49,22 +49,6 @@
     "configurationDefaults": {
       "[lux]": {
         "editor.semanticHighlighting.enabled": false
-      },
-      "editor.tokenColorCustomizations": {
-        "textMateRules": [
-          {
-            "scope": ["string.quoted.double.lux", "string.quoted.triple.lux"],
-            "settings": { "foreground": "#CE9178" }
-          },
-          {
-            "scope": "entity.name.function.lux",
-            "settings": { "foreground": "#DCDCAA" }
-          },
-          {
-            "scope": "support.type.property-name.lux",
-            "settings": { "foreground": "#FFA657" }
-          }
-        ]
       }
     }
   },

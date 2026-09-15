@@ -22,25 +22,20 @@ Syntax highlighting, live diagnostics and completion for `.lux` files. See
   given file's own classes, functions or locals — see "What is not here yet" below.
 - **Editor configuration** — `#` comments, bracket/quote auto-closing, indentation rules
   for Lux's Python-style indented blocks.
-- **Default colors for strings, function names, and `app:`-block config keys**
-  (`package.json`'s `contributes.configurationDefaults`) — shipped because a theme that
-  defines *semantic* token colors (GitHub Dark, One Dark Pro, and most modern themes) only
-  applies them to languages with a real semantic token provider, which this extension does
-  not have yet; without a default, such a theme silently falls back to a color that usually
-  isn't the one it actually intends for strings/functions. Sets
-  `editor.semanticHighlighting.enabled: false` for `[lux]` (there is no semantic data to
-  lose) and a `textMateRules` default for `string.quoted.double.lux`/
-  `string.quoted.triple.lux` (`#CE9178`), `support.type.property-name.lux` (`#FFA657`),
-  and `entity.name.function.lux` (`#DCDCAA`) — the first and third are VS Code's own Dark+
-  colors for those roles; the second matches GitHub Dark's `variable` color instead, chosen
-  to match `variable.parameter.lux` (named call arguments, e.g. `title=` in
-  `render(..., title="...")`) which app-block config keys are meant to read as visually
-  related to, not identical to strings. **A real limitation, not glossed over:** VS Code does not merge
-  `configurationDefaults` with a user's own `editor.tokenColorCustomizations` — a user
-  setting for that key replaces the extension's default *entirely*, not just the rules that
-  overlap. If you already customize `tokenColorCustomizations` for other languages, the
-  Lux defaults above will not apply until you copy those three rules into your own
-  `textMateRules` array by hand.
+- **No injected global settings.** Colors come entirely from the grammar's scope names —
+  `string.quoted.double.lux`, `entity.name.function.lux`, `support.type.property-name.lux`,
+  and the rest all follow the standard `<role>.<subrole>.lux` convention, so any theme
+  already has rules for the base scope (`string.quoted.double`, `entity.name.function`, …)
+  and colors Lux source through ordinary TextMate prefix matching — no per-extension
+  override needed. `package.json` sets exactly one default, `[lux]`'s
+  `editor.semanticHighlighting.enabled: false` (there is no semantic token provider here,
+  so there is no semantic data for it to disable) — scoped to `.lux` files only, unlike the
+  global `editor.tokenColorCustomizations` key an earlier version of this extension wrote
+  defaults into. **Trade-off, not glossed over:** a theme that colors mostly through
+  *semantic* tokens (GitHub Dark, One Dark Pro, …) may render Lux source a bit flatter than
+  a language with its own semantic provider, since such a theme's TextMate rules for
+  unrecognized languages are usually a generic fallback. That is accepted rather than fixed
+  by writing into a setting shared with every other language the user has open.
 
 ## How diagnostics actually work
 
