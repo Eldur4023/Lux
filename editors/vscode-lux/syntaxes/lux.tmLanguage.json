@@ -16,6 +16,7 @@
     { "include": "#constants" },
     { "include": "#storage-types" },
     { "include": "#reserved-objects" },
+    { "include": "#modules" },
     { "include": "#arrow" },
     { "include": "#functions" },
     { "include": "#named-arg" },
@@ -112,7 +113,7 @@
       "patterns": [
         {
           "name": "keyword.control.lux",
-          "match": "\\b(if|elif|else|while|for|in|return|require|try|catch|break|continue|and|or|not)\\b"
+          "match": "\\b(if|elif|else|while|for|in|return|require|try|catch|break|continue|and|or|not|await)\\b"
         }
       ]
     },
@@ -151,6 +152,11 @@
           "match": "\\b(sse|ws|error)\\b(?=\\s*\\.)"
         }
       ]
+    },
+    "modules": {
+      "comment": "A DB driver or native module, always used as a namespace (sqlite.exec(...), hash.sha256(...)) -- given its own scope, distinct from reserved-objects, so a theme can color 'this is a module' differently from 'this is a request/session/etc.'.",
+      "name": "support.class.lux",
+      "match": "\\b(sqlite|postgres|mysql|hash|csv|os|math|time|regex|pdf|http)\\b(?=\\s*\\.)"
     },
     "arrow": {
       "name": "keyword.operator.arrow.lux",
