@@ -5,10 +5,10 @@
 //   fuzz_http [iterations]
 
 #include "chaos.hpp"
-#include <lumen/multipart.hpp>
-#include <lumen/request.hpp>
+#include <lux/multipart.hpp>
+#include <lux/request.hpp>
 
-// http_parser.hpp is internal to the lumen library (it lives in src/, not in
+// http_parser.hpp is internal to the lux library (it lives in src/, not in
 // include/): it is included directly here, as tests/placeholders.cpp already
 // does with the postgres driver, to test THE code and not a summarized copy.
 #include "../src/http/http_parser.hpp"
@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-using namespace lumen;
+using namespace lux;
 
 static const std::vector<std::string> kHttpSeeds = {
     "GET /articulos/42 HTTP/1.1\r\nHost: x\r\n\r\n",

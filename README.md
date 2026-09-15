@@ -1,4 +1,4 @@
-# Lumen
+# Lux
 
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat&logo=cplusplus&logoColor=white)
 ![CMake](https://img.shields.io/badge/CMake-3.20%2B-064F8C?style=flat&logo=cmake&logoColor=white)
@@ -6,8 +6,8 @@
 ![Binary size](https://img.shields.io/badge/binary-1.5_MB-informational?style=flat)
 ![Tests](https://img.shields.io/badge/tests-246_passing-brightgreen?style=flat)
 
-Lumen is a web framework with its own language built in. Routes, models, and validation are
-written in **Lumen Script**, a small statically-typed language, and the `lumen` binary
+Lux is a web framework with its own language built in. Routes, models, and validation are
+written in **Lux Script**, a small statically-typed language, and the `lux` binary
 compiles the project to bytecode and serves it — no separate compiler, no build step, nothing
 sitting between your code and the framework.
 
@@ -55,9 +55,9 @@ group("/admin"):
 ```
 
 ```
-$ lumen ./my-blog
-lumen: 3 file(s), 5 route(s) — 2 declarative, 3 with logic
-Lumen running on http://0.0.0.0:8080 (threads=16, press CTRL+C to quit)
+$ lux ./my-blog
+lux: 3 file(s), 5 route(s) — 2 declarative, 3 with logic
+Lux running on http://0.0.0.0:8080 (threads=16, press CTRL+C to quit)
 ```
 
 Save the file and it reloads. No recompiling, no restarting, no CMake.
@@ -67,7 +67,7 @@ Save the file and it reloads. No recompiling, no restarting, no CMake.
 ## Architecture
 
 ```
-lumen ./app          →  lex → parse → check → emit
+lux ./app          →  lex → parse → check → emit
                        ↓
                     route table + bytecode  (built ONCE, not per request)
                        ↓
@@ -116,7 +116,7 @@ for you. `File` or `List<File>` binds to multipart parts.
 | | |
 |---|---|
 | `return { "a": 1 }` | 200, JSON |
-| `return render("x.html", k=v)` | HTML through Lumen Script templates |
+| `return render("x.html", k=v)` | HTML through Lux Script templates |
 | `return text("hi")` / `html(...)` | plain text / HTML |
 | `return send_file(path)` | file, `sendfile(2)` |
 | `return redirect("/other")` | 302 |
@@ -167,19 +167,19 @@ class — same story, and that reaches into templates too.
 | Execution | Bytecode on a custom VM, one VM per event-loop thread |
 | Compilation | Built into the binary. No external toolchain, no transpilation to C++ |
 | Persistence | `sqlite`, `postgres`, and `mysql` modules over a thread pool and `await`. `?` placeholder in all three — the postgres driver translates it to `$1` |
-| Templates | Custom engine, shaped like Jinja2, with Lumen Script expressions inside |
+| Templates | Custom engine, shaped like Jinja2, with Lux Script expressions inside |
 | Types | `class` for known, validated shape; `Json` for dynamic data; containers for homogeneous data — no `Any`, which would poison the whole type system |
 | Generics | Native containers only, erased at compile time. No user-defined generic classes |
-| Config | Lumen Script, `app:` block, once per project. No YAML or TOML — one language to learn instead of two, and a misspelled port is a compile error |
-| Layout | `lumen ./my-app` reads the tree recursively. Order does not matter; compilation happens in two passes |
+| Config | Lux Script, `app:` block, once per project. No YAML or TOML — one language to learn instead of two, and a misspelled port is a compile error |
+| Layout | `lux ./my-app` reads the tree recursively. Order does not matter; compilation happens in two passes |
 
 ### Templates
 
 We tried an off-the-shelf engine first. It worked, and it also dragged in Boost, fmt,
 rapidjson, and a `build/_deps` directory pushing 800 MB just to render a string. We wrote our
 own instead: same shape as Jinja2 — `{{ }}`, `{% if %}`, `{% for %}`, `{% extends %}`,
-`|safe` — except what's inside the braces is Lumen Script, checked by the same compiler as
-everything else. A template typo is a `lumen --check` error with a file and a line, not a
+`|safe` — except what's inside the braces is Lux Script, checked by the same compiler as
+everything else. A template typo is a `lux --check` error with a file and a line, not a
 2 a.m. page.
 
 | | Off-the-shelf engine | Our engine |
@@ -189,7 +189,7 @@ everything else. A template typo is a `lumen --check` error with a file and a li
 | Build from scratch | minutes | **19 s** |
 | Network on first `cmake` | required | **none** |
 
-We gave up `{{ super() }}` and Jinja2's filters (`|upper`, `|join`...) — those are just Lumen
+We gave up `{{ super() }}` and Jinja2's filters (`|upper`, `|join`...) — those are just Lux
 Script methods now.
 
 ---
@@ -299,7 +299,7 @@ on error:
 ## Errors
 
 ```
-./app.lum:12:19: error: pattern declares ':id' but no parameter binds it
+./app.lux:12:19: error: pattern declares ':id' but no parameter binds it
   12 | get endpoint("/users/:id"):
      |              ^
 ```
@@ -366,13 +366,13 @@ sudo apt install libjemalloc-dev     # optional
 ```
 
 ```bash
-lumen ./my-app          # every .lum file in the directory, recursively
-lumen app.lum            # just that file
-lumen a.lum b.lum        # just those
-lumen ./app --check      # compile and exit
-lumen ./app --no-watch   # no hot reload
-lumen ./app --verbose    # one log line per request
-lumen ./app --autotest   # walks the endpoints after startup and after each reload
+lux ./my-app          # every .lux file in the directory, recursively
+lux app.lux            # just that file
+lux a.lux b.lux        # just those
+lux ./app --check      # compile and exit
+lux ./app --no-watch   # no hot reload
+lux ./app --verbose    # one log line per request
+lux ./app --autotest   # walks the endpoints after startup and after each reload
 ```
 
 ---
@@ -380,14 +380,14 @@ lumen ./app --autotest   # walks the endpoints after startup and after each relo
 ## Testing
 
 **246 tests** across six suites, covered in detail in
-[LUMEN_SCRIPT-GRAMMAR.md](LUMEN_SCRIPT-GRAMMAR.md): 79 regression tests that drive the
+[LUX_SCRIPT-GRAMMAR.md](LUX_SCRIPT-GRAMMAR.md): 79 regression tests that drive the
 binary over the socket the way it's actually used, including the parameter-binding matrix;
 48 for the template engine; 19 for placeholder
 translation; and 37 + 29 + 34 for the `sqlite`, `mysql`, and `postgres` modules against real
 database engines.
 
 ```bash
-cmake --build build --target lumen-bin && ctest --test-dir build
+cmake --build build --target lux-bin && ctest --test-dir build
 ```
 
 The three database modules pass under AddressSanitizer with leak detection and under
@@ -407,4 +407,4 @@ A route that doesn't touch the database still answers in 10 ms while that pool i
 saturated by other requests.
 
 The formal grammar, with a full manual, is in
-[LUMEN_SCRIPT-GRAMMAR.md](LUMEN_SCRIPT-GRAMMAR.md).
+[LUX_SCRIPT-GRAMMAR.md](LUX_SCRIPT-GRAMMAR.md).

@@ -1,9 +1,9 @@
 #include "http_connection.hpp"
-#include "../../include/lumen/request.hpp"
-#include "../../include/lumen/response.hpp"
-#include "../../include/lumen/task.hpp"
-#include "../../include/lumen/metrics.hpp"
-#include "../../include/lumen/logger.hpp"
+#include "../../include/lux/request.hpp"
+#include "../../include/lux/response.hpp"
+#include "../../include/lux/task.hpp"
+#include "../../include/lux/metrics.hpp"
+#include "../../include/lux/logger.hpp"
 
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -20,7 +20,7 @@
 #include <algorithm>
 #include <sstream>
 
-namespace lumen::http {
+namespace lux::http {
 
 // ── URL helpers ───────────────────────────────────────────────────────────────
 
@@ -66,7 +66,7 @@ static void parse_query(const std::string& qs,
 // ── HttpConnection ────────────────────────────────────────────────────────────
 
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
-                               lumen::DispatchFn dispatch,
+                               lux::DispatchFn dispatch,
                                std::shared_ptr<std::atomic<int>> conn_count)
     : fd_(fd)
     , loop_(loop)
@@ -199,14 +199,14 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     in_flight_ = true;
 
     // Fresh cancellation token for this request.
-    cancel_token_ = std::make_shared<lumen::CancellationToken>();
+    cancel_token_ = std::make_shared<lux::CancellationToken>();
 
     // Set thread-locals so handlers can call sleep(ms) without explicit args.
-    lumen::detail::current_loop  = &loop_;
-    lumen::detail::current_token = cancel_token_;
+    lux::detail::current_loop  = &loop_;
+    lux::detail::current_token = cancel_token_;
 
-    auto req_ptr = std::make_shared<lumen::Request>();
-    auto res_ptr = std::make_shared<lumen::Response>();
+    auto req_ptr = std::make_shared<lux::Request>();
+    auto res_ptr = std::make_shared<lux::Response>();
 
     req_ptr->method       = req_parsed.method;
     req_ptr->path         = req_parsed.path;
@@ -270,15 +270,15 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
         }
     });
 
-    auto wrapper_task = [](std::shared_ptr<lumen::Request> req_ptr,
-                           std::shared_ptr<lumen::Response> res_ptr,
-                           lumen::DispatchFn disp) -> lumen::Task<void> {
+    auto wrapper_task = [](std::shared_ptr<lux::Request> req_ptr,
+                           std::shared_ptr<lux::Response> res_ptr,
+                           lux::DispatchFn disp) -> lux::Task<void> {
         try {
             co_await disp(*req_ptr, *res_ptr);
         } catch (const std::exception& e) {
             // Log internally but do not expose e.what() to clients — it may
             // contain connection strings, file paths, or other internal detail.
-            lumen::log().error("unhandled exception: ", e.what());
+            lux::log().error("unhandled exception: ", e.what());
             res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
         } catch (...) {
             res_ptr->status(500).json_text(R"({"error":"Internal Server Error"})");
@@ -296,10 +296,10 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     h.resume();
 }
 
-void HttpConnection::finish_dispatch(lumen::Request& request,
-                                     lumen::Response& response) {
+void HttpConnection::finish_dispatch(lux::Request& request,
+                                     lux::Response& response) {
     // Record the request in the global metrics counter.
-    lumen::Metrics::instance().record(response.status_code());
+    lux::Metrics::instance().record(response.status_code());
 
     // Determine keep-alive before building the response
     keep_alive_ = (request.version == "HTTP/1.1");
@@ -327,7 +327,7 @@ void HttpConnection::finish_dispatch(lumen::Request& request,
         // Non-TLS: open the file; do_sendfile() will stream it via sendfile(2).
         int fd = ::open(response.sendfile_path().c_str(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) {
-            lumen::Response err;
+            lux::Response err;
             err.status(500).json_text(R"({"error":"Cannot open file"})");
             err.header("Connection", "close");
             keep_alive_ = false;
@@ -622,7 +622,7 @@ void HttpConnection::finish_cycle() {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 void HttpConnection::send_error(int code, const char* msg) {
-    lumen::Response r;
+    lux::Response r;
     // The message comes from a fixed engine list, with no quotes or backslashes.
     r.status(code).json_text(std::string(R"({"error":")") + msg + R"("})");
     r.header("Connection", "close");
@@ -660,4 +660,4 @@ void HttpConnection::close() {
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);
 }
 
-} // namespace lumen::http
+} // namespace lux::http

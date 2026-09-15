@@ -5,16 +5,16 @@
 // genera C++ real a partir del IR, lo compila con el compilador del
 // sistema, lo ejecuta, y compara su salida contra la misma funcion
 // corriendo en el VM.
-#include <lumen_script/diagnostic.hpp>
-#include <lumen_script/emitter.hpp>
-#include <lumen_script/lexer.hpp>
-#include <lumen_script/native_gen.hpp>
-#include <lumen_script/natives.hpp>
-#include <lumen_script/parser.hpp>
-#include <lumen_script/vm.hpp>
+#include <lux_script/diagnostic.hpp>
+#include <lux_script/emitter.hpp>
+#include <lux_script/lexer.hpp>
+#include <lux_script/native_gen.hpp>
+#include <lux_script/natives.hpp>
+#include <lux_script/parser.hpp>
+#include <lux_script/vm.hpp>
 
-#include <lumen/request.hpp>
-#include <lumen/response.hpp>
+#include <lux/request.hpp>
+#include <lux/response.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 
@@ -38,8 +38,8 @@ static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBa
 }
 
 static long long ejecutar_vm(const Chunk& chunk, long long arg, const FunctionTable* fns) {
-    lumen::Request  req;
-    lumen::Response res;
+    lux::Request  req;
+    lux::Response res;
     NativeCtx       ctx{req, res};
     VM              vm;
     VM::Result      r = vm.start(chunk, {Value::integer(arg)}, ctx, fns);
@@ -47,7 +47,7 @@ static long long ejecutar_vm(const Chunk& chunk, long long arg, const FunctionTa
 }
 
 int main() {
-    // Mismas fib()/cuenta_primos() de bench/lumen/app.lum, letra por letra.
+    // Mismas fib()/cuenta_primos() de bench/lux/app.lux, letra por letra.
     const std::string src =
         "fn int fib(int n):\n"
         "    if n < 2:\n"
@@ -158,9 +158,9 @@ int main() {
         "    return 0;\n"
         "}\n";
 
-    const char* src_path = "/tmp/lumen_native_gen_check.cpp";
-    const char* bin_path = "/tmp/lumen_native_gen_check.bin";
-    const char* err_path = "/tmp/lumen_native_gen_check.err";
+    const char* src_path = "/tmp/lux_native_gen_check.cpp";
+    const char* bin_path = "/tmp/lux_native_gen_check.bin";
+    const char* err_path = "/tmp/lux_native_gen_check.err";
     {
         std::ofstream out(src_path, std::ios::trunc);
         out << codigo;

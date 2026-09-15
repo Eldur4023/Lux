@@ -6,16 +6,16 @@
 // el mismo resultado que sin ella. Es la prueba de que el despacho dentro
 // del interprete (Op::CallFunction, ver vm.cpp) esta bien conectado, no solo
 // que el generador produce C++ correcto.
-#include <lumen_script/diagnostic.hpp>
-#include <lumen_script/emitter.hpp>
-#include <lumen_script/lexer.hpp>
-#include <lumen_script/native_build.hpp>
-#include <lumen_script/natives.hpp>
-#include <lumen_script/parser.hpp>
-#include <lumen_script/vm.hpp>
+#include <lux_script/diagnostic.hpp>
+#include <lux_script/emitter.hpp>
+#include <lux_script/lexer.hpp>
+#include <lux_script/native_build.hpp>
+#include <lux_script/natives.hpp>
+#include <lux_script/parser.hpp>
+#include <lux_script/vm.hpp>
 
-#include <lumen/request.hpp>
-#include <lumen/response.hpp>
+#include <lux/request.hpp>
+#include <lux/response.hpp>
 
 #include <cstdio>
 #include <filesystem>
@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 
@@ -39,8 +39,8 @@ static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBa
 
 static VM::Result ejecutar_result(const Chunk& chunk, std::vector<Value> args,
                                   const FunctionTable* fns, const NativeModule* nativo) {
-    lumen::Request  req;
-    lumen::Response res;
+    lux::Request  req;
+    lux::Response res;
     NativeCtx       ctx{req, res};
     VM              vm;
     NativeDispatch  nd = nativo ? nativo->dispatch() : NativeDispatch{};
@@ -131,7 +131,7 @@ static bool prueba_strings() {
     FunctionSigs                  sigs = firmar(prog);
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
-    const auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_build_check_str";
+    const auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_build_check_str";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     if (!nativo) {
@@ -194,7 +194,7 @@ static bool prueba_metodos_string() {
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
     const auto cache_dir =
-        std::filesystem::temp_directory_path() / "lumen_native_build_check_metodos_str";
+        std::filesystem::temp_directory_path() / "lux_native_build_check_metodos_str";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     if (!nativo || nativo->compiled() != 1) {
@@ -260,7 +260,7 @@ static bool prueba_listas() {
     FunctionSigs                  sigs = firmar(prog);
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
-    const auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_build_check_listas";
+    const auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_build_check_listas";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     // suma(List<int>) no cruza la ABI (List, como string, se queda sin
@@ -289,7 +289,7 @@ static bool prueba_listas() {
     }
 
     // Indice fuera de rango: el mismo canal de error que division/modulo
-    // (lumen_native_fail), con el mismo mensaje que GetIndex en vm.cpp.
+    // (lux_native_fail), con el mismo mensaje que GetIndex en vm.cpp.
     {
         const Chunk& chunk = *tabla_vm[sigs.at("fuera_de_rango").index];
         VM::Result sin_n = ejecutar_result(chunk, {Value::integer(10)}, &tabla_vm, nullptr);
@@ -328,7 +328,7 @@ static bool prueba_listas() {
 }
 
 // Los tres casos que encontraron el bug critico de Fase 3
-// ("Correccion critica"): Lumen Script no
+// ("Correccion critica"): Lux Script no
 // comprueba en ningun sitio que una reasignacion, un `and`/`or`, o una
 // division/modulo conserven el tipo o eviten el divisor cero -- confiar en
 // el tipo DECLARADO sin demostrarlo daba C++ que compilaba y respondia
@@ -378,7 +378,7 @@ static bool prueba_diccionarios() {
     FunctionSigs                  sigs = firmar(prog);
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
-    const auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_build_check_dict";
+    const auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_build_check_dict";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     // cuenta_claves(Dict<...>) no cruza la ABI (Dict, como List/string, se
@@ -413,7 +413,7 @@ static bool prueba_diccionarios() {
 // BuiltinGlobalCall que Comprobador::tipo_provable() sabe demostrar --
 // str() sobre int/bool/float (el mismo puente a Value que usa el valor de
 // retorno de una ruta, ver Generador::valor_json) y len() sobre string y
-// sobre List<int> (LList::lumen_len(), no .size() -- los dos tienen un
+// sobre List<int> (LList::lux_len(), no .size() -- los dos tienen un
 // metodo distinto de "tamaño" y el generador tiene que elegir el correcto
 // segun el tipo demostrado, no una unica llamada generica).
 static bool prueba_str_len() {
@@ -442,7 +442,7 @@ static bool prueba_str_len() {
     FunctionSigs                  sigs = firmar(prog);
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
-    const auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_build_check_strlen";
+    const auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_build_check_strlen";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     // usa_str/usa_len son int->int, cruzan la ABI; describe (string en la
@@ -474,7 +474,7 @@ static bool prueba_str_len() {
 
 // int(x) (natives.cpp: fn_int): identidad sobre Int, truncar hacia cero
 // sobre Float/Bool, y sobre String un fallo REAL de verdad -- el mismo
-// canal de error que division/modulo por cero (lumen_native_fail), asi que
+// canal de error que division/modulo por cero (lux_native_fail), asi que
 // tiene que atravesar el wrapper de la funcion igual de limpio, con el
 // mismo mensaje EXACTO que fn_int ("int(): '<texto>' no es un numero").
 static bool prueba_conversion_int() {
@@ -501,7 +501,7 @@ static bool prueba_conversion_int() {
     FunctionSigs                  sigs = firmar(prog);
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
-    const auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_build_check_int";
+    const auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_build_check_int";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     if (!nativo || nativo->compiled() != 2) {
@@ -563,7 +563,7 @@ static bool prueba_require() {
     FunctionSigs                  sigs = firmar(prog);
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
-    const auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_build_check_require";
+    const auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_build_check_require";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     if (!nativo || nativo->compiled() != 1) {
@@ -613,7 +613,7 @@ static bool prueba_sin_return_en_todos_los_caminos() {
     FunctionTable                 tabla_vm;
     std::unique_ptr<NativeModule> nativo;
     const auto cache_dir =
-        std::filesystem::temp_directory_path() / "lumen_native_build_check_sinreturn";
+        std::filesystem::temp_directory_path() / "lux_native_build_check_sinreturn";
     if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache_dir)) return false;
 
     if (nativo) {
@@ -652,7 +652,7 @@ static bool prueba_tipos_dinamicos() {
         FunctionSigs sigs = firmar(prog);
         std::string aviso;
         std::error_code ec;
-        auto cache = std::filesystem::temp_directory_path() / "lumen_native_build_check_reasig";
+        auto cache = std::filesystem::temp_directory_path() / "lux_native_build_check_reasig";
         std::filesystem::remove_all(cache, ec);
         auto nativo = compile_native(prog, sigs, ClassSigs{}, cache, aviso);
         std::filesystem::remove_all(cache, ec);
@@ -665,7 +665,7 @@ static bool prueba_tipos_dinamicos() {
         }
     }
 
-    // 2) `and`/`or` con operandos no booleanos: el resultado de Lumen es el
+    // 2) `and`/`or` con operandos no booleanos: el resultado de Lux es el
     // VALOR del operando que gana (estilo Python), no un booleano forzado
     // -- no demostrable con la traduccion a &&/|| de hoy, tiene que caer a
     // bytecode. Con operandos YA booleanos si es sano (unico caso en el que
@@ -683,7 +683,7 @@ static bool prueba_tipos_dinamicos() {
         FunctionSigs sigs = firmar(prog);
         FunctionTable tabla_vm;
         std::unique_ptr<NativeModule> nativo;
-        auto cache = std::filesystem::temp_directory_path() / "lumen_native_build_check_andor";
+        auto cache = std::filesystem::temp_directory_path() / "lux_native_build_check_andor";
         if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache)) return false;
         std::error_code ec;
         std::filesystem::remove_all(cache, ec);
@@ -710,7 +710,7 @@ static bool prueba_tipos_dinamicos() {
             }
         }
 
-        // 'no_booleano' en si -- confirma que Lumen realmente da el "operando
+        // 'no_booleano' en si -- confirma que Lux realmente da el "operando
         // que gana" (5 -> truthy, gana "b"=10), no un booleano: es la
         // semantica real que --native tendria que reproducir si algun dia
         // aprende a compilar and/or fuera del caso bool-bool.
@@ -727,7 +727,7 @@ static bool prueba_tipos_dinamicos() {
     // 3) Division y modulo por cero: error controlado en el VM, UB (en la
     // practica SIGFPE) en C++ puro. La funcion SI debe compilar a nativo
     // (el tipo esta garantizado, solo el divisor es dinamico) y el canal de
-    // error (NativeValue::Tag::Error / lumen_native_fail) debe convertir el
+    // error (NativeValue::Tag::Error / lux_native_fail) debe convertir el
     // fallo en el mismo VM::Status::Error que daria el bytecode -- nunca en
     // un proceso muerto.
     {
@@ -737,7 +737,7 @@ static bool prueba_tipos_dinamicos() {
         FunctionSigs sigs = firmar(prog);
         FunctionTable tabla_vm;
         std::unique_ptr<NativeModule> nativo;
-        auto cache = std::filesystem::temp_directory_path() / "lumen_native_build_check_modcero";
+        auto cache = std::filesystem::temp_directory_path() / "lux_native_build_check_modcero";
         if (!compilar_las_dos_vias(prog, sigs, tabla_vm, nativo, cache)) return false;
         std::error_code ec;
         std::filesystem::remove_all(cache, ec);
@@ -830,7 +830,7 @@ int main() {
     }
 
     const std::filesystem::path cache_dir =
-        std::filesystem::temp_directory_path() / "lumen_native_build_check";
+        std::filesystem::temp_directory_path() / "lux_native_build_check";
     std::error_code ec;
     std::filesystem::remove_all(cache_dir, ec);
 

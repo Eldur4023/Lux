@@ -1,0 +1,27 @@
+# Lux example project.
+#   $ lux ./example
+
+app:
+    name      "Lux Example"
+    version   "2.0.0"
+    port      8080
+    templates "./example/templates"
+
+    static "/static" -> "./example/public"
+    health
+
+
+get endpoint("/"):
+    return render("index.html", title="Lux 2.0", nota="edit me and save")
+
+get endpoint("/hello"):
+    return text("hello from lux_script")
+
+get endpoint("/api"):
+    return { "ok": true, "motor": "lux", "hito": 1 }
+
+get endpoint("/ir"):
+    return redirect("/")
+
+fn waos()
+

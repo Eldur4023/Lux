@@ -1,13 +1,13 @@
-// Prueba de concepto: ¿cuánto se gana compilando la lógica de Lumen Script a
+// Prueba de concepto: ¿cuánto se gana compilando la lógica de Lux Script a
 // C++ nativo en vez de interpretarla en la VM de bytecode?
 //
 // Esto NO es un transpilador. Es fib()/cuenta_primos() escritas a mano en C++,
-// copiando EXACTAMENTE la lógica de bench/lumen/app.lum (mismos nombres, mismo
+// copiando EXACTAMENTE la lógica de bench/lux/app.lux (mismos nombres, mismo
 // algoritmo, mismos limites de validacion), servidas por el HTTP mas simple
 // que se pudo escribir sin dependencias (sockets crudos, sin epoll, sin
 // keep-alive) para que el numero mida "coste de ejecutar la logica" y no
 // "cuanto de bueno es mi servidor HTTP de juguete". No compite con Gin/Fastify
-// como framework -- compite con lumen_script::VM como motor de ejecucion.
+// como framework -- compite con lux_script::VM como motor de ejecucion.
 //
 // Ver experiments/native_poc/RESULTADOS.md para la comparacion y la lectura.
 
@@ -21,7 +21,7 @@
 #include <thread>
 #include <unistd.h>
 
-// ---- logica copiada 1:1 de bench/lumen/app.lum (fib / cuenta_primos) ----
+// ---- logica copiada 1:1 de bench/lux/app.lux (fib / cuenta_primos) ----
 
 static int64_t fib(int64_t n) {
     if (n < 2) return n;

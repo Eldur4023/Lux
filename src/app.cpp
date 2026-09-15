@@ -1,12 +1,12 @@
-#include "../include/lumen/app.hpp"
-#include "../include/lumen/logger.hpp"
-#include "../include/lumen/metrics.hpp"
-#include "../include/lumen/request.hpp"
-#include "../include/lumen/response.hpp"
-#include "../include/lumen/task.hpp"
-#include "../include/lumen/blocking_pool.hpp"
+#include "../include/lux/app.hpp"
+#include "../include/lux/logger.hpp"
+#include "../include/lux/metrics.hpp"
+#include "../include/lux/request.hpp"
+#include "../include/lux/response.hpp"
+#include "../include/lux/task.hpp"
+#include "../include/lux/blocking_pool.hpp"
 
-#include <lumen/core/event_loop.hpp>
+#include <lux/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
 
 #include <sys/epoll.h>
@@ -27,7 +27,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-namespace lumen {
+namespace lux {
 
 namespace {
 
@@ -520,7 +520,7 @@ void App::run(const std::string& host, uint16_t port) {
     }
 
     const char* scheme = "http";
-    log().info("Lumen running on ", scheme, "://", host, ':', port,
+    log().info("Lux running on ", scheme, "://", host, ':', port,
                " (threads=", num_threads, ", press CTRL+C to quit)");
 
     main_loop.run();
@@ -541,4 +541,4 @@ void App::run(const std::string& host, uint16_t port) {
     if (g_signal_pipe[1] >= 0) { ::close(g_signal_pipe[1]); g_signal_pipe[1] = -1; }
 }
 
-} // namespace lumen
+} // namespace lux

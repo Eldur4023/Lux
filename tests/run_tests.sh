@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Regression suite for Lumen.
+# Regression suite for Lux.
 #
-# Runs the binary against real .lum files and checks the responses.
+# Runs the binary against real .lux files and checks the responses.
 # It is written in shell on purpose: it tests the binary the way it is used, over
 # the socket, without linking anything from the project.
 #
@@ -12,15 +12,15 @@
 
 set -u
 
-LUMEN="${1:-$HOME/lumen-build/lumen}"
+LUX="${1:-$HOME/lux-build/lux}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PORT=${LUMEN_TEST_PORT:-8790}
+PORT=${LUX_TEST_PORT:-8790}
 SRV=""
-# For the `os` module's file-I/O tests (cases/modules.lum): a writable
+# For the `os` module's file-I/O tests (cases/modules.lux): a writable
 # scratch dir the server can see via os.getenv(), cleaned up by the same
 # trap that removes $TMP itself -- no test-only directory left behind.
-export LUMEN_TEST_TMP="$TMP"
+export LUX_TEST_TMP="$TMP"
 
 passed=0
 failed=0
@@ -37,13 +37,13 @@ fail() {
     printf '        expected: %s\n        got: %s\n' "$2" "$3"
 }
 
-# Starts a server with the given .lum and waits for it to answer.
+# Starts a server with the given .lux and waits for it to answer.
 # Each suite uses its own port: with SO_REUSEPORT two processes share a
 # port and the kernel splits connections between them, which would skew everything.
 start_server() {
     stop_server
     PORT=$((PORT + 1))
-    "$LUMEN" --no-watch --port "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
+    "$LUX" --no-watch --port "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
     SRV=$!
     for _ in $(seq 1 60); do
         if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/__ping__" 2>/dev/null; then
@@ -111,7 +111,7 @@ check_mp() {
 fails_to_compile() {
     local name="$1" fich="$2" needle="$3"
     local out
-    out=$("$LUMEN" --check "$fich" 2>&1)
+    out=$("$LUX" --check "$fich" 2>&1)
     if [ $? -eq 0 ]; then
         fail "$name" "a compile error" "it compiled without complaining"
         return
@@ -125,7 +125,7 @@ fails_to_compile() {
 
 compiles() {
     local name="$1" fich="$2"
-    if "$LUMEN" --check "$fich" > "$TMP/check" 2>&1; then
+    if "$LUX" --check "$fich" > "$TMP/check" 2>&1; then
         ok "$name"
     else
         fail "$name" "it to compile" "$(head -3 "$TMP/check")"
@@ -138,7 +138,7 @@ trap cleanup EXIT
 # ─── Suites ──────────────────────────────────────────────────────────────────
 
 echo "== language =="
-start_server "$HERE/cases/language.lum" || exit 1
+start_server "$HERE/cases/language.lux" || exit 1
 check "arithmetic"          GET /arithmetic       200 '"sum":7'
 check "strings"             GET /strings          200 '"upper":"HELLO"'
 check "multiline without margin" GET /multiline     200 '"sql":"SELECT id\nFROM posts"'
@@ -222,7 +222,7 @@ check "class validate: rule using an enum, valid" POST /enum_order 200 '"status"
 check "class validate: rule using an enum, invalid" POST /enum_order 422 'status: invalid' '{"status":"BOGUS"}'
 
 echo "== routes and parameters =="
-start_server "$HERE/cases/routes.lum" || exit 1
+start_server "$HERE/cases/routes.lux" || exit 1
 check "path parameter"   GET /echo/42           200 '"id":42'
 check "query with default"   GET /pagina           200 '"page":1'
 check "query explicita"     GET '/pagina?page=7'  200 '"page":7'
@@ -235,44 +235,44 @@ check "404 handler"       GET /tampoco          404 '"path":"/tampoco"'
 
 # ── Parameter binding matrix ──────────────────────────────────────────────
 # Origen (path / query / multipart) x type (escalar, File, List<File>) x
-# presence (missing, mistyped, in two places at once).  See cases/params.lum:
+# presence (missing, mistyped, in two places at once).  See cases/params.lux:
 # the real bug was a text parameter ALWAYS empty on a route with files,
 # and it only shows up when the two live on the same route -- testing query and
 # multipart separately, as the rest of the suite did, never caught it.
 echo "== parameter binding =="
-start_server "$HERE/cases/params.lum" || exit 1
+start_server "$HERE/cases/params.lux" || exit 1
 
 check "missing query without a default gives the type's zero" GET /query 200 '"q":""'
 
 check_mp "multipart: text next to a file" /mp/one 200 '"title":"hello"' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "title=hello"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "title=hello"
 check_mp "multipart: the file arrives too" /mp/one 200 '"filename":"a.txt"' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "title=hello"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "title=hello"
 
 check_mp "multipart: string"  /mp/types 200 '"s":"hello"' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
 check_mp "multipart: int"     /mp/types 200 '"n":7' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
 check_mp "multipart: bool"    /mp/types 200 '"b":true' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
 
 check_mp "multipart: text next to a List<File>" /mp/list 200 '"album":"holidays"' \
-    -F "fs=@$HERE/cases/params.lum;filename=a.txt" -F "album=holidays"
+    -F "fs=@$HERE/cases/params.lux;filename=a.txt" -F "album=holidays"
 check_mp "multipart: counts the files in the list" /mp/list 200 '"n":2' \
-    -F "fs=@$HERE/cases/params.lum;filename=a.txt" \
-    -F "fs=@$HERE/cases/params.lum;filename=b.txt" -F "album=x"
+    -F "fs=@$HERE/cases/params.lux;filename=a.txt" \
+    -F "fs=@$HERE/cases/params.lux;filename=b.txt" -F "album=x"
 
 check_mp "multipart: missing field falls back to the default" /mp/default 200 '"label":"no-label"' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt"
 
 check_mp "multipart: the query beats the form field" "/mp/prioridad?origin=query" 200 '"origin":"query"' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "origin=formulario"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "origin=formulario"
 
 check_mp "multipart: mistyped scalar gives 400" /mp/bad 400 'invalid parameter' \
-    -F "f=@$HERE/cases/params.lum;filename=a.txt" -F "n=no-es-un-number"
+    -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "n=no-es-un-number"
 
 echo "== classes and validation =="
-start_server "$HERE/cases/classes.lum" || exit 1
+start_server "$HERE/cases/classes.lux" || exit 1
 check "valid body"       POST /add 201 '"creado":"Ana"' '{"name":"Ana","age":30}'
 check "field required"   POST /add 422 'age: required' '{"name":"Ana"}'
 check "wrong type"     POST /add 422 'expected int' '{"name":"Ana","age":"30"}'
@@ -287,7 +287,7 @@ check "recursion"           GET /factorial/5      200 '"r":120'
 check "recursion cap"   GET /infinita         500 'too much recursion'
 
 echo "== session and jwt =="
-start_server "$HERE/cases/session.lum" || exit 1
+start_server "$HERE/cases/session.lux" || exit 1
 check "no session"          GET /quien            200 '"user":null'
 check "protected area"      GET /admin/panel      403
 check "forged cookie"  GET /quien            200 '"user":null'
@@ -296,7 +296,7 @@ check "invalid jwt"        GET /api/yo           401
 
 echo "== database =="
 rm -f "$TMP/tests.db"
-start_server "$HERE/cases/data.lum" || exit 1
+start_server "$HERE/cases/data.lux" || exit 1
 check "create table"         GET  /create           200 '"ok":true'
 check "insert"            POST /add/ana        201 '"id":1'
 check "insert another"       POST /add/bob        201 '"id":2'
@@ -311,7 +311,7 @@ check "balances after rollback" GET /balances          200 '"balance":70'
 check "engine error"     GET  /bad            200 'no such table'
 
 echo "== native modules =="
-start_server "$HERE/cases/modules.lum" || exit 1
+start_server "$HERE/cases/modules.lux" || exit 1
 check "hash.sha256"       GET /hash/test              200 '"sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"'
 check "hash.hmac_sha256"  GET /hmac/mykey/mymsg       200 '"mac":"131b7d67f083953569aa6d777328a10cf618900e9d261397d750ec30df3c9654"'
 check "hash.random_hex length" GET /random/8         200
@@ -357,17 +357,17 @@ check "regex.split"            GET /regex/split 200 '"r":["a","b","c","d"]'
 check "regex rejects an invalid pattern" GET /regex/bad_pattern 500 'invalid regex pattern'
 
 echo "== compile errors =="
-compiles    "the repo examples compile" "$HERE/cases/language.lum"
-fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lum"   "no parameter binds it"
-fails_to_compile "missing await"       "$HERE/cases/bad/await.lum"    "is asynchronous"
-fails_to_compile "object out of place" "$HERE/cases/bad/sse.lum"      "only exists inside a route sse"
-fails_to_compile "ws without origins"        "$HERE/cases/bad/ws.lum"       "needs origins"
-fails_to_compile "unknown field"     "$HERE/cases/bad/validate.lum" "is not declared"
-fails_to_compile "unknown method"    "$HERE/cases/bad/method.lum"   "has no method"
-fails_to_compile "method on a string"   "$HERE/cases/bad/method_type.lum" "have no method"
-fails_to_compile "field of a class"    "$HERE/cases/bad/field_type.lum"  "has no field"
-fails_to_compile "module not imported"   "$HERE/cases/bad/import.lum"   "missing 'import sqlite'"
-fails_to_compile "native module not imported" "$HERE/cases/bad/module_import.lum" "missing 'import hash'"
+compiles    "the repo examples compile" "$HERE/cases/language.lux"
+fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
+fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"
+fails_to_compile "object out of place" "$HERE/cases/bad/sse.lux"      "only exists inside a route sse"
+fails_to_compile "ws without origins"        "$HERE/cases/bad/ws.lux"       "needs origins"
+fails_to_compile "unknown field"     "$HERE/cases/bad/validate.lux" "is not declared"
+fails_to_compile "unknown method"    "$HERE/cases/bad/method.lux"   "has no method"
+fails_to_compile "method on a string"   "$HERE/cases/bad/method_type.lux" "have no method"
+fails_to_compile "field of a class"    "$HERE/cases/bad/field_type.lux"  "has no field"
+fails_to_compile "module not imported"   "$HERE/cases/bad/import.lux"   "missing 'import sqlite'"
+fails_to_compile "native module not imported" "$HERE/cases/bad/module_import.lux" "missing 'import hash'"
 # Expression types are checked at RUN TIME: the compiler
 # it verifies names, arity, context, and the methods and fields of a receiver
 # whose type it knows -- but not that `s - 1` adds up.

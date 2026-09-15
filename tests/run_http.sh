@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Suite for Lumen's `http` native module (NATIVE-MODULES.md).
+# Suite for Lux's `http` native module (NATIVE-MODULES.md).
 #
 # Separate from run_tests.sh for the same reason run_sqlite.sh/run_pdf.sh
-# are: libcurl is an OPTIONAL compiled-in dependency (LUMEN_HTTP), and a
+# are: libcurl is an OPTIONAL compiled-in dependency (LUX_HTTP), and a
 # binary built without it has to skip this suite, not fail it.
 #
 # Calls a local echo server (http_echo_server.py) instead of the real
@@ -14,12 +14,12 @@
 
 set -u
 
-LUMEN="${1:-$HOME/lumen-build/lumen}"
-case "$LUMEN" in /*) ;; *) LUMEN="$(cd "$(dirname "$LUMEN")" && pwd)/$(basename "$LUMEN")" ;; esac
+LUX="${1:-$HOME/lux-build/lux}"
+case "$LUX" in /*) ;; *) LUX="$(cd "$(dirname "$LUX")" && pwd)/$(basename "$LUX")" ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PORT=${LUMEN_TEST_HTTP_PORT:-8840}
-ECHO_PORT=${LUMEN_TEST_HTTP_ECHO_PORT:-8899}
+PORT=${LUX_TEST_HTTP_PORT:-8840}
+ECHO_PORT=${LUX_TEST_HTTP_ECHO_PORT:-8899}
 SRV=""
 ECHO_SRV=""
 
@@ -46,9 +46,9 @@ stop_all() {
 }
 trap 'stop_all; rm -rf "$TMP"' EXIT
 
-if ! "$LUMEN" --check "$HERE/cases/http.lum" > "$TMP/check" 2>&1; then
+if ! "$LUX" --check "$HERE/cases/http.lux" > "$TMP/check" 2>&1; then
     # The exact wording project.cpp uses when a module's cmake option was
-    # off/its dependency was missing at build time (LUMEN_HTTP) -- NOT
+    # off/its dependency was missing at build time (LUX_HTTP) -- NOT
     # "...contains 'import'", which this message never does (found the hard
     # way: that check, inherited from the older sqlite/postgres/mysql
     # scripts, never actually skips, because it was never exercised against
@@ -87,7 +87,7 @@ curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$ECHO_PORT/echo" || {
 ok "echo server starts"
 
 cd "$HERE/.."
-"$LUMEN" --no-watch --port "$PORT" "$HERE/cases/http.lum" > "$TMP/srv.log" 2>&1 &
+"$LUX" --no-watch --port "$PORT" "$HERE/cases/http.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/get_basic" 2>/dev/null && break
@@ -96,7 +96,7 @@ for _ in $(seq 1 60); do
 done
 curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/get_basic" || {
     red "the server did not answer"; cat "$TMP/srv.log"; exit 1; }
-ok "lumen server starts and connects"
+ok "lux server starts and connects"
 
 echo "== requests =="
 check "GET with query string"     GET /get_basic          200 '"method":"GET","path":"/echo?x=1"'

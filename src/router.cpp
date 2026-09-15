@@ -1,4 +1,4 @@
-#include "../include/lumen/router.hpp"
+#include "../include/lux/router.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace lumen {
+namespace lux {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Node Helpers
@@ -58,7 +58,7 @@ std::string Router::normalize_pattern(const std::string& p) {
                 // Unclosed brace: the pattern is malformed.  Better to fail
                 // loudly at registration than silently match weird URLs.
                 throw std::invalid_argument(
-                    "lumen::Router: unterminated '{' in pattern: " + p);
+                    "lux::Router: unterminated '{' in pattern: " + p);
             }
         } else {
             out += p[i];
@@ -219,4 +219,4 @@ bool Router::match_recursive(
     return false;
 }
 
-} // namespace lumen
+} // namespace lux

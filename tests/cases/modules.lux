@@ -1,0 +1,150 @@
+# Native modules (NATIVE-MODULES.md): a compiled-in, `import`-gated
+# capability, distinct from the DB drivers (sqlite/postgres/mysql) -- always
+# synchronous, no `app:` configuration block required. `hash` is the proof
+# module: three thin wrappers over crypto.hpp (already exercised indirectly
+# by the session/jwt suite), here checked directly and hex-encoded. `csv`
+# has no external dependency either (unlike `pdf`, which has its own suite
+# -- run_pdf.sh -- to skip gracefully on a binary built without cairo), so
+# it belongs in the always-runs regression suite too.
+import hash
+import csv
+import os
+import math
+import time
+import regex
+
+get endpoint("/hash/:s", string s):
+    return { "sha256": hash.sha256(s) }
+
+get endpoint("/hmac/:key/:msg", string key, string msg):
+    return { "mac": hash.hmac_sha256(key, msg) }
+
+get endpoint("/random/:n", int n):
+    return { "hex": hash.random_hex(n) }
+
+get endpoint("/csv/basic"):
+    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
+    int h = csv.parse(data)
+    List<Json> cols = csv.columns(h)
+    List<Json> rows = csv.rows(h)
+    int n = csv.row_count(h)
+    csv.close(h)
+    return { "columns": cols, "rows": rows, "row_count": n }
+
+get endpoint("/csv/filter_and_aggregate"):
+    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
+    int h = csv.parse(data)
+    int madrid = csv.filter_eq(h, "city", "madrid")
+    List<Json> rows = csv.rows(madrid)
+    double total = csv.sum(h, "age")
+    double avg = csv.mean(h, "age")
+    List<Json> grouped = csv.group_sum(h, "city", "age")
+    csv.close(h)
+    csv.close(madrid)
+    return { "madrid_rows": rows, "total_age": total, "avg_age": avg, "grouped": grouped }
+
+get endpoint("/csv/quoted"):
+    string data = "name,note\n\"Smith, John\",\"He said \"\"hi\"\"\"\nplain,ok\n"
+    int h = csv.parse(data)
+    List<Json> rows = csv.rows(h)
+    csv.close(h)
+    return { "rows": rows }
+
+get endpoint("/csv/roundtrip"):
+    string data = "a,b\n1,2\n3,4\n"
+    int h = csv.parse(data)
+    string back = csv.to_csv(h)
+    csv.close(h)
+    return { "csv": back }
+
+get endpoint("/csv/closed_handle"):
+    int h = csv.parse("a,b\n1,2\n")
+    csv.close(h)
+    List<Json> rows = csv.rows(h)
+    return { "unreachable": rows }
+
+get endpoint("/os/env"):
+    string missing = os.getenv("LUX_DEFINITELY_NOT_SET_XYZ", "fallback")
+    Json present = os.getenv("LUX_TEST_TMP")
+    return { "missing_uses_default": missing, "present_is_not_null": present != null }
+
+get endpoint("/os/path"):
+    string joined = os.path_join("a", "b", "c.txt")
+    string base = os.path_basename("/x/y/z.txt")
+    string dir = os.path_dirname("/x/y/z.txt")
+    return { "joined": joined, "base": base, "dir": dir }
+
+get endpoint("/os/file_roundtrip"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_test")
+    os.make_dir(dir)
+    string path = os.path_join(dir, "hello.txt")
+    await os.write_file(path, "hola mundo")
+    bool existed_before = os.path_exists(path)
+    string content = await os.read_file(path)
+    List<Json> entries = os.list_dir(dir)
+    bool removed = os.remove_file(path)
+    bool exists_after = os.path_exists(path)
+    return { "existed_before": existed_before, "content": content, "entries": entries,
+              "removed": removed, "exists_after": exists_after }
+
+get endpoint("/os/missing_file"):
+    Json content = await os.read_file("/definitely/does/not/exist/xyz123")
+    return { "content_is_null": content == null }
+
+get endpoint("/os/run_echo"):
+    Json r = await os.run("/bin/echo", ["hello", "from", "os.run"])
+    return r
+
+get endpoint("/os/run_missing"):
+    Json r = await os.run("/definitely/not/a/real/command/xyz123")
+    return r
+
+get endpoint("/math/basic"):
+    return {
+        "abs": math.abs(-7), "abs_f": math.abs(-2.5),
+        "min": math.min(3, 9), "max": math.max(3, 9),
+        "round": math.round(2.6), "floor": math.floor(2.9), "ceil": math.ceil(2.1),
+        "sqrt": math.sqrt(16), "pow": math.pow(2, 10), "log": math.log(1)
+    }
+
+get endpoint("/math/random"):
+    double r = math.random()
+    int n = math.random_int(5, 5)
+    return { "in_range": r >= 0.0 and r < 1.0, "fixed_range": n }
+
+get endpoint("/time/basic"):
+    int n = time.now()
+    int s = time.now_seconds()
+    string iso = time.format_iso(0)
+    string custom = time.format(0, "%Y-%m-%d")
+    return { "n_positive": n > 0, "s_positive": s > 0, "iso_epoch0": iso, "custom_epoch0": custom }
+
+get endpoint("/time/parse"):
+    Json parsed = time.parse_iso("1970-01-01T00:00:00Z")
+    Json bad = time.parse_iso("not a date")
+    return { "parsed_epoch0": parsed, "bad_is_null": bad == null }
+
+get endpoint("/regex/test"):
+    return { "yes": regex.test("[0-9]+", "abc123"), "no": regex.test("^[0-9]+$", "abc123") }
+
+get endpoint("/regex/find"):
+    return { "found": regex.find("[0-9]+", "abc123def"), "missing": regex.find("[0-9]+", "abcdef") }
+
+get endpoint("/regex/find_all"):
+    return { "all": regex.find_all("[0-9]+", "a1 b22 c333") }
+
+get endpoint("/regex/groups"):
+    return { "g": regex.groups("(\\w+)@(\\w+)\\.com", "hi bob@example.com bye") }
+
+get endpoint("/regex/replace"):
+    return { "r": regex.replace("[0-9]+", "a1 b22 c333", "#") }
+
+get endpoint("/regex/replace_backref"):
+    return { "r": regex.replace("(\\w+)@(\\w+)", "user@host", "$2@$1") }
+
+get endpoint("/regex/split"):
+    return { "r": regex.split("\\s*,\\s*", "a, b,c ,  d") }
+
+get endpoint("/regex/bad_pattern"):
+    return { "r": regex.test("(unclosed", "x") }

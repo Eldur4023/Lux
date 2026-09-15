@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
-# Suite for Lumen's `pdf` native module (NATIVE-MODULES.md).
+# Suite for Lux's `pdf` native module (NATIVE-MODULES.md).
 #
 # Separate from run_tests.sh for the same reason run_sqlite.sh/run_postgres.sh/
-# run_mysql.sh are: cairo is an OPTIONAL compiled-in dependency (LUMEN_PDF),
+# run_mysql.sh are: cairo is an OPTIONAL compiled-in dependency (LUX_PDF),
 # and a binary built without it has to skip this suite, not fail it.
 #
 #   tests/run_pdf.sh [path-to-binary]
 
 set -u
 
-LUMEN="${1:-$HOME/lumen-build/lumen}"
-case "$LUMEN" in /*) ;; *) LUMEN="$(cd "$(dirname "$LUMEN")" && pwd)/$(basename "$LUMEN")" ;; esac
+LUX="${1:-$HOME/lux-build/lux}"
+case "$LUX" in /*) ;; *) LUX="$(cd "$(dirname "$LUX")" && pwd)/$(basename "$LUX")" ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PORT=${LUMEN_TEST_PDF_PORT:-8830}
+PORT=${LUX_TEST_PDF_PORT:-8830}
 SRV=""
 
 passed=0
@@ -38,8 +38,8 @@ stop_server() {
 }
 trap 'stop_server; rm -rf "$TMP"' EXIT
 
-if ! "$LUMEN" --check "$HERE/cases/pdf.lum" > "$TMP/check" 2>&1; then
-    # The exact wording project.cpp uses when LUMEN_PDF was off/cairo was
+if ! "$LUX" --check "$HERE/cases/pdf.lux" > "$TMP/check" 2>&1; then
+    # The exact wording project.cpp uses when LUX_PDF was off/cairo was
     # missing at build time -- NOT "...contains 'import'" (that never
     # matches this message; caught while adding the http module's own suite
     # and finding this one had never really been exercised either).
@@ -88,7 +88,7 @@ print(raw[:5].decode('latin1'), end='')
 
 echo "== startup =="
 cd "$HERE/.."
-"$LUMEN" --no-watch --port "$PORT" "$HERE/cases/pdf.lum" > "$TMP/srv.log" 2>&1 &
+"$LUX" --no-watch --port "$PORT" "$HERE/cases/pdf.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/health" 2>/dev/null && break

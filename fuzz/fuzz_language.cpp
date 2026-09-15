@@ -1,14 +1,14 @@
-// Fuzzing harness for the Lumen Script frontend: lexer, parser, checker.
+// Fuzzing harness for the Lux Script frontend: lexer, parser, checker.
 //
-// Seeds: every .lum in the given directory (tests/cases by default).
+// Seeds: every .lux in the given directory (tests/cases by default).
 // Each mutated case is written to a temporary file and compiled with
-// lumen_script::compile(), the SAME function `lumen --check` uses -- the real
+// lux_script::compile(), the SAME function `lux --check` uses -- the real
 // path is tested, not a summarized version of it.
 //
 //   fuzz_language [seeds-directory] [iterations]
 
 #include "chaos.hpp"
-#include <lumen_script/project.hpp>
+#include <lux_script/project.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -24,7 +24,7 @@ static std::vector<std::string> cargar_semillas(const std::string& dir) {
     std::vector<std::string> out;
     if (!fs::exists(dir)) return out;
     for (auto& e : fs::recursive_directory_iterator(dir)) {
-        if (!e.is_regular_file() || e.path().extension() != ".lum") continue;
+        if (!e.is_regular_file() || e.path().extension() != ".lux") continue;
         std::ifstream f(e.path(), std::ios::binary);
         if (!f) continue;
         out.emplace_back(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
 
     auto seeds = cargar_semillas(seeds_dir);
     if (seeds.empty()) {
-        std::fprintf(stderr, "fuzz_language: no .lum files in %s\n", seeds_dir.c_str());
+        std::fprintf(stderr, "fuzz_language: no .lux files in %s\n", seeds_dir.c_str());
         return 1;
     }
     std::fprintf(stderr, "fuzz_language: %zu seeds from %s, %d iterations\n", seeds.size(),
@@ -46,13 +46,13 @@ int main(int argc, char** argv) {
 
     int failures = chaos::run(
         "language", iterations, 2000, seeds, [](const std::string& case_) {
-            std::string path = "/tmp/fuzz_language_case_" + std::to_string(getpid()) + ".lum";
+            std::string path = "/tmp/fuzz_language_case_" + std::to_string(getpid()) + ".lux";
             {
                 std::ofstream f(path, std::ios::binary);
                 f << case_;
             }
-            lumen_script::DiagnosticBag diags;
-            auto mod = lumen_script::compile({fs::path(path)}, diags);
+            lux_script::DiagnosticBag diags;
+            auto mod = lux_script::compile({fs::path(path)}, diags);
             (void)mod;
             std::remove(path.c_str());
         });

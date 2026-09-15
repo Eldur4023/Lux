@@ -9,5 +9,5 @@
 *.sh text eol=lf
 
 # The same for whatever is loaded from bash or from a database client.
-*.lum text eol=lf
+*.lux text eol=lf
 *.sql  text eol=lf

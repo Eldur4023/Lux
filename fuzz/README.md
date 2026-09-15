@@ -12,24 +12,24 @@ splices with another seed— runs in its own child process. A hang or an
 and the failing case is dumped to `/tmp/<name>_fail_N.bin` so it can be
 reproduced separately.
 
-- **`fuzz_language`** — the Lumen Script lexer, parser and checker. Seeds: every
-  `.lum` in a directory (`tests/cases` by default). Each case is written to a
-  temporary file and compiled with `lumen_script::compile()`, the same function
-  `lumen --check` uses — the real path is tested.
+- **`fuzz_language`** — the Lux Script lexer, parser and checker. Seeds: every
+  `.lux` in a directory (`tests/cases` by default). Each case is written to a
+  temporary file and compiled with `lux_script::compile()`, the same function
+  `lux --check` uses — the real path is tested.
 - **`fuzz_http`** — the HTTP parser (with llhttp involved) and the multipart
   parser, both in process, with no socket. `http_parser.hpp` is internal to
-  `lumen` (it lives in `src/`, not in `include/`); the harness includes it
+  `lux` (it lives in `src/`, not in `include/`); the harness includes it
   directly, as `tests/placeholders.cpp` already does with the postgres driver.
 
 ## Building
 
 Separate from the normal build: for ASan/UBSan to be worth anything they have to
-instrument `lumen_script`/`lumen` too, not just the two harness `.cpp` files, so
+instrument `lux_script`/`lux` too, not just the two harness `.cpp` files, so
 they go in the flags for the whole configuration, not on the target.
 
 ```bash
 mkdir -p build-fuzz && cd build-fuzz
-cmake -S .. -B . -DCMAKE_BUILD_TYPE=Debug -DLUMEN_FUZZ=ON -DLUMEN_JEMALLOC=OFF \
+cmake -S .. -B . -DCMAKE_BUILD_TYPE=Debug -DLUX_FUZZ=ON -DLUX_JEMALLOC=OFF \
     -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 cmake --build . -j"$(nproc)" --target fuzz_language fuzz_http
@@ -58,7 +58,7 @@ what pays off is starting from real seeds, not the speed.
 
 ```bash
 xxd /tmp/lenguaje_fail_1.bin        # or whatever name the campaign dumped
-cp /tmp/lenguaje_fail_1.bin /tmp/case.lum
+cp /tmp/lenguaje_fail_1.bin /tmp/case.lux
 ./fuzz_language /tmp   1             # a single iteration, seed = the case itself
 ```
 

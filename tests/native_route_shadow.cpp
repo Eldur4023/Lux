@@ -1,7 +1,7 @@
 // Fase 4 de --native: la primera ruta HTTP
 // compilada a codigo nativo. A diferencia de las pruebas anteriores (que
 // arman un Program/Emitter/VM a mano), esta pasa por compile() de verdad --
-// el mismo camino que toma `lumen --native app.lum` -- y despacha peticiones
+// el mismo camino que toma `lux --native app.lux` -- y despacha peticiones
 // contra mod->router tal como lo haria HttpConnection, comparando el
 // resultado de compilar el MISMO fuente con native=false y con native=true.
 //
@@ -14,10 +14,10 @@
 // vez de Dict<V> homogeneo), y las otras funciones globales que escriben la
 // respuesta ellas mismas (text/html/status/redirect como "else" de una
 // guarda o como el propio `return`, ver Comprobador::es_llamada_respuesta).
-#include <lumen_script/project.hpp>
+#include <lux_script/project.hpp>
 
-#include <lumen/request.hpp>
-#include <lumen/response.hpp>
+#include <lux/request.hpp>
+#include <lux/response.hpp>
 
 #include <cstdio>
 #include <filesystem>
@@ -25,14 +25,14 @@
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 
 // Ejecuta el Task<void> hasta el final. Ninguna ruta de esta prueba usa
 // `await`: el handler (nativo o bytecode) nunca suspende de verdad, asi que
 // un solo resume() basta -- no hace falta event loop.
-static void ejecutar_sincrono(lumen::Task<void> t) {
+static void ejecutar_sincrono(lux::Task<void> t) {
     if (!t.handle.done()) t.handle.resume();
 }
 
@@ -51,11 +51,11 @@ static Resultado pedir(Module& mod, const std::string& metodo, const std::string
     auto        qpos     = path.find('?');
     std::string solo_ruta = (qpos == std::string::npos) ? path : path.substr(0, qpos);
 
-    lumen::RouteMatch m = mod.router.match(metodo, solo_ruta);
+    lux::RouteMatch m = mod.router.match(metodo, solo_ruta);
     if (!m.found) return {};
 
-    lumen::Request  req;
-    lumen::Response res;
+    lux::Request  req;
+    lux::Response res;
     req.method = metodo;
     req.path   = solo_ruta;
     req.params = m.params;
@@ -81,7 +81,7 @@ static Resultado pedir(Module& mod, const std::string& metodo, const std::string
 }
 
 int main() {
-    const auto dir_db = std::filesystem::temp_directory_path() / "lumen_native_route_check";
+    const auto dir_db = std::filesystem::temp_directory_path() / "lux_native_route_check";
     std::error_code ec_db;
     std::filesystem::create_directories(dir_db, ec_db);
     const auto archivo_db = dir_db / "sqlite_check.db";
@@ -199,20 +199,20 @@ int main() {
         "        i++\n"
         "    return { \"items\": items, \"total\": len(items) }\n";
 
-    const auto dir  = std::filesystem::temp_directory_path() / "lumen_native_route_check";
+    const auto dir  = std::filesystem::temp_directory_path() / "lux_native_route_check";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    const auto archivo = dir / "app.lum";
+    const auto archivo = dir / "app.lux";
     {
         std::ofstream out(archivo, std::ios::trunc);
         out << src;
     }
 
-    // El cache de --native (compile() lo hornea como ".lumen-native",
+    // El cache de --native (compile() lo hornea como ".lux-native",
     // relativo al directorio de trabajo del proceso -- no configurable
     // desde aqui) se limpia antes de cada compilacion para que un fallo
     // previo no deje un .so obsoleto que dlopen() cargue por error.
-    std::filesystem::remove_all(".lumen-native", ec);
+    std::filesystem::remove_all(".lux-native", ec);
     DiagnosticBag diags_bc;
     auto mod_bc = compile({archivo}, diags_bc, /*native=*/false);
     if (!diags_bc.empty()) {
@@ -221,10 +221,10 @@ int main() {
         return 1;
     }
 
-    std::filesystem::remove_all(".lumen-native", ec);
+    std::filesystem::remove_all(".lux-native", ec);
     DiagnosticBag diags_nat;
     auto mod_nat = compile({archivo}, diags_nat, /*native=*/true);
-    std::filesystem::remove_all(".lumen-native", ec);
+    std::filesystem::remove_all(".lux-native", ec);
     if (!diags_nat.empty()) {
         std::printf("FALLA: compilacion --native con errores: %s\n",
                     diags_nat.items().front().message.c_str());
@@ -508,8 +508,8 @@ int main() {
     comparar("return redirect(url)", "/ir/5");
 
     // Una List<int> YA construida (no un ListLit) dentro del dict de
-    // retorno: Generador::valor_json() la convierte con lumen_valor_de(),
-    // iterando LList<T> con lumen_len()/lumen_get() -- a diferencia de un
+    // retorno: Generador::valor_json() la convierte con lux_valor_de(),
+    // iterando LList<T> con lux_len()/lux_get() -- a diferencia de un
     // DictLit/ListLit literal, esta rama no exige homogeneidad porque la
     // lista YA es homogenea por construccion (es un tipo nativo, no JSON
     // heterogeneo).
@@ -517,14 +517,14 @@ int main() {
     comparar("List<int> ya construida en el retorno", "/rango/5");
 
     // Igual que la List<T> de arriba, pero un Dict<string,int> ya
-    // construido: lumen_valor_de() recorre TODOS los pares con
-    // lumen_len()/lumen_key_at()/lumen_val_at() (nuevos en LDict, sin
+    // construido: lux_valor_de() recorre TODOS los pares con
+    // lux_len()/lux_key_at()/lux_val_at() (nuevos en LDict, sin
     // equivalente en el lenguaje -- solo para este puente), preservando el
     // orden de insercion (LDict es un vector, igual que Value::Dict).
     comparar("Dict<string,int> ya construido en el retorno", "/contadores/0");
     comparar("Dict<string,int> ya construido en el retorno", "/contadores/4");
 
-    // Fase 5: `await sleep(ms)` -- la ruta se genera como lumen::Task<void>
+    // Fase 5: `await sleep(ms)` -- la ruta se genera como lux::Task<void>
     // de verdad (RutaNativa::asincrona), no como una funcion void. Esta
     // prueba, sin un event loop real detras (current_loop queda a nullptr
     // en este binario, nunca lo pone HttpConnection::dispatch()), no
@@ -541,7 +541,7 @@ int main() {
     // diferencia de una funcion) -- nadie la llama a traves de ella, la
     // invoca build_routes() directamente -- asi que, antes de que
     // generate_native_route() envolviera el cuerpo entero en un try/catch, un
-    // modulo por cero (lumen_mod_check, el mismo canal de error que ya usan
+    // modulo por cero (lux_mod_check, el mismo canal de error que ya usan
     // las funciones) escapaba de la corrutina sin que nadie lo atrapara.
     // Confirmado contra el binario real: NO tumbaba el proceso (Task<void>
     // absorbe la excepcion en su unhandled_exception()), pero daba
@@ -549,7 +549,7 @@ int main() {
     // para una excepcion sin atrapar -- en vez de {"error":"modulo por
     // cero","en":"..."} que da bytecode: 500 en las dos vias, pero un cuerpo
     // distinto. El mensaje de "error" tiene que coincidir EXACTO (mismo
-    // lumen_native_error_message()); "en" no -- el codigo nativo no lleva
+    // lux_native_error_message()); "en" no -- el codigo nativo no lleva
     // ninguna nocion de linea/columna en tiempo de ejecucion, asi que usa
     // "METODO patron" en vez del "archivo:linea:col" que da el VM.
     {

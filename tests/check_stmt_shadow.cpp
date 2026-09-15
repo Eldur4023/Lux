@@ -4,17 +4,17 @@
 // compilacion real (emit_route/emit_function/emit_method/emit_ctor) sobre
 // funciones completas de verdad -- no expresiones sueltas, que es lo que ya
 // verifico tests/check_expr_shadow.cpp.
-#include <lumen_script/diagnostic.hpp>
-#include <lumen_script/emitter.hpp>
-#include <lumen_script/lexer.hpp>
-#include <lumen_script/parser.hpp>
+#include <lux_script/diagnostic.hpp>
+#include <lux_script/emitter.hpp>
+#include <lux_script/lexer.hpp>
+#include <lux_script/parser.hpp>
 
 #include <cstdio>
 #include <functional>
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 

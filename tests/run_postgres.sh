@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Suite for Lumen's postgres module.
+# Suite for Lux's postgres module.
 #
 # It is separate from run_tests.sh because it needs a server: without one, this suite
 # it SKIPS itself instead of failing, so `ctest` stays green on a machine
@@ -13,8 +13,8 @@
 #
 #   sudo apt install -y postgresql
 #   sudo service postgresql start
-#   sudo -u postgres psql -c "CREATE USER lumen WITH PASSWORD 'lumen';"
-#   sudo -u postgres psql -c "CREATE DATABASE lumen_tests OWNER lumen;"
+#   sudo -u postgres psql -c "CREATE USER lux WITH PASSWORD 'lux';"
+#   sudo -u postgres psql -c "CREATE DATABASE lux_tests OWNER lux;"
 #
 #   tests/run_postgres.sh [path-to-binary]
 #
@@ -23,13 +23,13 @@
 
 set -u
 
-LUMEN="${1:-$HOME/lumen-build/lumen}"
+LUX="${1:-$HOME/lux-build/lux}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PORT=${LUMEN_TEST_PG_PORT:-8810}
+PORT=${LUX_TEST_PG_PORT:-8810}
 SRV=""
 
-PGURL="postgresql://lumen:lumen@127.0.0.1/lumen_tests"
+PGURL="postgresql://lux:lux@127.0.0.1/lux_tests"
 
 passed=0
 failed=0
@@ -61,11 +61,11 @@ if ! command -v psql > /dev/null 2>&1; then
     exit 77
 fi
 if ! psql "$PGURL" -c "select 1" > /dev/null 2>&1; then
-    grey "postgres: cannot connect to lumen_tests — suite skipped"
+    grey "postgres: cannot connect to lux_tests — suite skipped"
     grey "          (the instructions for setting it up are in this file's header)"
     exit 77
 fi
-if ! "$LUMEN" --check "$HERE/cases/postgres.lum" > "$TMP/check" 2>&1; then
+if ! "$LUX" --check "$HERE/cases/postgres.lux" > "$TMP/check" 2>&1; then
     if grep -q "postgres" "$TMP/check" && grep -q "import" "$TMP/check"; then
         grey "postgres: the binary was built without the module — suite skipped"
         exit 77
@@ -110,7 +110,7 @@ psql "$PGURL" -q -v ON_ERROR_STOP=1 -f "$HERE/cases/postgres-schema.sql" > /dev/
     exit 1; }
 
 echo "== arranque =="
-"$LUMEN" --no-watch --port "$PORT" "$HERE/cases/postgres.lum" > "$TMP/srv.log" 2>&1 &
+"$LUX" --no-watch --port "$PORT" "$HERE/cases/postgres.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/__ping__" 2>/dev/null && break
@@ -126,7 +126,7 @@ check "select without parameters" GET /all      200 '"title":"length"'
 check "select with a parameter"  GET /one/1      200 '"author":"Ana"'
 check "missing row"    GET /one/99999  404
 
-# The Lumen Script placeholder is `?` and the driver translates it to $1: here it is checked
+# The Lux Script placeholder is `?` and the driver translates it to $1: here it is checked
 # against a real server, not just against the function on its own.
 echo "== placeholders =="
 check "dos placeholders en orden" GET '/two?author=Ana&views=0' 200 '"title":"length"'

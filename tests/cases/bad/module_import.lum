@@ -1,5 +1,0 @@
-# A native module used without its `import` (NATIVE-MODULES.md) has to fail
-# to compile exactly like a DB module does -- see tests/cases/bad/import.lum
-# for the sqlite equivalent this mirrors.
-get endpoint("/x"):
-    return { "h": hash.sha256("x") }

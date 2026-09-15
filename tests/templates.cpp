@@ -1,8 +1,8 @@
-// Test of the Lumen Script template engine, with no HTTP involved.
-#include <lumen_script/template.hpp>
+// Test of the Lux Script template engine, with no HTTP involved.
+#include <lux_script/template.hpp>
 
-#include <lumen/request.hpp>
-#include <lumen/response.hpp>
+#include <lux/request.hpp>
+#include <lux/response.hpp>
 
 #include <cstdio>
 #include <filesystem>
@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-using lumen_script::Template;
-using lumen_script::Value;
+using lux_script::Template;
+using lux_script::Value;
 
 static int         failures = 0;
 static std::string dir_tpl = ".";
@@ -29,26 +29,26 @@ static void check(const char* name, const std::string& obtenido,
 
 // Compiles and renders; returns "" and sets `err` if something fails.
 static std::string pintar(const std::string& fuente,
-                          const std::vector<lumen_script::TypedName>& names,
+                          const std::vector<lux_script::TypedName>& names,
                           std::vector<Value> values, std::string& err) {
-    lumen_script::DiagnosticBag diags;
+    lux_script::DiagnosticBag diags;
     Template p;
-    if (!lumen_script::compilar_plantilla(fuente, "test.html", dir_tpl, names, diags, p)) {
+    if (!lux_script::compilar_plantilla(fuente, "test.html", dir_tpl, names, diags, p)) {
         err = diags.items().empty() ? "error without a message" : diags.items().front().message;
         return {};
     }
-    lumen::Request  req;
-    lumen::Response res;
-    lumen_script::NativeCtx  ctx{req, res};
+    lux::Request  req;
+    lux::Response res;
+    lux_script::NativeCtx  ctx{req, res};
 
     std::string out;
-    if (!lumen_script::render_plantilla(p, std::move(values), ctx, nullptr, out, err))
+    if (!lux_script::render_plantilla(p, std::move(values), ctx, nullptr, out, err))
         return {};
     return out;
 }
 
 static void case_(const char* name, const std::string& fuente,
-                 const std::vector<lumen_script::TypedName>& names,
+                 const std::vector<lux_script::TypedName>& names,
                  std::vector<Value> values, const std::string& expected) {
     std::string err;
     const std::string got = pintar(fuente, names, std::move(values), err);
@@ -62,7 +62,7 @@ static void case_(const char* name, const std::string& fuente,
 
 // Cases that MUST fail to compile, with the expected reason.
 static void fails_to_compile(const char* name, const std::string& fuente,
-                       const std::vector<lumen_script::TypedName>& names,
+                       const std::vector<lux_script::TypedName>& names,
                        const std::string& trozo) {
     std::string err;
     const std::string got = pintar(fuente, names, {}, err);
@@ -120,7 +120,7 @@ int main() {
          {"n"}, {Value::integer(9)}, "grande");
     case_("elif ultimo", "{% if n > 100 %}enorme{% elif n > 5 %}grande{% else %}pequeno{% endif %}",
          {"n"}, {Value::integer(1)}, "pequeno");
-    case_("lumen_script truthiness", "{% if s %}yes{% else %}empty{% endif %}", {"s"},
+    case_("lux_script truthiness", "{% if s %}yes{% else %}empty{% endif %}", {"s"},
          {Value::str("")}, "empty");
 
     std::printf("== loops ==\n");
@@ -164,7 +164,7 @@ int main() {
     fails_to_compile("unclosed for", "{% for x in xs %}", {"xs"}, "missing {% endfor %}");
     fails_to_compile("malformed for", "{% for x xs %}{% endfor %}", {"xs"}, "for x in list");
     fails_to_compile("unknown tag", "{% cosa %}", {}, "unknown tag");
-    fails_to_compile("jinja filter", "{{ x|upper }}", {"x"}, "Lumen Script methods");
+    fails_to_compile("jinja filter", "{{ x|upper }}", {"x"}, "Lux Script methods");
     fails_to_compile("variable that does not exist", "{{ noexiste }}", {}, "in the template expression");
     fails_to_compile("trailing garbage", "{{ n n }}", {"n"}, "trailing input");
 
@@ -172,7 +172,7 @@ int main() {
     // It needs real files: {% extends %} reads them from disk.
     {
         namespace fs = std::filesystem;
-        const fs::path d = fs::temp_directory_path() / "lumen_script_tpl_prueba";
+        const fs::path d = fs::temp_directory_path() / "lux_script_tpl_prueba";
         fs::remove_all(d);
         fs::create_directories(d);
         dir_tpl = d.string();
@@ -212,7 +212,7 @@ int main() {
         fails_to_compile("missing endblock", "{% block x %}unclosed", {},
                    "missing {% endblock %}");
         fails_to_compile("macro does not exist", "{% macro m() %}{% endmacro %}", {},
-                   "no existe en Lumen Script");
+                   "no existe en Lux Script");
 
         dir_tpl = ".";
         fs::remove_all(d);

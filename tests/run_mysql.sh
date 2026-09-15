@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Suite for Lumen's mysql module.
+# Suite for Lux's mysql module.
 #
 # It is separate from run_tests.sh because it needs a server: without one, this suite
 # it SKIPS itself instead of failing, so `ctest` stays green on a machine
@@ -11,9 +11,9 @@
 #
 #   sudo apt install -y mysql-server
 #   sudo service mysql start
-#   sudo mysql -e "CREATE DATABASE lumen_tests CHARACTER SET utf8mb4;
-#                  CREATE USER 'lumen'@'127.0.0.1' IDENTIFIED BY 'lumen';
-#                  GRANT ALL ON lumen_tests.* TO 'lumen'@'127.0.0.1';
+#   sudo mysql -e "CREATE DATABASE lux_tests CHARACTER SET utf8mb4;
+#                  CREATE USER 'lux'@'127.0.0.1' IDENTIFIED BY 'lux';
+#                  GRANT ALL ON lux_tests.* TO 'lux'@'127.0.0.1';
 #                  FLUSH PRIVILEGES;"
 #
 #   tests/run_mysql.sh [path-to-binary]
@@ -24,16 +24,16 @@
 
 set -u
 
-LUMEN="${1:-$HOME/lumen-build/lumen}"
+LUX="${1:-$HOME/lux-build/lux}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PORT=${LUMEN_TEST_MYSQL_PORT:-8800}
+PORT=${LUX_TEST_MYSQL_PORT:-8800}
 SRV=""
 
 DB_HOST=127.0.0.1
-DB_USER=lumen
-DB_PASS=lumen
-DB_NAME=lumen_tests
+DB_USER=lux
+DB_PASS=lux
+DB_NAME=lux_tests
 
 passed=0
 failed=0
@@ -70,7 +70,7 @@ if ! mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NAME" \
     grey "       (the instructions for setting it up are in this file's header)"
     exit 77
 fi
-if ! "$LUMEN" --check "$HERE/cases/mysql.lum" > "$TMP/check" 2>&1; then
+if ! "$LUX" --check "$HERE/cases/mysql.lux" > "$TMP/check" 2>&1; then
     if grep -q "modulo 'mysql'" "$TMP/check" || grep -q "import mysql" "$TMP/check"; then
         grey "mysql: the binary was built without the module — suite skipped"
         exit 77
@@ -116,7 +116,7 @@ mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NAME" \
     red "cannot load the schema"; exit 1; }
 
 echo "== arranque =="
-"$LUMEN" --no-watch --port "$PORT" "$HERE/cases/mysql.lum" > "$TMP/srv.log" 2>&1 &
+"$LUX" --no-watch --port "$PORT" "$HERE/cases/mysql.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/__ping__" 2>/dev/null && break
@@ -148,7 +148,7 @@ check "null"               GET /types 200 '"t_null":null'
 # A BLOB is arbitrary bytes, not text: it comes out in base64 so the response
 # siga siendo UTF-8 valido.  'bytes' -> 'Ynl0ZXM='.
 check "the blob comes out in base64" GET /types 200 '"t_blob":"Ynl0ZXM="'
-# Above 2^63 a BIGINT UNSIGNED does not fit in the Lumen Script integer and falls
+# Above 2^63 a BIGINT UNSIGNED does not fit in the Lux Script integer and falls
 # back to a decimal, as in the JSON parser: the last digit is lost.  It used to
 # get pinned at INT64_MAX, which is half the value.
 check "unsigned bigint"   GET /types 200 '"t_ubig":1844674407370955'

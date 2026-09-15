@@ -1,0 +1,349 @@
+// System-access module (NATIVE-MODULES.md): environment variables, paths,
+// file I/O, and running external commands -- Lux Script's answer to "we
+// could use OS/system libraries like Python has" (os, os.path, subprocess).
+// Zero third-party dependencies: everything here is C++17 <filesystem> and
+// POSIX, so, like `hash`/`csv`, this module is unconditionally compiled in
+// (builtin_module.cpp), no cmake option needed.
+//
+// Synchronous by default (NATIVE-MODULES.md §2) -- most of this module pays
+// nothing for that (env lookups, path string manipulation, a `stat()` are
+// all microseconds). Two functions are real, not theoretical, exceptions,
+// exactly the same shape `http`'s comment already documents, and are marked
+// `is_async` (BuiltinModuleFn::is_async) below so `await` runs them on
+// lux::blocking_pool() instead of the event loop thread:
+//   - read_file()/write_file() do real disk I/O -- normally fast (page-cache
+//     backed) but not bounded, same cost class the project already accepts
+//     for static file serving (app.cpp) and template loading (template.cpp).
+//   - run() launches and waits on an external process, whose duration is
+//     entirely outside Lux's control -- bounded here by a fixed timeout
+//     (see kRunTimeoutMs) so a hung child cannot pin its worker forever,
+//     the same mitigation http.* uses for a hung remote server.
+//
+// Security posture, stated plainly rather than left implicit: this module
+// trusts the caller exactly as much as Python's `os`/`open()`/`subprocess`
+// do -- there is no path sandboxing (no configured "root" a path is
+// confined to, unlike static file serving's canonical-root check in
+// app.cpp) and run() takes a command plus an argv LIST, never a shell
+// string, specifically so it can never be tricked into shell metacharacter
+// injection the way `os.system("cmd " + user_input)` can in Python. Passing
+// unsanitized user input as a path or as an argv element is exactly as
+// dangerous here as it is in Python, and exactly as much the caller's
+// responsibility to avoid.
+#include <lux_script/builtin_module.hpp>
+
+#include <spawn.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <unistd.h>
+#include <signal.h>
+#include <cerrno>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+
+extern char** environ;
+
+namespace lux_script {
+
+namespace {
+
+namespace fs = std::filesystem;
+
+// ─── Environment & paths ────────────────────────────────────────────────────
+
+Value fn_os_getenv(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.getenv() expects a name"; return Value::null(); }
+    const char* v = std::getenv(args[0].as_str().c_str());
+    if (v) return Value::str(std::string(v));
+    // A default is a normal, expected outcome (matching Python's
+    // os.getenv(name, default)), not an error -- and with no default,
+    // an unset variable is null, not an error either: the whole point of
+    // getenv() over a hypothetical getenv_required() is to let the script
+    // decide what an absent variable means.
+    if (args.size() > 1 && args[1].is_str()) return Value::str(args[1].as_str());
+    return Value::null();
+}
+
+Value fn_os_cwd(NativeCtx&, std::vector<Value>&, std::string& error) {
+    std::error_code ec;
+    fs::path p = fs::current_path(ec);
+    if (ec) { error = "os.cwd(): " + ec.message(); return Value::null(); }
+    return Value::str(p.string());
+}
+
+// Variadic, min 1 arg, no cap -- os.path_join("a", "b", "c") -> "a/b/c",
+// matching Python's os.path.join(*parts).
+Value fn_os_path_join(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    fs::path out;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (!args[i].is_str()) { error = "os.path_join(): every argument must be a string"; return Value::null(); }
+        out /= args[i].as_str();
+    }
+    return Value::str(out.string());
+}
+
+Value fn_os_path_exists(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.path_exists() expects a path"; return Value::null(); }
+    std::error_code ec;
+    return Value::boolean(fs::exists(fs::path(args[0].as_str()), ec));
+}
+
+Value fn_os_path_basename(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.path_basename() expects a path"; return Value::null(); }
+    return Value::str(fs::path(args[0].as_str()).filename().string());
+}
+
+Value fn_os_path_dirname(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.path_dirname() expects a path"; return Value::null(); }
+    return Value::str(fs::path(args[0].as_str()).parent_path().string());
+}
+
+Value fn_os_path_abs(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.path_abs() expects a path"; return Value::null(); }
+    std::error_code ec;
+    fs::path p = fs::absolute(fs::path(args[0].as_str()), ec);
+    if (ec) { error = "os.path_abs(): " + ec.message(); return Value::null(); }
+    // lexically_normal collapses "a/./b/../c" into "a/c" -- absolute() alone
+    // does not, and a caller asking for an absolute path almost always wants
+    // it in the form they can compare/display, not one still carrying "..".
+    return Value::str(p.lexically_normal().string());
+}
+
+// ─── File I/O ───────────────────────────────────────────────────────────────
+
+// Missing/unreadable is null, not an error: the same "absent is a normal
+// outcome the script decides about" reasoning as getenv() above, and
+// consistent with the project's existing precedent for "not found" (a DB
+// query with no matching row already comes back as an empty List, not a
+// thrown error -- see GUIDE.md's "no encontrado" pattern) rather than every
+// absence being a hard failure. A genuine system error (permission denied on
+// a path that DOES exist, for instance) still goes through `error`.
+Value fn_os_read_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.read_file() expects a path"; return Value::null(); }
+    const std::string& path = args[0].as_str();
+    std::error_code ec;
+    if (!fs::exists(path, ec) || !fs::is_regular_file(path, ec)) return Value::null();
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return Value::null();
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    if (f.bad()) { error = "os.read_file(): could not read '" + path + "'"; return Value::null(); }
+    return Value::str(ss.str());
+}
+
+Value fn_os_write_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.write_file() expects a path"; return Value::null(); }
+    if (!args[1].is_str()) { error = "os.write_file() expects the content as a string"; return Value::null(); }
+    std::ofstream f(args[0].as_str(), std::ios::binary | std::ios::trunc);
+    if (!f) { error = "os.write_file(): could not open '" + args[0].as_str() + "' for writing"; return Value::null(); }
+    f << args[1].as_str();
+    if (f.bad()) { error = "os.write_file(): write failed for '" + args[0].as_str() + "'"; return Value::null(); }
+    return Value::boolean(true);
+}
+
+// Not recursive/not a directory listing tool -- one level, like Python's
+// os.listdir(), entry names only (not full paths): the caller path_joins
+// with the original directory if it wants full paths, exactly as Python
+// leaves it to the caller too.
+Value fn_os_list_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.list_dir() expects a path"; return Value::null(); }
+    const std::string& path = args[0].as_str();
+    std::error_code ec;
+    if (!fs::exists(path, ec) || !fs::is_directory(path, ec)) return Value::null();
+    Value::List out;
+    for (const auto& entry : fs::directory_iterator(path, ec))
+        out.push_back(Value::str(entry.path().filename().string()));
+    if (ec) { error = "os.list_dir(): " + ec.message(); return Value::null(); }
+    return Value::list(std::move(out));
+}
+
+// Files only, on purpose -- mirroring Python's own os.remove()/os.rmdir()
+// split (and shutil.rmtree() as the separate, explicitly-named "yes, really,
+// recursively" operation): one function that can silently recurse-delete an
+// entire directory tree is a much easier mistake to make catastrophic than
+// one that only ever removes a single file. Deleting a directory tree is
+// deliberately not exposed by this module yet.
+Value fn_os_remove_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.remove_file() expects a path"; return Value::null(); }
+    const std::string& path = args[0].as_str();
+    std::error_code ec;
+    if (!fs::exists(path, ec)) return Value::boolean(false); // already gone: not an error
+    if (!fs::is_regular_file(path, ec)) {
+        error = "os.remove_file(): '" + path + "' is not a regular file (use a directory-specific tool for directories)";
+        return Value::null();
+    }
+    bool removed = fs::remove(path, ec);
+    if (ec) { error = "os.remove_file(): " + ec.message(); return Value::null(); }
+    return Value::boolean(removed);
+}
+
+// Creates intermediate directories too, like Python's os.makedirs() (not
+// the stricter os.mkdir(), which fails if the parent is missing) -- the
+// more forgiving of the two is the more useful default for a web app
+// ensuring an upload/cache directory exists before writing into it.
+Value fn_os_make_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.make_dir() expects a path"; return Value::null(); }
+    std::error_code ec;
+    bool created = fs::create_directories(args[0].as_str(), ec);
+    if (ec) { error = "os.make_dir(): " + ec.message(); return Value::null(); }
+    return Value::boolean(created);
+}
+
+// ─── Process spawning ───────────────────────────────────────────────────────
+
+// Bounded the same way http.*'s remote-server call is (module_http.cpp):
+// there is no way to interrupt a blocking wait from outside once it starts,
+// so a hard ceiling has to exist before the child is even spawned. 15s
+// matches http's own timeout for the same reason -- neither is trying to
+// be a job queue for long-running work, both exist to keep an event-loop
+// thread from being pinned indefinitely by something outside Lux's
+// control.
+constexpr int kRunTimeoutMs = 15000;
+
+// posix_spawn(), not fork()+exec(): fork() in an already-multithreaded
+// process only allows async-signal-safe calls in the child before exec(),
+// which rules out almost all of the C++ standard library -- posix_spawn()
+// exists specifically so a multithreaded program never has to get that
+// right by hand. Never goes through a shell (no posix_spawn "-c", argv is
+// built directly from the caller's list) -- see the module-level comment on
+// why that is a deliberate security property, not just an implementation
+// detail.
+Value fn_os_run(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.run() expects a command"; return Value::null(); }
+    const std::string command = args[0].as_str();
+
+    std::vector<std::string> argv_storage;
+    argv_storage.push_back(command);
+    if (args.size() > 1) {
+        if (!args[1].is_list()) { error = "os.run(): second argument must be a List of strings"; return Value::null(); }
+        for (const auto& a : args[1].as_list()) {
+            if (!a.is_str()) { error = "os.run(): every element of the argument list must be a string"; return Value::null(); }
+            argv_storage.push_back(a.as_str());
+        }
+    }
+    std::vector<char*> argv;
+    argv.reserve(argv_storage.size() + 1);
+    for (auto& s : argv_storage) argv.push_back(s.data());
+    argv.push_back(nullptr);
+
+    int out_pipe[2], err_pipe[2];
+    if (pipe(out_pipe) != 0) { error = "os.run(): could not create a pipe"; return Value::null(); }
+    if (pipe(err_pipe) != 0) {
+        close(out_pipe[0]); close(out_pipe[1]);
+        error = "os.run(): could not create a pipe";
+        return Value::null();
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, out_pipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, err_pipe[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, out_pipe[0]);
+    posix_spawn_file_actions_addclose(&actions, out_pipe[1]);
+    posix_spawn_file_actions_addclose(&actions, err_pipe[0]);
+    posix_spawn_file_actions_addclose(&actions, err_pipe[1]);
+
+    pid_t pid = -1;
+    int rc = posix_spawnp(&pid, command.c_str(), &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(out_pipe[1]);
+    close(err_pipe[1]);
+
+    if (rc != 0) {
+        close(out_pipe[0]); close(err_pipe[0]);
+        error = "os.run(): could not start '" + command + "': " + std::strerror(rc);
+        return Value::null();
+    }
+
+    // Drain both pipes with a deadline -- poll() rather than two blocking
+    // reads in sequence, so a child that writes slowly to stderr while
+    // stdout sits idle (or vice versa) cannot stall one read while the
+    // other pipe's buffer fills and blocks the CHILD instead. On timeout,
+    // the child is killed outright: there is no partial/best-effort result
+    // to salvage from a process that overran the bound.
+    std::string out_data, err_data;
+    bool out_open = true, err_open = true;
+    char buf[4096];
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kRunTimeoutMs);
+    bool timed_out = false;
+
+    while (out_open || err_open) {
+        auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) { timed_out = true; break; }
+
+        struct pollfd fds[2];
+        int nfds = 0;
+        int out_idx = -1, err_idx = -1;
+        if (out_open) { fds[nfds] = {out_pipe[0], POLLIN, 0}; out_idx = nfds++; }
+        if (err_open) { fds[nfds] = {err_pipe[0], POLLIN, 0}; err_idx = nfds++; }
+
+        int pr = poll(fds, static_cast<nfds_t>(nfds), static_cast<int>(remaining));
+        if (pr < 0) { if (errno == EINTR) continue; break; }
+        if (pr == 0) { timed_out = true; break; }
+
+        if (out_idx >= 0 && (fds[out_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+            ssize_t n = read(out_pipe[0], buf, sizeof(buf));
+            if (n > 0) out_data.append(buf, static_cast<size_t>(n));
+            else out_open = false;
+        }
+        if (err_idx >= 0 && (fds[err_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+            ssize_t n = read(err_pipe[0], buf, sizeof(buf));
+            if (n > 0) err_data.append(buf, static_cast<size_t>(n));
+            else err_open = false;
+        }
+    }
+    close(out_pipe[0]);
+    close(err_pipe[0]);
+
+    int status = 0;
+    if (timed_out) {
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+        error = "os.run(): '" + command + "' timed out after " + std::to_string(kRunTimeoutMs) + "ms";
+        return Value::null();
+    }
+    waitpid(pid, &status, 0);
+
+    Value::Dict out;
+    out["status"] = Value::integer(WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+    out["stdout"] = Value::str(std::move(out_data));
+    out["stderr"] = Value::str(std::move(err_data));
+    return Value::dict(std::move(out));
+}
+
+class OsModule : public BuiltinModule {
+public:
+    const char* name() const override { return "os"; }
+
+    const std::vector<BuiltinModuleFn>& functions() const override {
+        static const std::vector<BuiltinModuleFn> fns = {
+            {"getenv",       1, 2, fn_os_getenv},
+            {"cwd",          0, 0, fn_os_cwd},
+            {"path_join",    1, -1, fn_os_path_join},
+            {"path_exists",  1, 1, fn_os_path_exists},
+            {"path_basename",1, 1, fn_os_path_basename},
+            {"path_dirname", 1, 1, fn_os_path_dirname},
+            {"path_abs",     1, 1, fn_os_path_abs},
+            // is_async: real, unbounded disk/process I/O -- see the module
+            // comment at the top of this file and BuiltinModuleFn::is_async.
+            {"read_file",    1, 1, fn_os_read_file,  /*is_async=*/true},
+            {"write_file",   2, 2, fn_os_write_file, /*is_async=*/true},
+            {"list_dir",     1, 1, fn_os_list_dir},
+            {"remove_file",  1, 1, fn_os_remove_file},
+            {"make_dir",     1, 1, fn_os_make_dir},
+            {"run",          1, 2, fn_os_run,        /*is_async=*/true},
+        };
+        return fns;
+    }
+};
+
+} // namespace
+
+std::unique_ptr<BuiltinModule> make_os_module() {
+    return std::make_unique<OsModule>();
+}
+
+} // namespace lux_script

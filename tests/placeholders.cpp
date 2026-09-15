@@ -3,7 +3,7 @@
 // It includes the driver's .cpp to reach the function, which lives in an
 // anonymous namespace: that way THE code is tested, not a copy of it that
 // could drift without anyone noticing.
-#include "../src/lumen_script/db_postgres.cpp"
+#include "../src/lux_script/db_postgres.cpp"
 
 #include <cstdio>
 #include <string>
@@ -13,7 +13,7 @@ static int failures = 0;
 static void good(const char* name, const std::string& sql, size_t nargs,
                  const std::string& expected) {
     std::string out, err;
-    if (!lumen_script::traducir_marcadores(sql, nargs, out, err)) {
+    if (!lux_script::traducir_marcadores(sql, nargs, out, err)) {
         ++failures;
         std::printf("  FAIL %s\n    unexpected error: %s\n", name, err.c_str());
         return;
@@ -30,7 +30,7 @@ static void good(const char* name, const std::string& sql, size_t nargs,
 static void bad(const char* name, const std::string& sql, size_t nargs,
                 const std::string& trozo) {
     std::string out, err;
-    if (lumen_script::traducir_marcadores(sql, nargs, out, err)) {
+    if (lux_script::traducir_marcadores(sql, nargs, out, err)) {
         ++failures;
         std::printf("  FAIL %s\n    passed when it should not: <<%s>>\n", name, out.c_str());
         return;

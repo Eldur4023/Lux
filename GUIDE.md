@@ -1,7 +1,7 @@
-# Lumen — Developer guide
+# Lux — Developer guide
 
-> A practical reference for Lumen Script, the language Lumen runs. The formal grammar is in
-> [LUMEN_SCRIPT-GRAMMAR.md](LUMEN_SCRIPT-GRAMMAR.md); the design decisions and their reasons,
+> A practical reference for Lux Script, the language Lux runs. The formal grammar is in
+> [LUX_SCRIPT-GRAMMAR.md](LUX_SCRIPT-GRAMMAR.md); the design decisions and their reasons,
 > in [README.md](README.md#design-decisions).
 
 ## Contents
@@ -51,9 +51,9 @@ The argument decides what gets compiled, with no surprises:
 
 | Invocation | What it compiles |
 |---|---|
-| `lumen app.lum` | Just that file |
-| `lumen a.lum b.lum` | Just those two |
-| `lumen ./my-app` | Every `.lum` in the directory, recursively |
+| `lux app.lux` | Just that file |
+| `lux a.lux b.lux` | Just those two |
+| `lux ./my-app` | Every `.lux` in the directory, recursively |
 
 | Option | |
 |---|---|
@@ -66,7 +66,7 @@ The argument decides what gets compiled, with no surprises:
 
 ### Self-test
 
-With `--autotest`, after startup and after **every successful reload**, Lumen talks to itself
+With `--autotest`, after startup and after **every successful reload**, Lux talks to itself
 over HTTP and walks the module's routes:
 
 ```
@@ -98,19 +98,19 @@ error is printed with file, line and column.
 
 ---
 
-### Lumen's own tests
+### Lux's own tests
 
 ```bash
 cd build && ctest --output-on-failure
 # or directly:
-tests/run_tests.sh ~/lumen-build/lumen
+tests/run_tests.sh ~/lux-build/lux
 ```
 
 246 tests in six suites:
 
 | suite | what it covers | |
 |---|---|---|
-| `regression` | the binary over the socket, with real `.lum` files | 79 |
+| `regression` | the binary over the socket, with real `.lux` files | 79 |
 | `templates` | compiling and rendering, in process | 48 |
 | `sqlite` | types, limits and the statement cache | 37 |
 | `postgres` | types, placeholders, transactions and concurrency with checked content | 34 |
@@ -128,11 +128,11 @@ deployed, not an instrumented version of it.
 
 ```
 my-app/
-  app.lum           configuration
+  app.lux           configuration
   routes/
-    public.lum
-    admin.lum
-  templates/         Lumen Script templates
+    public.lux
+    admin.lux
+  templates/         Lux Script templates
   public/            static files
 ```
 
@@ -171,7 +171,7 @@ app:
 ```
 
 `env("VAR")` is resolved **at compile time**. It is how a secret avoids ending up written in
-the `.lum`.
+the `.lux`.
 
 `spa` on a static mount makes routes that are not found fall back to `index.html`.
 
@@ -206,7 +206,7 @@ get endpoint("/"):
 The rest run bytecode. On startup, the binary says how many take each path:
 
 ```
-lumen: 3 file(s), 12 route(s) — 5 declarative, 7 with logic
+lux: 3 file(s), 12 route(s) — 5 declarative, 7 with logic
 ```
 
 A route with group guards is **never** declarative: the native action would not run them.
@@ -281,7 +281,7 @@ The `validate` rules **are compiled**, so a misspelled field in a rule is a comp
 never reaches production:
 
 ```
-./app.lum:9:9: error: 'namme' is not declared
+./app.lux:9:9: error: 'namme' is not declared
 ```
 
 ### Constructors
@@ -331,7 +331,7 @@ The call **is resolved at compile time** from the receiver's declared type, so a
 method never reaches production:
 
 ```
-./app.lum:8:20: error: 'P' has no method 'triple'
+./app.lux:8:20: error: 'P' has no method 'triple'
 ```
 
 An instance built by hand and one bound from the request body are the same thing: methods
@@ -346,7 +346,7 @@ Everything goes out through `return`. There is no `response` object to carry aro
 ```lum
 return { "key": "value" }                # 200, JSON
 return [1, 2, 3]                         # 200, JSON
-return render("page.html", k=v)          # HTML with Lumen Script templates
+return render("page.html", k=v)          # HTML with Lux Script templates
 return text("hello")                     # text/plain
 return html("<h1>hello</h1>")            # text/html
 return send_file("/var/f.pdf")           # sendfile(2)
@@ -445,7 +445,7 @@ Signature, `exp` and `iss` (if an `issuer` was configured) are checked. **Any `a
 than HS256 is rejected, `none` included**: accepting the algorithm the token itself declares
 is the classic JWT library vulnerability.
 
-RS256 is not there: it would require asymmetric cryptography, and Lumen does not link
+RS256 is not there: it would require asymmetric cryptography, and Lux does not link
 OpenSSL.
 
 ---
@@ -487,13 +487,13 @@ app:
         host     "127.0.0.1"
         port     5432
         database "my_app"
-        user     "lumen_script"
+        user     "lux_script"
         password env("PG_PASSWORD")
         pool     4
 ```
 
-Each module is only compiled if its client was present when Lumen was built. If not,
-`import postgres` gives an error when compiling the `.lum`, not a strange failure in
+Each module is only compiled if its client was present when Lux was built. If not,
+`import postgres` gives an error when compiling the `.lux`, not a strange failure in
 production.
 
 ### Configuration
@@ -505,7 +505,7 @@ production.
 | `mysql` | `host` / `port` / `database` / `user` / `password`; `pool` |
 
 `pool` is the number of connections, between 1 and 64. Defaults to 4. Use `env()` for
-passwords: it is resolved at compile time and does not stay written in the `.lum`.
+passwords: it is resolved at compile time and does not stay written in the `.lux`.
 
 ---
 
@@ -523,7 +523,7 @@ get endpoint("/articles/:id", int id):
 ```
 
 `query()` returns `List<Json>`: a list of dictionaries, with the engine's types converted to
-Lumen Script's —integer, decimal, boolean, string and `null`.
+Lux Script's —integer, decimal, boolean, string and `null`.
 
 Binary columns —`BLOB` in sqlite and mysql— arrive in **base64**, not as a string. It is not
 a preference: a blob is arbitrary bytes, and returning them as text left the response not
@@ -590,7 +590,7 @@ post endpoint("/transfer"):
 
 `begin()` pins the connection: everything that follows in that request goes through the same
 one, and `commit()` or `rollback()` release it. If the handler ends —or blows up— with a
-transaction open, Lumen issues a `ROLLBACK` and warns on the console. Without that, the next
+transaction open, Lux issues a `ROLLBACK` and warns on the console. Without that, the next
 request to take that connection from the pool would inherit the state.
 
 ### Errors
@@ -746,7 +746,7 @@ on error 422:
 
 Without a code, it is the global handler. **It only covers 400–599**: with a 2xx the route's
 handler has already written the response, and replacing it would be a response filter — that
-is, middleware, which Lumen delegates to the proxy on purpose.
+is, middleware, which Lux delegates to the proxy on purpose.
 
 The status code is preserved. If the handler writes nothing, the default body is kept.
 
@@ -855,7 +855,7 @@ One member per line or comma-separated on the same line, whichever reads better 
 many there are. A typo in the member name is a compile error, listing the real ones:
 
 ```
-./app.lum:8:20: error: enum 'Status' has no member 'ACTVE'; it has ACTIVE, DONE, PENDING
+./app.lux:8:20: error: enum 'Status' has no member 'ACTVE'; it has ACTIVE, DONE, PENDING
 ```
 
 ### Multi-line strings
@@ -967,7 +967,7 @@ string role = age >= 18 ? "adult" : "minor"
 | | |
 |---|---|
 | `text(v)` `html(v)` `json(v)` | Write the response |
-| `render(template, k=v, ...)` | Renders a Lumen Script template |
+| `render(template, k=v, ...)` | Renders a Lux Script template |
 | `status(code)` `redirect(target[, code])` `send_file(path)` | |
 | `len(v)` | Size of a string, List or Dict |
 | `str(v)` `int(v)` | Explicit conversion |
@@ -1025,7 +1025,7 @@ The check continues down the chain, because every method knows what it returns:
 `p.noexiste` says which fields `p` has instead of silently returning `null`.
 
 This reaches **inside the templates** too, because `render()` passes its argument types to
-the template compiler: `{{ who.mayusculas() }}` is a `lumen --check` error, with the
+the template compiler: `{{ who.mayusculas() }}` is a `lux --check` error, with the
 template's file and line.
 
 Where the type is not known —the variable of a `{% for %}`, a field of a `Json`— nothing is
@@ -1053,7 +1053,7 @@ They all come out with file, line, column and a cursor under the exact position.
 ## 22. How it works inside
 
 ```
-lumen ./app  →  lex → parse → check → emit
+lux ./app  →  lex → parse → check → emit
                  ↓
               route table + bytecode   (once, not per request)
                  ↓
@@ -1079,7 +1079,7 @@ suspend —and that is known at compile time— reuse one per thread and save th
 delegates. Switching version is publishing a `shared_ptr`: no `dlopen`, no `.so`, no restart.
 If the new version does not compile, it is not published.
 
-**Step cap.** An infinite loop in a `.lum` is cut with an error instead of pinning an event
+**Step cap.** An infinite loop in a `.lux` is cut with an error instead of pinning an event
 loop thread, which would take down every connection on that core. The counter resets on every
 suspension, so a legitimate SSE loop can live for hours.
 
@@ -1099,14 +1099,14 @@ so far. Every one but `http` is synchronous (no `await`) and usually needs no
 - **`pdf`** — `create`/`add_page`, `text`/`rect`/`line`, `set_color`/`set_font`/
   `set_line_width`, and `save(handle, path)`/`to_base64(handle)` to get the document out, either
   to disk or as a string ready to send in an HTTP response. Needs cairo at build time
-  (`LUMEN_PDF`, on by default when `libcairo2-dev` is present) — check your build's startup log
-  or `lumen --check` if `import pdf` reports itself missing.
+  (`LUX_PDF`, on by default when `libcairo2-dev` is present) — check your build's startup log
+  or `lux --check` if `import pdf` reports itself missing.
 - **`http`** — outbound `get(url)`/`post(url, body)`/`put`/`patch`/`delete`, each with an
   optional trailing headers `Dict`. Returns `{"status", "headers", "body"}` — `body` parsed as
   JSON when the response looks like JSON, the raw text otherwise. A request body that is a
   `string` is sent as-is; anything else (a `Dict`, say) is JSON-serialized automatically with
-  `Content-Type: application/json` set. Speaks real HTTPS (libcurl, `LUMEN_HTTP`, needs
-  `libcurl4-openssl-dev`) — the one deliberate, narrow exception to "Lumen never links TLS": that
+  `Content-Type: application/json` set. Speaks real HTTPS (libcurl, `LUX_HTTP`, needs
+  `libcurl4-openssl-dev`) — the one deliberate, narrow exception to "Lux never links TLS": that
   principle is about not terminating TLS on the *inbound* side, which an outbound client has no
   reverse proxy to delegate to. **Blocks the calling thread for the duration of the request**
   (bounded by a fixed 15s timeout) — every native module is synchronous today (see
@@ -1174,7 +1174,7 @@ Using a module it does not recognize, or one not `import`ed, is a compile error,
 undeclared name anywhere else:
 
 ```
-./app.lum:2:23: error: missing 'import hash' in order to use 'hash.sha256'
+./app.lux:2:23: error: missing 'import hash' in order to use 'hash.sha256'
 ```
 
 Full architecture, the reasoning behind the design, and a step-by-step guide to adding a new

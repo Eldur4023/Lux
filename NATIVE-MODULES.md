@@ -1,7 +1,7 @@
-# Native modules — extending Lumen Script beyond the language core
+# Native modules — extending Lux Script beyond the language core
 
 > How `import <name>` grows beyond the database drivers (`sqlite`/`postgres`/`mysql`) into a
-> general mechanism for adding capability to Lumen Script — `hash`, `csv`, `pdf` and `http`
+> general mechanism for adding capability to Lux Script — `hash`, `csv`, `pdf` and `http`
 > today, more tomorrow — and a step-by-step guide for building one. Companion to
 > [GUIDE.md](GUIDE.md) (using an application once it is built) — native *compilation*
 > (`--native`) is a different thing, covered elsewhere in the codebase's own comments.
@@ -12,21 +12,21 @@
 
 Python has `hashlib`, `csv`, `smtplib` — a large standard library, installable extensions on
 top of it (`pip install`), and a stable C-extension ABI that lets either ship as compiled code.
-Lumen has none of that yet. This document is the first step: a way to add a capability to
-Lumen Script that is more than a language keyword and less than a full package ecosystem.
+Lux has none of that yet. This document is the first step: a way to add a capability to
+Lux Script that is more than a language keyword and less than a full package ecosystem.
 
 Three shapes were on the table:
 
 1. **Generalize the existing compiled-in pattern.** A module broader than `DbDriver`'s
-   query/exec shape, but still compiled *into* the `lumen` binary at CMake time, exactly like
+   query/exec shape, but still compiled *into* the `lux` binary at CMake time, exactly like
    `sqlite`/`postgres`/`mysql` are today. Reuses the type-checked, `--native`-compatible
-   infrastructure that already exists; using a new module still means rebuilding `lumen`.
+   infrastructure that already exists; using a new module still means rebuilding `lux`.
 2. **True dynamic loading**, `.so` files discovered at runtime with no rebuild — the actually
    Python-like answer. Needs a stable ABI between modules and the compiler, a way to describe a
    module's types *before* it is loaded, versioning, probably a package manager. Bigger than
    `--native` was.
 3. **A couple of hardcoded builtins**, added straight to the compiler the way `crypto`/`auth`
-   already are — no new mechanism, but nothing a Lumen *user* could do without patching the
+   already are — no new mechanism, but nothing a Lux *user* could do without patching the
    compiler either.
 
 **This document builds (1).** It is the pragmatic middle: real extensibility, without taking on
@@ -38,7 +38,7 @@ Nothing here forecloses (2) later — see §6.
 ## 2. Why not just reuse `DbDriver`?
 
 `DbDriver` (`db.hpp`) already proves that "an `import`ed, compiled-in capability" works —
-`DbRegistry` gates it on `import`, `#ifdef LUMEN_SQLITE`-style options gate it on cmake. It was
+`DbRegistry` gates it on `import`, `#ifdef LUX_SQLITE`-style options gate it on cmake. It was
 the obvious first thing to try extending. It does not fit:
 
 - Every `DbDriver` method takes `(worker, sql-string, vector<Value> args)` and returns rows or
@@ -51,7 +51,7 @@ the obvious first thing to try extending. It does not fit:
   be asking every module author to reason about a coroutine/worker-pool dance their module does
   not need.
 
-So a native module (`BuiltinModule`, `include/lumen_script/builtin_module.hpp`) is a sibling of
+So a native module (`BuiltinModule`, `include/lux_script/builtin_module.hpp`) is a sibling of
 `DbDriver`, not a specialization of it: **synchronous** (no worker pool, no `await`, functions
 run inline on whatever thread calls them — the event loop thread, same as any other builtin),
 and its functions are a flat, arbitrary, named set instead of a fixed query/exec/tx verb list.
@@ -91,7 +91,7 @@ machinery stay almost untouched — a module function is dispatched exactly like
 - Its constructor lists every compiled-in module with a plain factory call
   (`make_hash_module()`), `#ifdef`-gated for any module that carries an external dependency —
   exactly `DbRegistry::DbRegistry()`'s pattern. `hash` carries none, so it is unconditional; a
-  future module with one would add a cmake `option()` the same way `LUMEN_SQLITE` etc. do
+  future module with one would add a cmake `option()` the same way `LUX_SQLITE` etc. do
   (`CMakeLists.txt`).
 - `has(name)` / `available()` — same shape as `DbRegistry`, used for the same "not compiled
   into this binary; available: ..." error (`project.cpp`).
@@ -151,9 +151,9 @@ The practical result, confirmed against the real binary before writing this down
 `-> bytecode`, cleanly, with no partial or broken code generation:
 
 ```
-$ lumen app.lum --native --check
-lumen: --native: 0 function(s), 0 route(s) compiled to native code
-lumen:   GET /hash/:s -> bytecode
+$ lux app.lux --native --check
+lux: --native: 0 function(s), 0 route(s) compiled to native code
+lux:   GET /hash/:s -> bytecode
 ```
 
 Giving a module native support later is additive, exactly like every `--native` phase has
@@ -166,7 +166,7 @@ than optimizing before there was anything to measure.
 
 ## 4. Three modules, three points proven
 
-**`hash`** (`src/lumen_script/module_hash.cpp`) is deliberately the *smallest* module that could
+**`hash`** (`src/lux_script/module_hash.cpp`) is deliberately the *smallest* module that could
 exercise the mechanism: zero external dependencies (three thin wrappers over `crypto.hpp`,
 which already existed for session/JWT signing), stateless, no configuration. Adding it required
 no change to `kNatives`, no change to `DbDriver`, and no change to anything `--native`-specific
@@ -187,7 +187,7 @@ $ curl localhost:8080/hash/hello
 Matches Python's `hashlib.sha256(b"hello").hexdigest()` byte for byte — checked directly, not
 assumed.
 
-**`csv`** (`src/lumen_script/module_csv.cpp`) proved the harder case §5.2 originally left open:
+**`csv`** (`src/lux_script/module_csv.cpp`) proved the harder case §5.2 originally left open:
 *state*. It parses CSV text into an internal table and hands back an opaque `int` handle instead
 of the data itself — `filter_eq`/`filter_gt`/`sort_by`/`select`/`slice` each take a handle and
 return a *new* one, `rows`/`get`/`sum`/`mean`/`group_sum`/`to_csv` read one without consuming
@@ -204,11 +204,11 @@ get endpoint("/report"):
     return { "avg_age": csv.mean(in_madrid, "age"), "by_city": csv.group_sum(h, "city", "age") }
 ```
 
-Pandas-*shaped*, deliberately not pandas-*equivalent*: Lumen Script has no function values, so
+Pandas-*shaped*, deliberately not pandas-*equivalent*: Lux Script has no function values, so
 there is no `df[df.age > 18]` — `filter_gt(h, "age", 18)` is the honest equivalent a language
 without closures can actually offer (§5.2 argues this is a fair trade, not a shortfall).
 
-**`pdf`** (`src/lumen_script/module_pdf.cpp`) proved the third case: a module with a real
+**`pdf`** (`src/lux_script/module_pdf.cpp`) proved the third case: a module with a real
 external dependency (cairo's PDF surface — already liberally licensed and already installed
 almost everywhere that does graphics work, so no new library had to be vetted). It surfaced a
 genuine bug in the `--native` build path that neither `hash` nor `csv` could have (§5.2).
@@ -229,7 +229,7 @@ version 1.7", `pdfinfo` reports the right page count and page size, `pdftotext` 
 exact text placed on each page, and `pdftoppm` rasterizes it to confirm the shapes and colors
 land where they were drawn, not just that *something* got written.
 
-**`http`** (`src/lumen_script/module_http.cpp`) — outbound `GET`/`POST`/`PUT`/`PATCH`/`DELETE`,
+**`http`** (`src/lux_script/module_http.cpp`) — outbound `GET`/`POST`/`PUT`/`PATCH`/`DELETE`,
 built on libcurl — proved the fourth case: a dependency that could not be a narrow "if it's not
 there, skip the module" story, because it forces a real, deliberate exception to a stated
 project principle.
@@ -242,9 +242,9 @@ get endpoint("/weather/:city", string city):
     return r["body"]
 ```
 
-`README.md`/`CMakeLists.txt` commit Lumen to never linking TLS — but that principle is about not
+`README.md`/`CMakeLists.txt` commit Lux to never linking TLS — but that principle is about not
 being an *inbound* TLS terminator ("TLS belongs to the reverse proxy"); it says nothing about
-outbound calls, because there is no reverse proxy sitting between Lumen and a third-party HTTPS
+outbound calls, because there is no reverse proxy sitting between Lux and a third-party HTTPS
 API to delegate to. Without real TLS, `http.get()` could not reach almost any API written since
 ~2018. The resolution — discussed with, and chosen by, whoever owns that principle rather than
 quietly overridden — is libcurl: it brings its own mature TLS backend, used here with its secure
@@ -295,7 +295,7 @@ difference out, now with a real example (`pdf`) instead of a hypothetical one.
 
 ### 5.1 Steps
 
-1. **Write the module.** A new file, `src/lumen_script/module_qrcode.cpp`, following
+1. **Write the module.** A new file, `src/lux_script/module_qrcode.cpp`, following
    `module_hash.cpp`'s shape: free functions matching `NativeFn`'s signature
    (`Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string& error)`), a
    class implementing `BuiltinModule`, a factory function (`make_qrcode_module()`) the registry
@@ -308,32 +308,32 @@ difference out, now with a real example (`pdf`) instead of a hypothetical one.
    declare the factory (`std::unique_ptr<BuiltinModule> make_qrcode_module();`) and add
    `{ Slot s; s.module = make_qrcode_module(); slots_["qrcode"] = std::move(s); }` — one line,
    same pattern as `hash`'s and `csv`'s.
-3. **Add it to the build.** `CMakeLists.txt`, `lumen_script`'s `add_library` sources:
-   `src/lumen_script/module_qrcode.cpp`.
-4. **Write the corpus test.** `tests/cases/modules.lum` (or a new file with its own `run_*.sh`,
+3. **Add it to the build.** `CMakeLists.txt`, `lux_script`'s `add_library` sources:
+   `src/lux_script/module_qrcode.cpp`.
+4. **Write the corpus test.** `tests/cases/modules.lux` (or a new file with its own `run_*.sh`,
    if the module carries an optional external dependency the way `pdf`'s does — see §7) plus a
    `check` block in `tests/run_tests.sh`.
 5. **Rebuild and check the error paths, not just the happy path**, before trusting it:
    - `import qrcode` missing → `"missing 'import qrcode' in order to use 'qrcode.generate'"`.
    - Wrong arity → `"'qrcode.generate()' takes at most N argument(s)"`.
    - `await qrcode.generate(...)` → `"is not asynchronous"`.
-   - `lumen app.lum --native --check` → reports the route `-> bytecode`, not a compile error
+   - `lux app.lux --native --check` → reports the route `-> bytecode`, not a compile error
      and not a crash. This is the one step it is easy to skip — and, if the module carries a
      third-party dependency, the one step that actually caught a real bug: see §5.2.
 6. **That's it for a dependency-free module.** For one that needs a third-party library —
    `pdf`'s cairo is the real, worked example, not a hypothetical one — add a cmake `option()`
-   the way `LUMEN_SQLITE`/`LUMEN_PDF` do (`CMakeLists.txt`), locate the library
+   the way `LUX_SQLITE`/`LUX_PDF` do (`CMakeLists.txt`), locate the library
    (`pkg_check_modules`/`find_path`+`find_library`), `#ifdef` the factory declaration and the
    registration line in `builtin_module.cpp` on that option (mirroring exactly how `db.cpp`'s
    `DbRegistry` constructor gates `make_postgres_driver()`) — and then read §5.2 before calling
-   it done, because linking the library into `lumen_script` is not the only place it is needed.
+   it done, because linking the library into `lux_script` is not the only place it is needed.
 
 ### 5.2 What was actually harder: state, and a third-party dependency
 
 **State — answered by `csv` and `pdf`, and simpler than expected.** `hash` is stateless: every
 call is independent, nothing survives between requests. `csv` needs a table to survive from
 `parse()` to `rows()`; `pdf` needs a document to survive from `create()` through several
-`text()`/`rect()` calls to `save()`. Neither needed a change to Lumen Script's type system (no
+`text()`/`rect()` calls to `save()`. Neither needed a change to Lux Script's type system (no
 new `Type::Kind` per module — §3.4 already commits every module call to `Json`, and a per-module
 native type would mean touching the core type system for every module, defeating the point of a
 *general* mechanism). The pattern that worked, in both: an **opaque handle** — a plain `int` the
@@ -347,7 +347,7 @@ faces the identical requirement and is the precedent this follows. No change to 
 `BuiltinModuleRegistry`, or anything compiler-side was needed for either module — this really is
 just a convention an individual module's `.cpp` can adopt on its own, not a mechanism to build.
 
-What is still genuinely unsolved: **handle lifetime.** Lumen Script values carry no destructor a
+What is still genuinely unsolved: **handle lifetime.** Lux Script values carry no destructor a
 module could hook into — nothing runs automatically when a handle's last reference in the script
 goes out of scope. `csv` and `pdf` both require an *explicit* `close(handle)`; forgetting it
 leaks the C++ object for the life of the process, exactly like forgetting to close a file handle
@@ -357,24 +357,24 @@ request-scoped auto-cleanup (freeing every handle a request opened when that req
 plausible, not yet built, flagged here rather than assumed to be fine.
 
 **A third-party dependency — the thing `hash` and `csv` could not have caught, because neither
-carries one.** `liblumen_script.a` is linked as a whole archive into every `--native`-generated
+carries one.** `liblux_script.a` is linked as a whole archive into every `--native`-generated
 `.so` (`native_build.cpp`) — not just into routes that use a particular module. The moment
 `module_pdf.cpp`'s object file (referencing cairo) became part of that archive, loading *any*
 `--native`-compiled `.so` — including one for a route with nothing to do with `pdf` — started
 failing with `undefined symbol: cairo_pdf_surface_create_for_stream`. Caught immediately by the
-existing `native_route_shadow` test suite, not discovered later: adding `LUMEN_PDF` regressed a
+existing `native_route_shadow` test suite, not discovered later: adding `LUX_PDF` regressed a
 test that has nothing to do with PDFs, which is exactly what a good test suite is for. The fix
-is one more compile-time string, threaded through the same way `LUMEN_NATIVE_SCRIPT_LIB` already
-is: `CMakeLists.txt` bakes `LUMEN_NATIVE_CAIRO_LIBS` (cairo's own link flags) into `lumen_script`
-whenever `LUMEN_PDF` is enabled, and `native_build.cpp` appends it to every `.so` build,
-`#ifdef`-guarded, right after `LUMEN_NATIVE_SCRIPT_LIB`. **Any future module with an external
+is one more compile-time string, threaded through the same way `LUX_NATIVE_SCRIPT_LIB` already
+is: `CMakeLists.txt` bakes `LUX_NATIVE_CAIRO_LIBS` (cairo's own link flags) into `lux_script`
+whenever `LUX_PDF` is enabled, and `native_build.cpp` appends it to every `.so` build,
+`#ifdef`-guarded, right after `LUX_NATIVE_SCRIPT_LIB`. **Any future module with an external
 dependency needs this same step** — it is not `pdf`-specific, and skipping it does not fail
 loudly at build time, only later, when `--native` tries to load a `.so` that happens to pull in
 the archive's now-unresolved symbols.
 
 ## 6. What this deliberately does not solve
 
-- **No dynamic loading.** Every module is compiled into `lumen` at build time. A `pip install`-
+- **No dynamic loading.** Every module is compiled into `lux` at build time. A `pip install`-
   style story (a `.so` dropped in without rebuilding the compiler) is option (2) from §1 — a
   real, much larger project (stable ABI, a way to describe a module's types before it loads,
   versioning) that this document's design does not block, but also does not attempt.
@@ -386,7 +386,7 @@ the archive's now-unresolved symbols.
   `await <module>.<fn>(...)` mandatory for them (checked in `Emitter::check_call`, mirroring
   `DbModuleCall`) and routes the call through `Op::CallAsyncModule` instead of
   `Op::CallBuiltinModule` — the driver (`run_builtin_module_async`, project.cpp) runs the actual
-  call on `lumen::blocking_pool()`, the same shared pool a synchronous no-`await` route already
+  call on `lux::blocking_pool()`, the same shared pool a synchronous no-`await` route already
   uses, and resumes the handler on its own event loop thread when it finishes. A slow/hung
   remote server or child process still ties up a pool worker for the duration (bounded by each
   module's own timeout), but no longer the event-loop thread serving every OTHER connection on
@@ -407,21 +407,21 @@ the archive's now-unresolved symbols.
 ## 7. How this is validated
 
 `hash` and `csv` are dependency-free, so they live in the always-runs suite:
-`tests/cases/modules.lum` + the `"== native modules =="` block in `tests/run_tests.sh` — real
-HTTP requests against a real running `lumen` binary, `hash` checked byte-for-byte against
+`tests/cases/modules.lux` + the `"== native modules =="` block in `tests/run_tests.sh` — real
+HTTP requests against a real running `lux` binary, `hash` checked byte-for-byte against
 Python's `hashlib`/`hmac`, `csv` checked against hand-computed filter/sum/mean/group_sum
 results and RFC 4180 quoted-field parsing, plus (in `"== compile errors =="`) the missing-
 `import` case. All of it is part of the `regression` ctest suite.
 
-`pdf` carries an optional dependency (cairo, `LUMEN_PDF`), so — like `sqlite`/`postgres`/`mysql`
+`pdf` carries an optional dependency (cairo, `LUX_PDF`), so — like `sqlite`/`postgres`/`mysql`
 — it gets its own suite that skips (`SKIP_RETURN_CODE 77`) rather than fails on a binary built
-without it: `tests/cases/pdf.lum` + `tests/run_pdf.sh`, its own `pdf` ctest entry. It checks the
+without it: `tests/cases/pdf.lux` + `tests/run_pdf.sh`, its own `pdf` ctest entry. It checks the
 happy path, the three error paths (unknown handle, drawing after the document is finished,
 double `close()`), and — the one that actually matters — decodes the route's real base64 output
 and confirms the bytes start with `%PDF-`, not just that *a* response came back.
 
-`http` follows the same optional-dependency pattern (`LUMEN_HTTP`, libcurl): its own
-`tests/cases/http.lum` + `tests/run_http.sh` + ctest entry, calling a local echo server
+`http` follows the same optional-dependency pattern (`LUX_HTTP`, libcurl): its own
+`tests/cases/http.lux` + `tests/run_http.sh` + ctest entry, calling a local echo server
 (`tests/http_echo_server.py`) instead of the real internet so the suite is deterministic and
 network-flake-free while still exercising a real TCP connection and a real HTTP/1.1 round trip.
 Covers every verb, header round-tripping, the JSON-vs-raw-string body distinction, status-code

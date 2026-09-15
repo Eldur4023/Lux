@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 #
-# Type battery for Lumen's sqlite module.
+# Type battery for Lux's sqlite module.
 #
 # It is separate from run_tests.sh —which already drives sqlite in normal use—
 # because this is another thing: the type limits, what sqlite really stores
 # versus what the column declaration says, and the statement cache.
 #
-# It needs no server and no client: the schema is created by the .lum itself, so
+# It needs no server and no client: the schema is created by the .lux itself, so
 # the suite depends only on the binary and always runs.
 #
 #   tests/run_sqlite.sh [path-to-binary]
 
 set -u
 
-LUMEN="${1:-$HOME/lumen-build/lumen}"
+LUX="${1:-$HOME/lux-build/lux}"
 # An absolute path first of all: further down the directory is changed so the
 # .db file lands in the repo root, and a relative path would stop working.
-case "$LUMEN" in /*) ;; *) LUMEN="$(cd "$(dirname "$LUMEN")" && pwd)/$(basename "$LUMEN")" ;; esac
+case "$LUX" in /*) ;; *) LUX="$(cd "$(dirname "$LUX")" && pwd)/$(basename "$LUX")" ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
-PORT=${LUMEN_TEST_SQLITE_PORT:-8820}
+PORT=${LUX_TEST_SQLITE_PORT:-8820}
 SRV=""
 
 passed=0
@@ -44,7 +44,7 @@ stop_server() {
 }
 trap 'stop_server; rm -rf "$TMP" "$HERE/../tests-sqlite-types.db"* 2>/dev/null' EXIT
 
-if ! "$LUMEN" --check "$HERE/cases/sqlite.lum" > "$TMP/check" 2>&1; then
+if ! "$LUX" --check "$HERE/cases/sqlite.lux" > "$TMP/check" 2>&1; then
     if grep -q "sqlite" "$TMP/check" && grep -q "import" "$TMP/check"; then
         grey "sqlite: the binary was built without the module — suite skipped"
         exit 77
@@ -84,7 +84,7 @@ rm -f "$HERE/../tests-sqlite-types.db"*
 
 echo "== arranque =="
 cd "$HERE/.."
-"$LUMEN" --no-watch --port "$PORT" "$HERE/cases/sqlite.lum" > "$TMP/srv.log" 2>&1 &
+"$LUX" --no-watch --port "$PORT" "$HERE/cases/sqlite.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/__ping__" 2>/dev/null && break

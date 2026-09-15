@@ -4,15 +4,15 @@
 #include <atomic>
 #include <cstdint>
 #include "http_parser.hpp"
-#include <lumen/core/event_loop.hpp>
-#include "../../include/lumen/types.hpp"
-#include "../../include/lumen/cancel.hpp"
+#include <lux/core/event_loop.hpp>
+#include "../../include/lux/types.hpp"
+#include "../../include/lux/cancel.hpp"
 
-namespace lumen::http {
+namespace lux::http {
 
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
-    HttpConnection(int fd, core::EventLoop& loop, lumen::DispatchFn dispatch,
+    HttpConnection(int fd, core::EventLoop& loop, lux::DispatchFn dispatch,
                    std::shared_ptr<std::atomic<int>> conn_count = nullptr);
     ~HttpConnection();
 
@@ -22,15 +22,15 @@ public:
 private:
     int                fd_;
     core::EventLoop&   loop_;
-    lumen::DispatchFn dispatch_;
+    lux::DispatchFn dispatch_;
     std::shared_ptr<std::atomic<int>>          conn_count_;   // decremented on close()
-    std::shared_ptr<lumen::CancellationToken> cancel_token_; // one per request
+    std::shared_ptr<lux::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_         = false;
 
     // Weak reference to the current request — used in WebSocket mode to route
     // do_read() bytes into the WS frame parser instead of the HTTP parser.
-    std::weak_ptr<lumen::Request> current_req_;
+    std::weak_ptr<lux::Request> current_req_;
 
     // ── Response buffer limit ─────────────────────────────────────────────────
     // Hard cap on the size of a single response.  Connections that exceed this
@@ -117,7 +117,7 @@ private:
     void close();
 
     void dispatch(ParsedRequest req);
-    void finish_dispatch(lumen::Request& request, lumen::Response& response);
+    void finish_dispatch(lux::Request& request, lux::Response& response);
 };
 
-} // namespace lumen::http
+} // namespace lux::http

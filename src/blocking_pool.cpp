@@ -1,7 +1,7 @@
-#include <lumen/blocking_pool.hpp>
+#include <lux/blocking_pool.hpp>
 #include <thread>
 
-namespace lumen {
+namespace lux {
 
 BlockingPool::~BlockingPool() { stop(); }
 
@@ -101,4 +101,4 @@ BlockingPool& blocking_pool() {
     return pool;
 }
 
-} // namespace lumen
+} // namespace lux

@@ -4,10 +4,10 @@
 // emit_condition) para una expresion suelta. No sustituye a emit_expr en
 // ningun sitio real todavia -- esto es solo la comparacion que el plan pide
 // antes de dar ese paso.
-#include <lumen_script/diagnostic.hpp>
-#include <lumen_script/emitter.hpp>
-#include <lumen_script/lexer.hpp>
-#include <lumen_script/parser.hpp>
+#include <lux_script/diagnostic.hpp>
+#include <lux_script/emitter.hpp>
+#include <lux_script/lexer.hpp>
+#include <lux_script/parser.hpp>
 
 #include <cstdio>
 #include <functional>
@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 
@@ -126,30 +126,30 @@ static void caso(const char* nombre, const std::string& src,
 
 int main() {
     // ── Las 6 ramas de emit_expr/emit_call que ya cubre el corpus real
-    //    (tests/casos/malos/*.lum) ────────────────────────────────────────
-    caso("builtin async sin await (malos/await.lum)", "sleep(10)", {}, "is asynchronous");
+    //    (tests/casos/malos/*.lux) ────────────────────────────────────────
+    caso("builtin async sin await (malos/await.lux)", "sleep(10)", {}, "is asynchronous");
 
-    caso("objeto reservado fuera de sitio (malos/sse.lum)", "sse.send(\"x\")", {},
+    caso("objeto reservado fuera de sitio (malos/sse.lux)", "sse.send(\"x\")", {},
          "only exists inside a route sse");
 
     {
         ClassSigs classes;
         classes["P"].fields = {"x"};
-        caso("campo inexistente en clase (malos/campo_tipo.lum)", "p.noexiste",
+        caso("campo inexistente en clase (malos/campo_tipo.lux)", "p.noexiste",
              {{"p", "P"}}, "has no field", nullptr, &classes);
     }
 
     {
         ClassSigs classes;
         classes["P"].fields = {"x"};
-        caso("metodo inexistente en clase (malos/metodo.lum)", "p.noexiste()",
+        caso("metodo inexistente en clase (malos/metodo.lux)", "p.noexiste()",
              {{"p", "P"}}, "has no method", nullptr, &classes);
     }
 
-    caso("metodo builtin inexistente sobre string (malos/metodo_tipo.lum)",
+    caso("metodo builtin inexistente sobre string (malos/metodo_tipo.lux)",
          "quien.mayusculas()", {{"quien", "string"}}, "have no method");
 
-    caso("modulo de BD sin import (malos/import.lum)",
+    caso("modulo de BD sin import (malos/import.lux)",
          "await sqlite.query(\"select 1\")", {}, "missing 'import sqlite'");
 
     // ── Ramas de los otros call-shapes (IrCallShape, ir.hpp),

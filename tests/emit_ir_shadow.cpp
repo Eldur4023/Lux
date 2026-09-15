@@ -9,22 +9,22 @@
 // resultante se COMPORTA igual ejecutado de verdad, no solo que compila
 // limpio -- necesaria antes de considerar conectar el emisor nuevo a ningun
 // punto de entrada real.
-#include <lumen_script/diagnostic.hpp>
-#include <lumen_script/emitter.hpp>
-#include <lumen_script/lexer.hpp>
-#include <lumen_script/natives.hpp>
-#include <lumen_script/parser.hpp>
-#include <lumen_script/vm.hpp>
+#include <lux_script/diagnostic.hpp>
+#include <lux_script/emitter.hpp>
+#include <lux_script/lexer.hpp>
+#include <lux_script/natives.hpp>
+#include <lux_script/parser.hpp>
+#include <lux_script/vm.hpp>
 
-#include <lumen/request.hpp>
-#include <lumen/response.hpp>
+#include <lux/request.hpp>
+#include <lux/response.hpp>
 
 #include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 
@@ -40,8 +40,8 @@ static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBa
 
 static std::string ejecutar(const Chunk& chunk, std::vector<Value> args,
                             const FunctionTable* fns, std::string& resumen) {
-    lumen::Request  req;
-    lumen::Response res;
+    lux::Request  req;
+    lux::Response res;
     NativeCtx       ctx{req, res};
     VM              vm;
     VM::Result      r = vm.start(chunk, std::move(args), ctx, fns);

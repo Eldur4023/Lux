@@ -1,7 +1,7 @@
-#include <lumen/core/io_uring_loop.hpp>
+#include <lux/core/io_uring_loop.hpp>
 
-// Only compiled when LUMEN_IO_URING is defined (see CMakeLists.txt).
-#ifdef LUMEN_IO_URING
+// Only compiled when LUX_IO_URING is defined (see CMakeLists.txt).
+#ifdef LUX_IO_URING
 
 #include <linux/io_uring.h>
 #include <sys/epoll.h>
@@ -55,7 +55,7 @@ static inline uint32_t smp_load_acquire_u32(uint32_t* ptr) {
         std::memory_order_acquire);
 }
 
-namespace lumen::core {
+namespace lux::core {
 
 // ── Constructor / Destructor ──────────────────────────────────────────────────
 
@@ -384,6 +384,6 @@ void IoUringLoop::stop() {
     (void)::write(wakeup_fd_, &val, sizeof(val));
 }
 
-} // namespace lumen::core
+} // namespace lux::core
 
-#endif // LUMEN_IO_URING
+#endif // LUX_IO_URING

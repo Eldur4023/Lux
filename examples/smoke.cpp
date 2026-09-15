@@ -1,21 +1,21 @@
-// Smoke test of the engine after the Lumen surgery.
+// Smoke test of the engine after the Lux surgery.
 // It checks the three things milestone 0 had to leave standing:
 // static files, Jinja2 templates and a route returning JSON.
-#include <lumen/lumen.hpp>
+#include <lux/lux.hpp>
 
-using namespace lumen;
+using namespace lux;
 
 int main() {
     App app;
-    app.use(lumen::logger());
+    app.use(lux::logger());
     app.set_templates("./templates");
 
     app.get("/json", [](Response& res) {
-        res.json_text(R"({"ok":true,"engine":"lumen-2.0"})");
+        res.json_text(R"({"ok":true,"engine":"lux-2.0"})");
     });
 
-    // Templates are no longer rendered from C++: they live in Lumen Script,
-    // at startup and are requested with render() from a .lum.  See example/.
+    // Templates are no longer rendered from C++: they live in Lux Script,
+    // at startup and are requested with render() from a .lux.  See example/.
 
     app.serve_static("/static", "./public");
 

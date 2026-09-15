@@ -1,7 +1,7 @@
 // Fase 3 de --native: clases de usuario. A
 // diferencia de string/List/Dict, esta pieza no se puede probar a traves de
 // compile_native() -- ni siquiera sirviendo HTTP de verdad -- porque hoy es
-// estructuralmente inalcanzable desde cualquier programa Lumen en
+// estructuralmente inalcanzable desde cualquier programa Lux en
 // ejecucion: una funcion SUELTA no puede tocar una clase (el checker real
 // solo resuelve ConstructorCall/ClassMethodCall dentro de una ruta o un
 // metodo, que reciben ClassSigs; build_functions() en project.cpp se lo
@@ -18,17 +18,17 @@
 // un ejecutable con un main() propio que los llama, igual que
 // native_gen_shadow.cpp hace para fib/cuenta_primos. Es la prueba de que el
 // C++ generado es correcto; la de que es ALCANZABLE llegara con la Fase 4.
-#include <lumen_script/diagnostic.hpp>
-#include <lumen_script/emitter.hpp>
-#include <lumen_script/lexer.hpp>
-#include <lumen_script/native_build.hpp>
-#include <lumen_script/native_gen.hpp>
-#include <lumen_script/natives.hpp>
-#include <lumen_script/parser.hpp>
-#include <lumen_script/vm.hpp>
+#include <lux_script/diagnostic.hpp>
+#include <lux_script/emitter.hpp>
+#include <lux_script/lexer.hpp>
+#include <lux_script/native_build.hpp>
+#include <lux_script/native_gen.hpp>
+#include <lux_script/natives.hpp>
+#include <lux_script/parser.hpp>
+#include <lux_script/vm.hpp>
 
-#include <lumen/request.hpp>
-#include <lumen/response.hpp>
+#include <lux/request.hpp>
+#include <lux/response.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -40,7 +40,7 @@
 #include <string>
 #include <vector>
 
-using namespace lumen_script;
+using namespace lux_script;
 
 static int fallos = 0;
 
@@ -150,11 +150,11 @@ static std::string compilar_y_correr(const Program& prog, const ClassSigs& class
     codigo += "int main() {\n" + driver + "    return 0;\n}\n";
 
     const std::filesystem::path src_path = std::filesystem::temp_directory_path() /
-                                           "lumen_native_class_check.cpp";
+                                           "lux_native_class_check.cpp";
     const std::filesystem::path bin_path = std::filesystem::temp_directory_path() /
-                                           "lumen_native_class_check.bin";
+                                           "lux_native_class_check.bin";
     const std::filesystem::path err_path = std::filesystem::temp_directory_path() /
-                                           "lumen_native_class_check.err";
+                                           "lux_native_class_check.err";
     { std::ofstream out(src_path, std::ios::trunc); out << codigo; }
 
     std::ostringstream cmd;
@@ -212,8 +212,8 @@ static bool prueba_campos_y_metodo() {
     }
 
     // Referencia: bytecode real, constructor + metodo.
-    lumen::Request req;
-    lumen::Response res;
+    lux::Request req;
+    lux::Response res;
     NativeCtx ctx{req, res};
     VM        vm_ctor;
     auto      r_p = vm_ctor.start(*tabla[classes.at("Punto").ctors.at(2)],
@@ -341,7 +341,7 @@ static bool prueba_inalcanzable_no_rompe() {
     if (!compilar_clases_bytecode(prog, fns, classes, tabla, diags_vm)) return false;
 
     std::string aviso;
-    auto cache_dir = std::filesystem::temp_directory_path() / "lumen_native_class_inalcanzable";
+    auto cache_dir = std::filesystem::temp_directory_path() / "lux_native_class_inalcanzable";
     std::error_code ec;
     std::filesystem::remove_all(cache_dir, ec);
     auto nativo = compile_native(prog, fns, classes, cache_dir, aviso);
@@ -362,9 +362,9 @@ int main() {
     if (!prueba_inalcanzable_no_rompe()) ++fallos;
 
     std::error_code ec;
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "lumen_native_class_check.cpp", ec);
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "lumen_native_class_check.bin", ec);
-    std::filesystem::remove(std::filesystem::temp_directory_path() / "lumen_native_class_check.err", ec);
+    std::filesystem::remove(std::filesystem::temp_directory_path() / "lux_native_class_check.cpp", ec);
+    std::filesystem::remove(std::filesystem::temp_directory_path() / "lux_native_class_check.bin", ec);
+    std::filesystem::remove(std::filesystem::temp_directory_path() / "lux_native_class_check.err", ec);
 
     if (fallos == 0) {
         std::printf("native_class_shadow: el C++ generado para clases coincide con la VM en "
