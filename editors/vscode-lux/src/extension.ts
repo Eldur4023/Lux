@@ -25,7 +25,10 @@ export function activate(context: ExtensionContext) {
       fileEvents: workspace.createFileSystemWatcher('**/*.lux'),
     },
     initializationOptions: {
-      compilerPath: config.get<string>('compilerPath') || 'lux',
+      // Empty/unset is passed through as undefined, not defaulted to 'lux'
+      // here: the server does its own auto-detection (workspace's
+      // build/lux, then PATH) so installing the extension needs no setup.
+      compilerPath: config.get<string>('compilerPath') || undefined,
     },
   };
 

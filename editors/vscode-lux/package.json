@@ -41,8 +41,8 @@
       "properties": {
         "lux.compilerPath": {
           "type": "string",
-          "default": "lux",
-          "description": "Path to the 'lux' compiler binary used for diagnostics (defaults to 'lux' on PATH; point this at your build's ./build/lux during development)."
+          "default": "",
+          "description": "Path to the 'lux' compiler binary, used for diagnostics. Leave empty to auto-detect: tries '<workspace>/build/lux' first, then 'lux' on PATH. Only needed if neither applies."
         }
       }
     },

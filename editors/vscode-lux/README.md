@@ -78,9 +78,10 @@ npm run compile
    find it).
 2. Press `F5`. A new VS Code window opens with the extension loaded (the
    `preLaunchTask` in `.vscode/launch.json` builds both projects first).
-3. Open a `.lux` file. By default the server looks for a `lux` binary on `PATH`; during
-   development, set `lux.compilerPath` in that window's settings to your build, e.g.
-   `/path/to/LoHin/build/lux`.
+3. Open a `.lux` file. No setup needed: the server auto-detects the compiler, trying
+   `<workspace>/build/lux` first (this repo's own CMake output — the common case when
+   developing inside it) and then `lux` on `PATH`. Set `lux.compilerPath` only if neither
+   applies.
 4. Open a folder containing `.lux` files (not a loose file) so the server has a workspace
    root to check — see "How diagnostics actually work" above.
 

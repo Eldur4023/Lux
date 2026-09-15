@@ -24,6 +24,7 @@ import { TextDocument } from 'vscode-languageserver-textdocument';
 import { URI } from 'vscode-uri';
 import { execFile } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
 import { ALL_COMPLETIONS } from './completions';
 
 // Explicit stdio, not the IPC-channel auto-detection: keeps the server
@@ -38,6 +39,27 @@ let compilerPath = 'lux';
 // when a later check comes back clean for it (an empty entry never arrives
 // on its own; the file just stops appearing in the JSON array).
 let lastDiagnosedUris = new Set<string>();
+// So the "compiler not found" notice (below) fires once per session, not
+// once per keystroke/save -- there is no setting to silence it otherwise.
+let warnedMissingCompiler = false;
+
+// No configured "lux.compilerPath" is not an error: most users installing
+// this from the Marketplace have never touched that setting, and the
+// extension has to do *something* useful without asking them to. So,
+// absent an explicit override: try `<workspace>/build/lux` first -- the
+// CMake default output path, and the common case for anyone working
+// inside the Lux repo itself -- then fall back to `lux` on PATH, same as
+// before. If neither exists, runCheck() below degrades to "no diagnostics"
+// rather than erroring; syntax highlighting and completion do not depend
+// on the compiler at all.
+function resolveCompilerPath(explicit: string | undefined, root: string | undefined): string {
+  if (explicit) return explicit;
+  if (root) {
+    const local = path.join(root, 'build', 'lux');
+    if (fs.existsSync(local)) return local;
+  }
+  return 'lux';
+}
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   const folders = params.workspaceFolders;
@@ -47,7 +69,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     workspaceRoot = URI.parse(params.rootUri).fsPath;
   }
   const opts = params.initializationOptions as { compilerPath?: string } | undefined;
-  if (opts?.compilerPath) compilerPath = opts.compilerPath;
+  compilerPath = resolveCompilerPath(opts?.compilerPath, workspaceRoot);
 
   return {
     capabilities: {
@@ -68,7 +90,8 @@ connection.onInitialized(() => {
 
 connection.onDidChangeConfiguration((change) => {
   const settings = change.settings as { lux?: { compilerPath?: string } } | undefined;
-  if (settings?.lux?.compilerPath) compilerPath = settings.lux.compilerPath;
+  compilerPath = resolveCompilerPath(settings?.lux?.compilerPath, workspaceRoot);
+  warnedMissingCompiler = false; // the user may just have fixed it
 });
 
 // Diagnostics trigger on open and on save -- not on every keystroke. The
@@ -86,12 +109,25 @@ function runCheckFor(doc: TextDocument) {
 
 function runCheck(root: string) {
   if (!fs.existsSync(root)) return;
-  execFile(compilerPath, [root, '--json'], { maxBuffer: 16 * 1024 * 1024 }, (_err, stdout) => {
+  execFile(compilerPath, [root, '--json'], { maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
     // A non-zero exit is expected whenever there ARE diagnostics (see
-    // main.cpp: --json returns 1 with errors, 0 clean) -- `_err` alone does
-    // not mean the invocation failed, so it is deliberately ignored here and
-    // stdout is parsed regardless. A JSON parse failure (compiler missing,
-    // wrong path, a real crash) is the only case worth surfacing.
+    // main.cpp: --json returns 1 with errors, 0 clean) -- that case leaves
+    // `err` set too, so it is not, on its own, distinguishable from a
+    // missing binary; stdout is parsed regardless. ENOENT specifically
+    // (compilerPath does not resolve to anything spawnable) is the one
+    // case handled separately: it is the expected state for anyone who
+    // installed the extension without also installing `lux`, so it gets a
+    // single quiet notice instead of a per-save error message.
+    if (err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+      if (!warnedMissingCompiler) {
+        warnedMissingCompiler = true;
+        connection.window.showInformationMessage(
+          `Lux: compiler not found ('${compilerPath}'). Syntax highlighting and completion still work; ` +
+            `for diagnostics, install 'lux' on PATH or set "lux.compilerPath".`,
+        );
+      }
+      return;
+    }
     let items: Array<{ file: string; line: number; col: number; message: string }>;
     try {
       items = JSON.parse(stdout || '[]');
