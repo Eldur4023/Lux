@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Lux Script",
   "scopeName": "source.lux",
-  "fileTypes": ["lum"],
+  "fileTypes": ["lux"],
   "patterns": [
     { "include": "#comments" },
     { "include": "#app-block" },
