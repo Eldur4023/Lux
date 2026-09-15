@@ -36,6 +36,13 @@
         "path": "./syntaxes/lux.tmLanguage.json"
       }
     ],
+    "themes": [
+      {
+        "label": "Lux Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/lux-dark-color-theme.json"
+      }
+    ],
     "configuration": {
       "title": "Lux Script",
       "properties": {

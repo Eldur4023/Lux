@@ -21,6 +21,7 @@
     { "include": "#functions" },
     { "include": "#named-arg" },
     { "include": "#type-names" },
+    { "include": "#variables" },
     { "include": "#operators" },
     { "include": "#punctuation" }
   ],
@@ -113,7 +114,12 @@
       "patterns": [
         {
           "name": "keyword.control.lux",
-          "match": "\\b(if|elif|else|while|for|in|return|require|try|catch|break|continue|and|or|not|await)\\b"
+          "match": "\\b(if|elif|else|while|for|in|return|require|try|catch|break|continue|and|or|not|switch|case)\\b"
+        },
+        {
+          "comment": "Its own sub-scope (still under keyword.control, so it inherits the same color as the rest by default) so a theme can single it out -- see editors/vscode-lux/themes/lux-dark-color-theme.json.",
+          "name": "keyword.control.flow.await.lux",
+          "match": "\\bawait\\b"
         }
       ]
     },
@@ -174,6 +180,11 @@
     "type-names": {
       "name": "entity.name.type.lux",
       "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+    },
+    "variables": {
+      "comment": "Catch-all for any lowercase identifier nothing more specific matched first (a parameter read, a local, a field after '.') -- without it a name falls through every pattern above and renders as plain, uncolored text. Ordered last on purpose: functions/named-arg/modules/keywords all get first refusal at the same starting position.",
+      "name": "variable.other.lux",
+      "match": "\\b[a-z_][a-zA-Z0-9_]*\\b"
     },
     "operators": {
       "patterns": [

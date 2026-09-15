@@ -36,6 +36,13 @@ Syntax highlighting, live diagnostics and completion for `.lux` files. See
   a language with its own semantic provider, since such a theme's TextMate rules for
   unrecognized languages are usually a generic fallback. That is accepted rather than fixed
   by writing into a setting shared with every other language the user has open.
+- **"Lux Dark" — an optional color theme**, not a default. It is a full copy of VS Code's
+  own built-in "Default Dark Modern" (same UI colors, same base token colors) with two
+  additions: `await` (its own scope, `keyword.control.flow.await.lux`) in green, and module
+  namespaces (`sqlite.`, `hash.`, …, `support.class.lux`) in a darker green. Nothing installs
+  or activates it automatically — pick it from `Preferences: Color Theme` if you want those
+  two specific colors; every other theme keeps coloring Lux through its own rules as
+  described above.
 
 ## How diagnostics actually work
 
