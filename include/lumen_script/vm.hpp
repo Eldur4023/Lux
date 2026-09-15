@@ -34,6 +34,13 @@ public:
         // Suspended: what to wait for before resuming.
         int                await_id = -1;
         std::vector<Value> await_args;
+        // true when `await_id` indexes BuiltinModuleRegistry's flat table
+        // (Op::CallAsyncModule) instead of kNatives' (Op::CallAsync) -- the
+        // driver checks this FIRST, before any of the kNatives-space checks
+        // (is_db_await, sleep, __ws_recv), since the two id-spaces are
+        // independent counters and a module id can otherwise coincide with
+        // an unrelated kNatives id.
+        bool               await_is_module = false;
     };
 
     // Starts `chunk` with `params` in the first slots. `functions` is the

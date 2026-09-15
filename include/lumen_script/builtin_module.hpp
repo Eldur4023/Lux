@@ -11,18 +11,35 @@ namespace lumen_script {
 // C++ exposed to Lumen Script under `import <name>`, compiled into the
 // `lumen` binary (not loaded dynamically -- see NATIVE-MODULES.md for why).
 //
-// Deliberately narrower than DbDriver: every function is SYNCHRONOUS (no
-// `await`, no worker pool) and shares the exact calling convention of any
-// other builtin (NativeFn, natives.hpp) -- a module function IS a builtin,
-// just namespaced under an `import`ed name instead of always being present.
-// That is what lets it reuse Op::CallBuiltinModule's dispatch (vm.cpp) as a
-// near copy of Op::CallNative's, instead of inventing a second calling
-// convention.
+// Most functions are SYNCHRONOUS (no `await`, no worker pool) and share the
+// exact calling convention of any other builtin (NativeFn, natives.hpp) -- a
+// module function IS a builtin, just namespaced under an `import`ed name
+// instead of always being present. That is what lets it reuse
+// Op::CallBuiltinModule's dispatch (vm.cpp) as a near copy of Op::CallNative's,
+// instead of inventing a second calling convention.
+//
+// `is_async` is the opt-in escape hatch for the functions whose cost is NOT
+// microseconds-regardless (NATIVE-MODULES.md §6 named this as "the clearest
+// concrete next phase" after that document shipped): os.run()/read_file()/
+// write_file() do real, unbounded disk or child-process I/O, and every
+// http.* call waits on a remote server. Marking one `is_async = true` makes
+// `await <module>.<fn>(...)` mandatory (checked in Emitter::check_call,
+// mirroring DbModuleCall) and routes it through Op::CallAsyncModule instead
+// of Op::CallBuiltinModule: the driver (project.cpp's run_builtin_module_async)
+// runs the call on lumen::blocking_pool() -- the SAME shared pool a
+// synchronous route with no `await` already uses -- instead of inline on the
+// event loop thread, so a slow disk write or a hung remote server no longer
+// pins the whole core for its duration. Same error convention `await
+// <db-module>.*` already established: a failure comes back as
+// `{"error": message}`, never a hard failure of the handler -- see
+// run_builtin_module_async's comment for why that, and not `fail()`, is the
+// right choice here.
 struct BuiltinModuleFn {
     std::string name;         // "sha256" (used as `hash.sha256(...)`)
     int         min_args;
     int         max_args;     // -1 = no limit
     NativeFn    fn;           // same signature as any other builtin
+    bool        is_async = false;
 };
 
 // What a module needs to describe itself.  `configure()` is optional --
@@ -56,8 +73,12 @@ public:
 // not compiled in has to say so plainly, the same way a missing DB driver
 // already does.
 //
-// Unlike DbRegistry, there is no per-connection pool and no `activate()`
-// step tied to a thread count: a native module's functions run inline, on
+// Unlike DbRegistry, there is no PER-CONNECTION pool and no `activate()`
+// step tied to a thread count: an `is_async` function runs on the process's
+// one shared lumen::blocking_pool() (any free worker, no pinning -- unlike a
+// DB connection, an os.run()/http.get() call has no per-call state that
+// needs to stick to the same worker across calls), not a pool this registry
+// owns or starts. A plain (non-async) function still runs inline, on
 // whatever thread calls them (the event loop thread, same as any other
 // builtin) -- there is nothing to start.
 class BuiltinModuleRegistry {

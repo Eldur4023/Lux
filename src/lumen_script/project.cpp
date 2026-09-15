@@ -481,6 +481,55 @@ lumen::Task<Value> run_db(const VM::Result& r, int op, lumen::Request& req,
     co_return v;
 }
 
+// Resolves an `await <module>.<fn>(...)` suspension for an is_async native
+// module function (os.run()/read_file()/write_file(), every http.*) --
+// Op::CallAsyncModule's counterpart of run_db() above.
+//
+// The function is looked up the same way the SYNCHRONOUS Op::CallBuiltinModule
+// path already does (builtin_module_function_at(), vm.cpp), and its own
+// BuiltinModuleFn::fn is called exactly as-is, unchanged -- no separate
+// "async" implementation to keep in sync with the sync one, only where it
+// runs differs. Run on lumen::blocking_pool() (BlockingAwaitable,
+// blocking_pool.hpp), the SAME shared pool a synchronous no-`await` route
+// already uses, instead of inline on the event loop thread: a slow
+// os.run()/http.get() call now ties up a pool worker for its duration
+// instead of the whole core.
+//
+// BlockingAwaitable's own contract ("the coroutine, and therefore req/res,
+// is not touched by anyone else while suspended") is what makes it safe to
+// hand `ctx` to the pool thread here even though it carries live
+// lumen::Request&/Response& references: control has fully passed to the
+// worker until it posts back, and every is_async function today (verified:
+// grepped for `ctx.` in module_os.cpp/module_http.cpp -- zero hits) ignores
+// ctx entirely, taking it only for NativeFn's uniform signature. A future
+// is_async function that DID read/write req/res from here would still be
+// memory-safe under that same contract, just worth calling out since
+// nothing else in the type system enforces it.
+//
+// Same error convention await_db() already established (see run_db()
+// above): a failure comes back as `{"error": message}` data the .lum can
+// inspect, never a hard fail() of the handler -- unlike this exact function
+// called SYNCHRONOUSLY (Op::CallBuiltinModule, vm.cpp), where a non-empty
+// `error` still means fail(). That is a deliberate difference, not an
+// inconsistency: is_async is an exclusive, checked-at-compile-time calling
+// convention (Emitter::check_call rejects both "is_async without await" and
+// "await on a plain function"), so a given function is reached through
+// exactly one of the two paths, never both, and each keeps the error
+// convention its callers already expect from that path (sqlite.query()'s
+// vs. a plain builtin's).
+lumen::Task<Value> run_builtin_module_async(const VM::Result& r, lumen::Request& req,
+                                            NativeCtx& ctx) {
+    const BuiltinModuleFn& fn = builtin_module_function_at(r.await_id);
+    std::vector<Value> args = r.await_args;
+    Value       out;
+    std::string error;
+    co_await lumen::BlockingAwaitable{req.loop, [&] {
+        out = fn.fn(ctx, args, error);
+    }};
+    if (!error.empty()) co_return db_error(error);
+    co_return out;
+}
+
 // Closes the transactions the handler left open.
 //
 // Without this, a `return` halfway through or an error would leave the
@@ -1375,7 +1424,10 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         while (result.status == VM::Status::Suspended) {
                             Value produced = Value::null();
 
-                            if (result.await_id == async_ws_recv_id()) {
+                            if (result.await_is_module) {
+                                produced = co_await run_builtin_module_async(result, req, ctx);
+                            }
+                            else if (result.await_id == async_ws_recv_id()) {
                                 // First suspension that returns a value: the
                                 // message enters the VM as the result of the
                                 // `await`.  null means the connection closed.
@@ -1462,7 +1514,10 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
                     while (result.status == VM::Status::Suspended) {
                         Value produced = Value::null();
-                        if (is_db_await(result.await_id)) {
+                        if (result.await_is_module) {
+                            produced = co_await run_builtin_module_async(result, req, ctx);
+                        }
+                        else if (is_db_await(result.await_id)) {
                             produced = co_await run_db(result, result.await_id, req, ctx);
                         }
                         else if (result.await_id == async_sleep_id()) {
@@ -1647,7 +1702,10 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                 while (result.status == VM::Status::Suspended) {
                     Value produced = Value::null();
 
-                    if (is_db_await(result.await_id)) {
+                    if (result.await_is_module) {
+                        produced = co_await run_builtin_module_async(result, req, ctx);
+                    }
+                    else if (is_db_await(result.await_id)) {
                         produced = co_await run_db(result, result.await_id, req, ctx);
                     }
                     else if (result.await_id == async_sleep_id()) {

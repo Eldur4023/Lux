@@ -9,15 +9,17 @@
 // TLS backend, used here with its secure defaults (peer/host verification
 // ON, never disabled).
 //
-// Synchronous, like every native module so far (NATIVE-MODULES.md §2/§6) --
-// and the one module where that is a real, not a theoretical, limitation: a
-// slow remote server blocks the calling event-loop thread for the
-// duration of the request, exactly like a slow query would if DbDriver had
-// no worker pool. Bounded with a fixed request timeout (below) so a hung
-// remote server cannot block a thread forever, but a genuinely non-blocking
-// http.* would need the same kind of worker-pool/await plumbing DbDriver
-// already has, generalized to native modules -- not built here, and not
-// something to add quietly inside what was asked for as "an http module".
+// Every function here is `is_async` (BuiltinModuleFn::is_async): `await
+// http.get(...)` runs the call on lumen::blocking_pool() and resumes the
+// handler back on its own event loop thread when it finishes, the same
+// shape DbDriver already has for a slow query -- see run_builtin_module_async
+// (project.cpp) for the driver side of this. A slow/hung remote server still
+// ties up a pool worker for the duration of the request (bounded by the
+// fixed timeout below so a hung server cannot hold one forever), but no
+// longer the event-loop thread serving every OTHER connection on that core --
+// this was the one module where NATIVE-MODULES.md §6 called that a real, not
+// theoretical, cost, and the worker-pool/await generalization it flagged as
+// the clearest next phase.
 #include <lumen_script/builtin_module.hpp>
 
 #include <curl/curl.h>
@@ -201,12 +203,17 @@ public:
     const char* name() const override { return "http"; }
 
     const std::vector<BuiltinModuleFn>& functions() const override {
+        // Every one is is_async: a slow/hung remote server is the real cost
+        // this module exists to bound (see the module comment above), so
+        // `await http.*(...)` is mandatory -- routed through
+        // lumen::blocking_pool() (BuiltinModuleFn::is_async) instead of the
+        // event loop thread.
         static const std::vector<BuiltinModuleFn> fns = {
-            {"get",    1, 2, fn_http_get},
-            {"post",   2, 3, fn_http_post},
-            {"put",    2, 3, fn_http_put},
-            {"patch",  2, 3, fn_http_patch},
-            {"delete", 1, 2, fn_http_delete},
+            {"get",    1, 2, fn_http_get,    /*is_async=*/true},
+            {"post",   2, 3, fn_http_post,   /*is_async=*/true},
+            {"put",    2, 3, fn_http_put,    /*is_async=*/true},
+            {"patch",  2, 3, fn_http_patch,  /*is_async=*/true},
+            {"delete", 1, 2, fn_http_delete, /*is_async=*/true},
         };
         return fns;
     }

@@ -397,6 +397,7 @@ const char* op_name(Op op) {
         case Op::CallNative:       return "CALL_NATIVE";
         case Op::CallBuiltinModule: return "CALL_BUILTIN_MODULE";
         case Op::CallAsync:        return "CALL_ASYNC";
+        case Op::CallAsyncModule:  return "CALL_ASYNC_MODULE";
         case Op::Return:           return "RETURN";
         case Op::ReturnNull:       return "RETURN_NULL";
     }

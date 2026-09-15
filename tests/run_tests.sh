@@ -335,7 +335,7 @@ check "os file round-trip cleans up" GET /os/file_roundtrip       200 '"removed"
 check "os.read_file missing is null, not an error" GET /os/missing_file 200 '"content_is_null":true'
 check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
 check "os.run exit status"         GET /os/run_echo               200 '"status":0'
-check "os.run missing command errors" GET /os/run_missing         500 'could not start'
+check "os.run missing command errors" GET /os/run_missing         200 '"error":"os.run(): could not start'
 
 check "math.abs/min/max"           GET /math/basic  200 '"abs":7,"abs_f":2.5,"min":3,"max":9'
 check "math.round/floor/ceil"      GET /math/basic  200 '"round":3,"floor":2,"ceil":3'

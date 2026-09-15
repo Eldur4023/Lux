@@ -935,7 +935,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
         case ExprKind::Await: {
             if (!e.lhs || e.lhs->kind != ExprKind::Call) {
                 shadow.error(e.loc, "'await' only applies to an asynchronous call "
-                             "(de momento: sleep)");
+                             "(sleep, a database module, or an is_async native module call)");
                 return nullptr;
             }
             IrExprPtr llamada = check_call(*e.lhs, /*awaited=*/true, shadow);
@@ -1037,7 +1037,20 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             shadow.error(e.object->loc, "'" + obj + "' has no member '" + member + "'");
             return nullptr;
         }
-        if (awaited) {
+        // Same enforcement DbModuleCall does below, mirrored exactly: an
+        // is_async function (BuiltinModuleFn::is_async -- os.run()/
+        // read_file()/write_file(), every http.*) MUST be awaited, so its
+        // caller cannot forget the checked-at-runtime error convention that
+        // comes with it (run_builtin_module_async, project.cpp, returns
+        // failure as `{"error": ...}` data, never a hard fail()); a plain
+        // function must NOT be, so the two calling conventions are never
+        // ambiguous from the callsite alone.
+        if (fn->is_async && !awaited) {
+            shadow.error(e.loc, "'" + obj + "." + member + "()' is asynchronous: "
+                         "you must write 'await " + obj + "." + member + "(...)'");
+            return nullptr;
+        }
+        if (!fn->is_async && awaited) {
             shadow.error(e.loc, "'" + obj + "." + member + "()' is not asynchronous: "
                          "the 'await' is unnecessary");
             return nullptr;
@@ -1805,8 +1818,15 @@ void Emitter::emit_call(const IrExpr& e) {
             // (module, function) pair is already resolved to a single flat
             // id at check time (BuiltinModuleRegistry::id_of()), so the VM
             // never has to look either up by name.
+            //
+            // e.awaited is exactly fn->is_async here -- check_call rejected
+            // every OTHER combination already (an is_async function without
+            // `await`, or `await` on a plain one), so it is safe to branch
+            // on it alone to pick the opcode, with no need to re-look-up
+            // BuiltinModuleFn here just to read is_async again.
             for (const auto& a : e.args) emit_expr(*a.value);
-            chunk_->emit(Op::CallBuiltinModule, e.loc,
+            if (e.awaited) chunk_->has_await = true;
+            chunk_->emit(e.awaited ? Op::CallAsyncModule : Op::CallBuiltinModule, e.loc,
                          (static_cast<uint32_t>(e.call_index) << 8) |
                          static_cast<uint32_t>(e.args.size()));
             break;

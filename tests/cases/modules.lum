@@ -79,9 +79,9 @@ get endpoint("/os/file_roundtrip"):
     string dir = os.path_join(tmp, "os_test")
     os.make_dir(dir)
     string path = os.path_join(dir, "hello.txt")
-    os.write_file(path, "hola mundo")
+    await os.write_file(path, "hola mundo")
     bool existed_before = os.path_exists(path)
-    string content = os.read_file(path)
+    string content = await os.read_file(path)
     List<Json> entries = os.list_dir(dir)
     bool removed = os.remove_file(path)
     bool exists_after = os.path_exists(path)
@@ -89,15 +89,15 @@ get endpoint("/os/file_roundtrip"):
               "removed": removed, "exists_after": exists_after }
 
 get endpoint("/os/missing_file"):
-    Json content = os.read_file("/definitely/does/not/exist/xyz123")
+    Json content = await os.read_file("/definitely/does/not/exist/xyz123")
     return { "content_is_null": content == null }
 
 get endpoint("/os/run_echo"):
-    Json r = os.run("/bin/echo", ["hello", "from", "os.run"])
+    Json r = await os.run("/bin/echo", ["hello", "from", "os.run"])
     return r
 
 get endpoint("/os/run_missing"):
-    Json r = os.run("/definitely/not/a/real/command/xyz123")
+    Json r = await os.run("/definitely/not/a/real/command/xyz123")
     return r
 
 get endpoint("/math/basic"):

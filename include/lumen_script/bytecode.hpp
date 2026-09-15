@@ -68,6 +68,17 @@ enum class Op : uint8_t {
     // id-space, and a separate opcode, so the two never collide.
     CallBuiltinModule,
     CallAsync,    // same, but suspends: the driver does the real co_await
+    // Async counterpart of CallBuiltinModule, same relationship CallAsync has
+    // to CallNative -- `id` indexes BuiltinModuleRegistry's flat table, same
+    // as CallBuiltinModule, but the call suspends: the driver runs the real
+    // (blocking) module function on lumen::blocking_pool() and resumes here.
+    // A separate opcode from CallAsync on purpose, for the same reason
+    // CallBuiltinModule is separate from CallNative: BuiltinModuleRegistry's
+    // ids and kNatives' ids are independent counters, so reusing CallAsync's
+    // id-space for a module function's id could collide with an unrelated
+    // native's id (sleep, __db_query...) that happens to share the same
+    // number.
+    CallAsyncModule,
     Return,       // returns the top
     ReturnNull,
 };

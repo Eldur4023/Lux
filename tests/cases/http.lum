@@ -10,45 +10,45 @@
 import http
 
 get endpoint("/get_basic"):
-    Json r = http.get("http://127.0.0.1:8899/echo?x=1")
+    Json r = await http.get("http://127.0.0.1:8899/echo?x=1")
     return r
 
 get endpoint("/get_with_headers"):
-    Json r = http.get("http://127.0.0.1:8899/echo", { "X-Test": "hello" })
+    Json r = await http.get("http://127.0.0.1:8899/echo", { "X-Test": "hello" })
     return r
 
 get endpoint("/post_json"):
-    Json r = http.post("http://127.0.0.1:8899/echo", { "name": "ana", "age": 30 })
+    Json r = await http.post("http://127.0.0.1:8899/echo", { "name": "ana", "age": 30 })
     return r
 
 get endpoint("/post_raw_string"):
-    Json r = http.post("http://127.0.0.1:8899/echo", "plain text body")
+    Json r = await http.post("http://127.0.0.1:8899/echo", "plain text body")
     return r
 
 get endpoint("/put_json"):
-    Json r = http.put("http://127.0.0.1:8899/echo", { "updated": true })
+    Json r = await http.put("http://127.0.0.1:8899/echo", { "updated": true })
     return r
 
 get endpoint("/patch_json"):
-    Json r = http.patch("http://127.0.0.1:8899/echo", { "patched": true })
+    Json r = await http.patch("http://127.0.0.1:8899/echo", { "patched": true })
     return r
 
 get endpoint("/delete_basic"):
-    Json r = http.delete("http://127.0.0.1:8899/echo")
+    Json r = await http.delete("http://127.0.0.1:8899/echo")
     return r
 
 get endpoint("/status_404"):
-    Json r = http.get("http://127.0.0.1:8899/status/404")
+    Json r = await http.get("http://127.0.0.1:8899/status/404")
     return r
 
 get endpoint("/status_500"):
-    Json r = http.get("http://127.0.0.1:8899/status/500")
+    Json r = await http.get("http://127.0.0.1:8899/status/500")
     return r
 
 get endpoint("/bad_url"):
-    Json r = http.get("not-a-url")
+    Json r = await http.get("not-a-url")
     return r
 
 get endpoint("/connection_refused"):
-    Json r = http.get("http://127.0.0.1:1")
+    Json r = await http.get("http://127.0.0.1:1")
     return r

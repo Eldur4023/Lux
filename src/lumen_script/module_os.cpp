@@ -5,21 +5,19 @@
 // POSIX, so, like `hash`/`csv`, this module is unconditionally compiled in
 // (builtin_module.cpp), no cmake option needed.
 //
-// Synchronous, like every native module (NATIVE-MODULES.md §2) -- most of
-// this module pays nothing for that (env lookups, path string manipulation,
-// a `stat()` are all microseconds), but two functions are real, not
-// theoretical, exceptions to that, exactly the same shape `http`'s comment
-// already documents:
+// Synchronous by default (NATIVE-MODULES.md §2) -- most of this module pays
+// nothing for that (env lookups, path string manipulation, a `stat()` are
+// all microseconds). Two functions are real, not theoretical, exceptions,
+// exactly the same shape `http`'s comment already documents, and are marked
+// `is_async` (BuiltinModuleFn::is_async) below so `await` runs them on
+// lumen::blocking_pool() instead of the event loop thread:
 //   - read_file()/write_file() do real disk I/O -- normally fast (page-cache
 //     backed) but not bounded, same cost class the project already accepts
 //     for static file serving (app.cpp) and template loading (template.cpp).
 //   - run() launches and waits on an external process, whose duration is
 //     entirely outside Lumen's control -- bounded here by a fixed timeout
-//     (see kRunTimeoutMs) so a hung child cannot pin the calling event-loop
-//     thread forever, the same mitigation http.* uses for a hung remote
-//     server. A genuinely non-blocking run() would need the worker-pool/
-//     await plumbing NATIVE-MODULES.md §6 already flags as real future work
-//     for the whole module system, not something to bolt on quietly here.
+//     (see kRunTimeoutMs) so a hung child cannot pin its worker forever,
+//     the same mitigation http.* uses for a hung remote server.
 //
 // Security posture, stated plainly rather than left implicit: this module
 // trusts the caller exactly as much as Python's `os`/`open()`/`subprocess`
@@ -329,12 +327,14 @@ public:
             {"path_basename",1, 1, fn_os_path_basename},
             {"path_dirname", 1, 1, fn_os_path_dirname},
             {"path_abs",     1, 1, fn_os_path_abs},
-            {"read_file",    1, 1, fn_os_read_file},
-            {"write_file",   2, 2, fn_os_write_file},
+            // is_async: real, unbounded disk/process I/O -- see the module
+            // comment at the top of this file and BuiltinModuleFn::is_async.
+            {"read_file",    1, 1, fn_os_read_file,  /*is_async=*/true},
+            {"write_file",   2, 2, fn_os_write_file, /*is_async=*/true},
             {"list_dir",     1, 1, fn_os_list_dir},
             {"remove_file",  1, 1, fn_os_remove_file},
             {"make_dir",     1, 1, fn_os_make_dir},
-            {"run",          1, 2, fn_os_run},
+            {"run",          1, 2, fn_os_run,        /*is_async=*/true},
         };
         return fns;
     }

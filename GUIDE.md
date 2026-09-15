@@ -1157,13 +1157,13 @@ get endpoint("/invoice"):
     return { "pdf_base64": pdf.to_base64(doc) }
 
 get endpoint("/weather/:city", string city):
-    Json r = http.get("https://api.example.com/weather?city=" + city)
+    Json r = await http.get("https://api.example.com/weather?city=" + city)
     return r["body"]
 
 get endpoint("/token/:ttl_minutes", int ttl_minutes):
     string id = str(math.random_int(100000, 999999))
     int expires = time.now() + ttl_minutes * 60 * 1000
-    os.write_file(os.path_join(os.getenv("TOKEN_DIR", "/tmp"), id), str(expires))
+    await os.write_file(os.path_join(os.getenv("TOKEN_DIR", "/tmp"), id), str(expires))
     return { "id": id, "expires_iso": time.format_iso(expires) }
 
 get endpoint("/valid_email/:s", string s):

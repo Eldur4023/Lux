@@ -537,6 +537,24 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 return r;
             }
 
+            // Misma forma que CallAsync -- el VM tampoco sabe esperar aqui,
+            // solo junta los argumentos y para -- pero `id` vive en el
+            // id-space de BuiltinModuleRegistry, no en el de kNatives, asi
+            // que await_is_module se lo dice al conductor (project.cpp) para
+            // que no lo confunda con is_db_await/sleep/__ws_recv.
+            case Op::CallAsyncModule: {
+                int id   = static_cast<int>(in.operand >> 8);
+                int argc = static_cast<int>(in.operand & 0xFF);
+
+                Result r;
+                r.status         = Status::Suspended;
+                r.await_id       = id;
+                r.await_is_module = true;
+                r.await_args.resize(static_cast<size_t>(argc));
+                for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
+                return r;
+            }
+
             case Op::SetIndex: {
                 Value v   = pop();
                 Value idx = pop();

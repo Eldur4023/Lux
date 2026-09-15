@@ -381,12 +381,23 @@ the archive's now-unresolved symbols.
 - **No per-argument static type checking.** Arity only, matching the existing convention for
   every other call shape that is not a `BuiltinMethodCall` on a value of statically-known type
   (§3.3) — not a gap unique to native modules.
-- **No async modules.** Every function is synchronous by construction (§2) — theoretical for
-  `hash`/`csv`/`pdf` (microseconds regardless), real for `http`: a slow remote server blocks the
-  calling event-loop thread for the request's duration, bounded by a fixed timeout but still a
-  genuine cost under load (§4). A module that needs to suspend properly would need its own
-  worker-pool story, closer to `DbDriver`'s, generalized to native modules — the clearest
-  concrete next phase this document points to, not designed here.
+- ~~No async modules.~~ **Fixed.** `BuiltinModuleFn::is_async` (builtin_module.hpp) is the
+  opt-in: `os.run()`/`read_file()`/`write_file()` and every `http.*` are marked, which makes
+  `await <module>.<fn>(...)` mandatory for them (checked in `Emitter::check_call`, mirroring
+  `DbModuleCall`) and routes the call through `Op::CallAsyncModule` instead of
+  `Op::CallBuiltinModule` — the driver (`run_builtin_module_async`, project.cpp) runs the actual
+  call on `lumen::blocking_pool()`, the same shared pool a synchronous no-`await` route already
+  uses, and resumes the handler on its own event loop thread when it finishes. A slow/hung
+  remote server or child process still ties up a pool worker for the duration (bounded by each
+  module's own timeout), but no longer the event-loop thread serving every OTHER connection on
+  that core. Same error convention `await <db-module>.*` already established: a failure comes
+  back as `{"error": message}` data, never a hard `fail()` of the handler — deliberately
+  different from calling the SAME function synchronously (a plain, non-`is_async` builtin, where
+  a non-empty `error` still means `fail()`), because `is_async` is an exclusive, checked-at-
+  compile-time calling convention: a given function is reached through exactly one of the two
+  paths, never both. No native (`--native`) codegen yet for either path (next bullet still
+  applies) — `await os.run(...)`/`await http.get(...)` fall back to bytecode like any other
+  `BuiltinModuleCall` today.
 - **No native (`--native`) codegen for any module function yet.** Deliberate and safe (§3.4),
   not an oversight — falls back to bytecode per route, cleanly, with the fallback verified
   against the real binary rather than assumed.

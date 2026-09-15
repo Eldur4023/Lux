@@ -1305,8 +1305,14 @@ get endpoint("/slow/:ms", int ms):
 ```
 
 `await` is only valid inside a route handler, and only on an expression the checker knows is
-*suspendable*. The suspendable ones are: `sleep(ms)`, `ws.recv()`, and every method of the
-database modules (`query`, `exec`, `begin`, `commit`, `rollback`, `last_id` — §46).
+*suspendable*. The suspendable ones are: `sleep(ms)`, `ws.recv()`, every method of the
+database modules (`query`, `exec`, `begin`, `commit`, `rollback`, `last_id` — §46), and every
+native module function marked `is_async` — today, `os.run()`, `os.read_file()`,
+`os.write_file()`, and every `http.*` method (`get`, `post`, `put`, `patch`, `delete`): real,
+unbounded disk/process/network I/O, the same reasoning that makes a database query
+suspendable. A native module function that is not marked `is_async` (`hash.*`, `csv.*`,
+`math.*`, `os.getenv()`, `os.path_*()`...) behaves like any other plain builtin — `await` on
+one of those is the same compile error as `await text("x")` below.
 
 Three rules checked **at compile time**, not in production:
 
