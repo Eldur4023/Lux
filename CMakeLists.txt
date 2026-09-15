@@ -7,7 +7,7 @@ set(CMAKE_C_STANDARD 11)
 
 # --native (Fase 4, rutas): el .so que genera compilar_nativo() para una ruta
 # enlaza liblumen_script.a de verdad (necesita Value::write_json, no inline en
-# el header -- ver COMPILACION-NATIVA.md) desde una biblioteca COMPARTIDA. Un
+# el header) desde una biblioteca COMPARTIDA. Un
 # .a compilado sin -fPIC no se puede meter dentro de un .so -- de ahi esto
 # global, no solo en el target de lumen_script: mas simple que marcar cada
 # dependencia transitiva (lumen, lumen_llhttp) una por una, y el coste (PIC en
@@ -304,7 +304,7 @@ add_executable(test_templates tests/templates.cpp)
 target_link_libraries(test_templates PRIVATE lumen_script)
 add_test(NAME templates COMMAND test_templates)
 
-# --native phase 1 (COMPILACION-NATIVA.md): compares Emitter::check_expr/
+# --native phase 1: compares Emitter::check_expr/
 # check_call against the real compilation, expression by expression. It lives
 # here, not in tests/run_tests.sh, because it calls the library directly
 # instead of the binary: it is a test of an internal piece not wired up yet.

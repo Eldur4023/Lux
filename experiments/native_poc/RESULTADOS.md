@@ -1,7 +1,7 @@
 # Prueba de concepto: ¿compensa compilar a C++ nativo?
 
-Objetivo: antes de comprometerse al refactor grande de `--native` (ver
-`COMPILACION-NATIVA.md`), medir el número real. No es un transpilador — es
+Objetivo: antes de comprometerse al refactor grande de `--native`,
+medir el número real. No es un transpilador — es
 `fib()`/`cuenta_primos()` escritas a mano en C++, copiando exactamente la lógica de
 `bench/lumen/app.lum`, con los mismos rangos de entrada que usa `bench/k6/script.js`.
 
@@ -27,7 +27,7 @@ Dos mediciones, a propósito separadas:
 **La VM tarda ~560x más que C++ nativo en `fib` y ~104x más en `primes`.** Y el número de C++
 nativo no solo se acerca a Go — lo iguala en `primes` y lo mejora en `fib`, con la misma lógica,
 el mismo compilador (GCC) que ya usa Lumen para compilarse a sí mismo. Esto es justo lo que
-predice la tesis central de `COMPILACION-NATIVA.md`: con los tipos ya resueltos en compilación,
+predice la tesis central de `--native`: con los tipos ya resueltos en compilación,
 un bucle de Lumen Script compilado es indistinguible del mismo bucle escrito directamente en
 C++ — no hay ninguna razón estructural para que sea más lento que Go.
 
@@ -44,12 +44,12 @@ ingenuas posibles para un servidor HTTP, tomadas a propósito para no escribir u
 esta prueba. El motor HTTP real de Lumen (`lumen::App`/`Router`, con su propio bucle de eventos
 sobre `epoll`/`io_uring`) ya resuelve esto — es la misma razón por la que hoy, interpretado,
 Lumen sirve `/health` en 0.05-0.08ms. Un handler compilado a nativo se registraría en ese mismo
-motor exactamente igual que uno interpretado (§5 de `COMPILACION-NATIVA.md`), así que el coste
+motor exactamente igual que uno interpretado, así que el coste
 de transporte real que pagaría es el que Lumen ya paga hoy, no el de este servidor de juguete.
 
 ## Conclusión de la prueba
 
-La tesis de `COMPILACION-NATIVA.md` queda validada con un número, no solo con la lectura del
+La tesis de `--native` queda validada con un número, no solo con la lectura del
 perfil: **compilar el camino de CPU pura a C++ nativo cierra la distancia con Go, y lo hace con
 margen** (104x-560x según el caso). No queda validado *cuánto* del rendimiento final del
 `--native` real dependerá de la ingeniería del backend (representación de `Value`, refcounting,

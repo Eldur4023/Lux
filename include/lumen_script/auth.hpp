@@ -36,8 +36,7 @@ struct NativeCtx;
 //
 // Deliberately a public header: this logic does not depend on bytecode or
 // the VM — any backend that runs Lumen Script routes needs it, whether
-// today's interpreter or a native-compilation backend (see
-// COMPILACION-NATIVA.md, phase 0).
+// today's interpreter or a native-compilation backend.
 
 constexpr const char* kSessionCookie = "lumen_session";
 

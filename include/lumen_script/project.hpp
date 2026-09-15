@@ -39,7 +39,7 @@ struct Module {
     // not need it anymore once compiled.
     FunctionSigs function_sigs;
 
-    // --native (phase 2 of COMPILACION-NATIVA.md): null unless --native was
+    // --native (phase 2): null unless --native was
     // requested and at least one function could be compiled. A non-empty
     // `native_warning` is a partial or total degradation to bytecode --
     // never a reason not to publish the module -- and it is up to whoever
@@ -58,7 +58,7 @@ struct Module {
     int declarative_routes = 0;
     int vm_routes          = 0;
 
-    // --native phase 6 (COMPILACION-NATIVA.md): which path serves EACH
+    // --native phase 6: which path serves EACH
     // route, in the same order as Program::routes -- an explicit diagnostic
     // of non-compilable routes instead of just the aggregate count startup
     // already gave. Always filled in (with --native or without it), though

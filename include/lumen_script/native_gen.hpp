@@ -12,9 +12,9 @@
 
 namespace lumen_script {
 
-// Fase 2 de --native (COMPILACION-NATIVA.md): genera C++ real a partir del
+// Fase 2 de --native: genera C++ real a partir del
 // IR de una funcion de usuario -- "pura" en el sentido estrecho de esta
-// fase, la primera que toca el documento a proposito ("esta fase es la que
+// fase, la primera de verdad ("esta fase es la que
 // valida o tumba la tesis entera"): int/float/bool/string/void, control de
 // flujo con if/while/return/break/continue/asignacion/declaracion de
 // variable, los 6 metodos de string, y llamadas a otras funciones de
@@ -84,7 +84,7 @@ using TablaFirmas = std::unordered_map<std::string, FirmaNativa>;
 // lenguaje ya restringe los campos de clase a escalares (project.cpp). El
 // ORDEN de esta lista fija el layout del struct C++ generado.
 //
-// Fase 5.7 (COMPILACION-NATIVA.md): un campo `?` (opcional) SI tiene
+// Fase 5.7 de --native: un campo `?` (opcional) SI tiene
 // entrada aqui, a diferencia del resto de sitios donde `?` deja algo fuera
 // -- necesario porque un parametro de cuerpo de peticion (la unica via
 // real de construir una instancia con datos externos) puede traer
@@ -143,7 +143,7 @@ using TablaClases = std::unordered_map<std::string, ClaseNativa>;
 // indexada igual que FunctionTable/nombre_por_indice: `metodo` vacio
 // significa que es un constructor. `tiene_cuerpo` solo importa para un
 // constructor -- esta fase solo compila el que NO tiene cuerpo (el
-// automapeo "un parametro por campo, en orden", ver COMPILACION-NATIVA.md):
+// automapeo "un parametro por campo, en orden"):
 // comprobar que un constructor CON cuerpo deja todos los campos con su
 // tipo declarado (que ninguno se quede en `null`, el valor con el que
 // arranca `MakeDict` en emit_ctor) exige un analisis de asignacion
@@ -265,8 +265,7 @@ std::string dict_runtime_prelude();
 // una funcion. Eso, a su vez, es lo que permite que el valor de retorno sea
 // heterogeneo (un dict JSON con int/string/float mezclados, el caso comun):
 // se serializa con lumen_script::Value, no con Dict<V> (homogeneo, ver
-// dict_runtime_prelude), justo el "pendiente" que documenta
-// COMPILACION-NATIVA.md.
+// dict_runtime_prelude).
 //
 // Alcance de este primer corte (ver generate_native_route): solo parametros
 // escalares de patron (:id) o query string, SIN valor por defecto -- un

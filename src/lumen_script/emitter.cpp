@@ -961,7 +961,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
 
 // Shadow de emit_call: misma forma, mismo orden, mismo texto -- ver el
 // comentario de check_expr. Construye un IrExpr(kind=Call) con call_shape ya
-// resuelto a una de las 8 formas de COMPILACION-NATIVA.md §1.2.
+// resuelto a una de las formas de IrCallShape (ir.hpp).
 // Collects the operands of a '+' chain in evaluation order, on the raw AST.
 // It only walks down the left: the right-hand side enters as is, even if it
 // is another '+' in parentheses, so as not to reassociate what the parser
@@ -1486,7 +1486,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Fase 1 (COMPILACION-NATIVA.md): el emisor real, que consume el IR ya
+// Fase 1 de --native: el emisor real, que consume el IR ya
 // construido y validado por check_expr/check_stmt (llamados con diags_ real
 // desde los 6 puntos de entrada -- ver emit_route/emit_function/etc. mas
 // arriba). No comprueba nada -- ni una llamada a error(), ni una busqueda

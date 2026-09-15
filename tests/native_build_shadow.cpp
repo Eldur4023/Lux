@@ -327,8 +327,8 @@ static bool prueba_listas() {
     return ok;
 }
 
-// Los tres casos que encontraron el bug critico documentado en
-// COMPILACION-NATIVA.md (Fase 3, "Correccion critica"): Lumen Script no
+// Los tres casos que encontraron el bug critico de Fase 3
+// ("Correccion critica"): Lumen Script no
 // comprueba en ningun sitio que una reasignacion, un `and`/`or`, o una
 // division/modulo conserven el tipo o eviten el divisor cero -- confiar en
 // el tipo DECLARADO sin demostrarlo daba C++ que compilaba y respondia

@@ -5,7 +5,7 @@
 namespace lumen_script {
 
 // El limite de la ABI entre el binario `lumen` y la biblioteca que produce
-// --native (ver Fase 2 de COMPILACION-NATIVA.md, seccion 11): cualquier
+// --native (Fase 2): cualquier
 // funcion compilada nativamente, sin importar su aridad o cual de los tres
 // tipos primitivos use cada parametro, se exporta con esta misma firma fija.
 // Así dlsym() y la VM no necesitan conocer la firma real de cada funcion —

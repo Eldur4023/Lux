@@ -1,4 +1,4 @@
-// Fase 3 de --native (COMPILACION-NATIVA.md): clases de usuario. A
+// Fase 3 de --native: clases de usuario. A
 // diferencia de string/List/Dict, esta pieza no se puede probar a traves de
 // compile_native() -- ni siquiera sirviendo HTTP de verdad -- porque hoy es
 // estructuralmente inalcanzable desde cualquier programa Lumen en

@@ -1,4 +1,4 @@
-// Verificacion de Emitter::check_expr/check_call (fase 1, COMPILACION-NATIVA.md
+// Verificacion de Emitter::check_expr/check_call (--native, fase 1,
 // paso 2): comprueba que reproducen, letra por letra, los diagnosticos que ya
 // produce la compilacion real (emit_expr/emit_call vistos a traves de
 // emit_condition) para una expresion suelta. No sustituye a emit_expr en
@@ -152,7 +152,7 @@ int main() {
     caso("modulo de BD sin import (malos/import.lum)",
          "await sqlite.query(\"select 1\")", {}, "missing 'import sqlite'");
 
-    // ── Ramas de los otros call-shapes (COMPILACION-NATIVA.md §1.2),
+    // ── Ramas de los otros call-shapes (IrCallShape, ir.hpp),
     //    sin corpus dedicado pero construidas contra la compilacion real ──
     {
         ClassSigs classes;
@@ -184,7 +184,7 @@ int main() {
 
     // ── Camino feliz: ninguna de las dos vias debe quejarse, y ademas se
     //    inspecciona la forma del IrExpr construido (call_shape, slot...)
-    //    contra las 8 formas de COMPILACION-NATIVA.md §1.2 que sean
+    //    contra las formas de IrCallShape (ir.hpp) que sean
     //    alcanzables desde una expresion suelta (check_condition fija
     //    route_method_ a "", asi que ReservedMemberCall solo se puede
     //    ejercitar en su rama de error, ya cubierta mas arriba) ──────────

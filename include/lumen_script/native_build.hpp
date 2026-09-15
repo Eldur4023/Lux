@@ -18,8 +18,8 @@ class Response;
 namespace lumen_script {
 
 // Fase 2 de --native, la mitad que faltaba: "invocar el compilador de C++
-// desde el propio lumen (no solo desde una prueba) y enlazar el resultado"
-// (COMPILACION-NATIVA.md). native_gen.cpp ya sabe generar el texto C++ de
+// desde el propio lumen (no solo desde una prueba) y enlazar el resultado".
+// native_gen.cpp ya sabe generar el texto C++ de
 // una funcion; esto lo ensambla, invoca `g++` de verdad como subproceso,
 // carga la biblioteca resultante con dlopen(), y deja resueltos los punteros
 // de invocacion (CompiledFn, ver native_abi.hpp) que la VM puede llamar

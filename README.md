@@ -381,8 +381,8 @@ lumen ./app --autotest   # walks the endpoints after startup and after each relo
 
 **246 tests** across six suites, covered in detail in
 [LUMEN_SCRIPT-GRAMMAR.md](LUMEN_SCRIPT-GRAMMAR.md): 79 regression tests that drive the
-binary over the socket the way it's actually used, including the parameter-binding matrix in
-[bug-hunting.md](bug-hunting.md); 48 for the template engine; 19 for placeholder
+binary over the socket the way it's actually used, including the parameter-binding matrix;
+48 for the template engine; 19 for placeholder
 translation; and 37 + 29 + 34 for the `sqlite`, `mysql`, and `postgres` modules against real
 database engines.
 
@@ -406,6 +406,5 @@ single request:
 A route that doesn't touch the database still answers in 10 ms while that pool is fully
 saturated by other requests.
 
-Bugs found by testing against the real engine, not just compiling, are logged in
-[bug-hunting.md](bug-hunting.md). The formal grammar, with a full manual, is in
+The formal grammar, with a full manual, is in
 [LUMEN_SCRIPT-GRAMMAR.md](LUMEN_SCRIPT-GRAMMAR.md).

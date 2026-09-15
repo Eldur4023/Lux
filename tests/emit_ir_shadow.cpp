@@ -1,4 +1,4 @@
-// Verificacion de equivalencia de EJECUCION (fase 1, COMPILACION-NATIVA.md):
+// Verificacion de equivalencia de EJECUCION (--native, fase 1):
 // compara, corriendo de verdad en el VM, el bytecode que emite el emisor
 // viejo (emit_function sobre Expr/Stmt) contra el que emite el nuevo emisor
 // que consume el IR (check_function construye IrExpr/IrStmt con diags_ real,

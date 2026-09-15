@@ -109,7 +109,7 @@ public:
     // Body of an `on error`: no parameters, with the `error` object available.
     bool emit_error_handler(const ErrorDecl& decl, Chunk& out);
 
-    // ── Fase 1 (COMPILACION-NATIVA.md): checker en paralelo ─────────────────
+    // ── Fase 1 de --native: checker en paralelo ──────────────────────────────
     //
     // Reproduce TODAS las comprobaciones que hace emit_expr/emit_call (mismo
     // texto de error, mismo orden), pero sin tocar chunk_ ni locals_: no emite

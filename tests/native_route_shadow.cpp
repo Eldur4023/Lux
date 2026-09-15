@@ -1,4 +1,4 @@
-// Fase 4 de --native (COMPILACION-NATIVA.md): la primera ruta HTTP
+// Fase 4 de --native: la primera ruta HTTP
 // compilada a codigo nativo. A diferencia de las pruebas anteriores (que
 // arman un Program/Emitter/VM a mano), esta pasa por compile() de verdad --
 // el mismo camino que toma `lumen --native app.lum` -- y despacha peticiones
@@ -258,7 +258,7 @@ int main() {
     // sleep()`, que se reanuda al acto sin loop, ver SleepAwaitable), asi
     // que ejecutarla aqui se quedaria colgada para siempre en vez de fallar
     // limpio. La ejecucion de verdad (con datos reales, contra el binario
-    // real sirviendo HTTP) esta verificada a mano -- ver COMPILACION-NATIVA.md.
+    // real sirviendo HTTP) esta verificada a mano por separado.
     {
         std::string via;
         for (const auto& r : mod_nat->route_report)
@@ -532,8 +532,7 @@ int main() {
     // reanuda al acto sin loop, asi que un solo handle.resume() basta --
     // solo que status+cuerpo coincidan, exactamente igual que cualquier
     // otra ruta. El tiempo de espera de verdad (~ms reales, no ~0) esta
-    // verificado a mano contra el binario real sirviendo HTTP -- ver
-    // COMPILACION-NATIVA.md.
+    // verificado a mano contra el binario real sirviendo HTTP, por separado.
     comparar("guarda rechaza ms=9999", "/espera/9999");
     comparar("await sleep(ms)", "/espera/50");
 

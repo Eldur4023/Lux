@@ -38,7 +38,7 @@ int state_remove_id() { static const int id = native_id("__state_remove"); retur
 // Los unicos elementos de List o valores de Dict que esta fase sabe
 // representar -- un nivel, sin anidar (List<List<int>>, Dict<string,List<int>>
 // quedan fuera: su elemento/valor no es ninguno de estos cuatro).
-// Type::Kind::Json entra tambien -- Fase 5.5 (COMPILACION-NATIVA.md): un
+// Type::Kind::Json entra tambien -- Fase 5.5 de --native: un
 // List<Json>/Dict<string,Json> (la forma real de una fila de base de
 // datos) se representa igual que un Json suelto, ver tipo_cpp() mas abajo.
 bool tipo_elemento_contenedor_soportado(const Type& elem) {
@@ -96,8 +96,7 @@ bool tipo_soportado(const Type& t, const TablaClases* clases = nullptr) {
         // Fase 5.5: el valor dinamico que devuelve una consulta de base de
         // datos (Value en tiempo de generacion, ver tipo_cpp()) -- nunca
         // demostrable con un Type nativo fijo (el driver puede fallar en
-        // tiempo de ejecucion y devolver una forma distinta, ver el
-        // comentario grande sobre esto en COMPILACION-NATIVA.md), asi que
+        // tiempo de ejecucion y devolver una forma distinta), asi que
         // se representa como lo que de verdad es: dinamico.
         case Type::Kind::Json:
             return true;
@@ -1043,8 +1042,7 @@ public:
                     // Fase 5.5: el valor real es Json (dinamico) aunque el
                     // tipo declarado sea otra cosa -- `int stock =
                     // filas[0]["stock"]` es valido Lumen (el tipo declarado
-                    // es decorativo, ver el comentario grande sobre esto en
-                    // COMPILACION-NATIVA.md) y el VM no le exige nada en la
+                    // es decorativo) y el VM no le exige nada en la
                     // asignacion, solo cuando el valor se USA de verdad. Se
                     // registra el tipo REAL (Json), no el que puso el
                     // programador: las operaciones posteriores (aritmetica,

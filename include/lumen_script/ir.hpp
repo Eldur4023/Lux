@@ -8,7 +8,7 @@
 
 namespace lumen_script {
 
-// IR tipado de expresiones (COMPILACION-NATIVA.md fase 1, §1.1-1.2).
+// IR tipado de expresiones (--native, fase 1).
 //
 // TODAVIA NO ESTA CONECTADO a Emitter: este fichero es puramente aditivo, el
 // mismo tipo de paso seguro que fue type.hpp antes de conectarse. Nada en
@@ -47,8 +47,8 @@ enum class IrExprKind {
     FuncRef,
 };
 
-// Las 9 formas de llamada que distingue emit_call hoy (COMPILACION-NATIVA.md
-// §1.2). No es "una llamada generica con argumentos": cada forma tiene su
+// Las 9 formas de llamada que distingue emit_call hoy. No es "una llamada
+// generica con argumentos": cada forma tiene su
 // propia regla de aridad/nombrados, su propia necesidad de await, y su propio
 // opcode/backend de destino, asi que el checker tiene que decidir CUAL es
 // antes de que el emisor (de bytecode o nativo) pueda actuar.
@@ -156,7 +156,7 @@ struct IrExpr {
     std::vector<IrDictEntry> entries;
 };
 
-// IR de sentencias (COMPILACION-NATIVA.md fase 1, paso 3 de §1.1: check_stmt
+// IR de sentencias (--native, fase 1: check_stmt
 // ya existe y esta verificado -- ver Emitter::check_stmt -- este es el IR que
 // deberia producir en vez de escribir a un DiagnosticBag). Aditivo, sin
 // conectar: como con IrExpr, la forma calca a Stmt (ast.hpp) a proposito, y

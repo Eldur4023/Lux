@@ -1,5 +1,5 @@
-// Fase 2 de --native (COMPILACION-NATIVA.md): "esta fase es la que valida o
-// tumba la tesis entera del documento". El criterio de aceptacion es
+// Fase 2 de --native: "esta fase es la que valida o
+// tumba la tesis entera". El criterio de aceptacion es
 // concreto -- fib y cuenta_primos (los mismos del banco de pruebas) dan
 // resultados identicos a la VM -- y esta prueba lo comprueba de verdad:
 // genera C++ real a partir del IR, lo compila con el compilador del

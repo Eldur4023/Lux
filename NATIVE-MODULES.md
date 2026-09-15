@@ -3,8 +3,8 @@
 > How `import <name>` grows beyond the database drivers (`sqlite`/`postgres`/`mysql`) into a
 > general mechanism for adding capability to Lumen Script — `hash`, `csv`, `pdf` and `http`
 > today, more tomorrow — and a step-by-step guide for building one. Companion to
-> [COMPILACION-NATIVA.md](COMPILACION-NATIVA.md) (native *compilation*, a different thing) and
-> [GUIDE.md](GUIDE.md) (using an application once it is built).
+> [GUIDE.md](GUIDE.md) (using an application once it is built) — native *compilation*
+> (`--native`) is a different thing, covered elsewhere in the codebase's own comments.
 
 ---
 
@@ -156,8 +156,8 @@ lumen: --native: 0 function(s), 0 route(s) compiled to native code
 lumen:   GET /hash/:s -> bytecode
 ```
 
-Giving a module native support later is additive, exactly like every `--native` phase in
-COMPILACION-NATIVA.md has been: teach `tipo_provable()` a case for `NativeModuleCall` (probably
+Giving a module native support later is additive, exactly like every `--native` phase has
+been so far: teach `tipo_provable()` a case for `NativeModuleCall` (probably
 keyed by `call_index`, the way `db_query_id()`/`db_exec_id()` already are for DB calls) and
 `Generador::expr()` how to emit a direct C++ call instead of going through `Value`. Nothing
 about the mechanism in this document needs to change for that to happen — it is deferred

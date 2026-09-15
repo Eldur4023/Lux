@@ -167,7 +167,7 @@ struct DbAwaitable {
 
 // ─── Puente compartido bytecode/--native ─────────────────────────────────────
 //
-// Fase 5.5 de --native (COMPILACION-NATIVA.md): la logica de una suspension
+// Fase 5.5 de --native: la logica de una suspension
 // de base de datos vivia solo dentro de run_db() (project.cpp), atada a
 // VM::Result/NativeCtx. Extraida aqui, parametrizada por DbOp en vez del
 // native_id de turno, para que el codigo generado por una ruta nativa

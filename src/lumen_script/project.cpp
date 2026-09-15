@@ -85,7 +85,7 @@ std::string format_errors(const DiagnosticBag& diags,
 
 namespace {
 
-// --native phase 1 (COMPILACION-NATIVA.md): for ONE specific call to
+// --native phase 1: for ONE specific call to
 // emit_route/emit_function/emit_method/emit_ctor/emit_error_handler/
 // emit_condition, compares the diagnostics it added against what its check_*
 // equivalent gives. Purely observational — never touches `diags`, never
@@ -613,8 +613,8 @@ void build_classes(const Program& program, const FunctionSigs& fns,
 // Session signing/verification and JWT (sign_session, load_session,
 // verify_jwt, AuthConfig, begin_auth, end_auth) live in
 // include/lumen_script/auth.hpp + src/lumen_script/auth.cpp: any backend
-// that runs Lumen Script routes needs it, not just this VM (see
-// COMPILACION-NATIVA.md, phase 0) — and it is also where the session-cookie
+// that runs Lumen Script routes needs it, not just this VM — and it is
+// also where the session-cookie
 // expiry lives (`exp` signed alongside the payload, checked in
 // load_session): see the comment there for why a session that never expires
 // on its own was a real bug, not just a hardening nice-to-have.

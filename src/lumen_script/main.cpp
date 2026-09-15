@@ -65,8 +65,7 @@ void usage() {
         "  --autotest      walk the endpoints on startup and on every reload\n"
         "  --autotest=all  also include POST/PUT/PATCH/DELETE\n"
         "  --native        compiles to native code (g++) the functions that\n"
-        "                  can be (see COMPILACION-NATIVA.md); turns off hot\n"
-        "                  reload, same as --no-watch\n";
+        "                  can be; turns off hot reload, same as --no-watch\n";
 }
 
 // Watches the compiled files and recompiles when it detects a change.
@@ -202,7 +201,7 @@ int main(int argc, char** argv) {
         std::cout << "lumen: --native: " << (mod->native ? mod->native->compiled() : 0)
                   << " function(s), " << (mod->native ? mod->native->routes_compiled() : 0)
                   << " route(s) compiled to native code\n";
-        // --native phase 6 (COMPILACION-NATIVA.md): explicit diagnostic of
+        // --native phase 6: explicit diagnostic of
         // which path serves EACH route with logic -- the aggregate count
         // above does not say which ones fell back to bytecode, and --native
         // is precisely the mode where that matters. Declarative/ws/sse

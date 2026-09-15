@@ -9,7 +9,7 @@ struct TypeRef; // ast.hpp
 // Representacion tipada de un tipo de Lumen Script, pensada para sustituir a
 // las cadenas ad-hoc que usa hoy Emitter (Local::type, type_of()) y para ser
 // la base del IR tipado que necesita el backend de compilacion nativa
-// (COMPILACION-NATIVA.md, fase 1).
+// (--native, fase 1).
 //
 // TODAVIA NO ESTA CONECTADO a Emitter/VM: este fichero es puramente aditivo,
 // un primer paso seguro de la fase 1. Emitter sigue usando std::string hasta
@@ -30,8 +30,8 @@ struct TypeRef; // ast.hpp
 //     valor, no un par de tipos.
 //   - Los genericos se borran al compilar (§8), pero aqui SI se conservan:
 //     el checker que consuma esto necesita saber que hay dentro de un
-//     List<T>/Dict<string,V> para decidir la representacion nativa
-//     (COMPILACION-NATIVA.md §7), aunque el VM de bytecode los borre luego.
+//     List<T>/Dict<string,V> para decidir la representacion nativa,
+//     aunque el VM de bytecode los borre luego.
 
 class Type {
 public:

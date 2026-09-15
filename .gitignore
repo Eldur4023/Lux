@@ -3,7 +3,7 @@ potential_bugs.md
 plan.md
 .claude/
 build/
-
+build-iouring/
 # Artifacts left behind by the test suite.
 tests-suite.db*
 tests-sqlite-types.db*
