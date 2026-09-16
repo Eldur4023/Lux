@@ -118,6 +118,14 @@ echo "== error paths =="
 check "invalid url"          GET /bad_url            500 'url must start with'
 check "connection refused"   GET /connection_refused 500 'http.get()'
 
+echo "== url_encode (RFC 3986, no network) =="
+check "space becomes %20, not +"        GET /url_encode 200 '"space":"%20"'
+check "UTF-8 bytes escaped per byte"    GET /url_encode 200 '"accented":"%C3%A1"'
+check "reserved characters all escaped" GET /url_encode 200 '"reserved":"a%26b%3Fc%23d%2Fe%3Af%25g"'
+check "'+' is not special on input"     GET /url_encode 200 '"plus_not_special":"%2B"'
+check "unreserved set passes through"   GET /url_encode 200 '"unreserved_untouched":"AZaz09-_.~"'
+check "a full query value round-trips"  GET /url_encode 200 '"full_query_value":"hello%20world%20%26%20more%20%3Dtest"'
+
 echo
 if [ "$failed" -eq 0 ]; then
     green "$passed tests, all passing"

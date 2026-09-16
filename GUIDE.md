@@ -1303,7 +1303,12 @@ them usually needs an `<name>: { ... }` block in `app:` at all:
   reverse proxy to delegate to. **Blocks the calling thread for the duration of the request**
   (bounded by a fixed 15s timeout) — every native module is synchronous today (see
   [NATIVE-MODULES.md](NATIVE-MODULES.md) §2), and this is the one module where that is a real
-  cost, not a theoretical one, under real concurrent load.
+  cost, not a theoretical one, under real concurrent load. `url_encode(s)` is the exception to
+  all of that: RFC 3986 percent-encoding (`A-Za-z0-9-_.~` untouched, everything else —
+  including a space, as `%20`, never `+`, which is the `application/x-www-form-urlencoded`
+  variant this is not — as `%XX`, byte by byte, so a UTF-8 multi-byte character becomes one
+  `%XX` per byte). No network, no `await`, safe to splice straight into a query string value:
+  `"?q=" + http.url_encode(text)`.
 - **`os`** — environment (`getenv(name[, default])`), paths (`cwd()`, `path_join(...)`,
   `path_exists`/`path_basename`/`path_dirname`/`path_abs`), stat (`is_dir(path)`/
   `is_file(path)`, both `false` — neither one, not an error — for a missing path or a dangling

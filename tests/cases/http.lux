@@ -52,3 +52,16 @@ get endpoint("/bad_url"):
 get endpoint("/connection_refused"):
     Json r = await http.get("http://127.0.0.1:1")
     return r
+
+# url_encode is pure text transformation, no network involved -- it does
+# not need the echo server, but lives in this suite because it is a
+# function of the same module.
+get endpoint("/url_encode"):
+    return {
+        "space": http.url_encode(" "),
+        "accented": http.url_encode("á"),
+        "reserved": http.url_encode("a&b?c#d/e:f%g"),
+        "plus_not_special": http.url_encode("+"),
+        "unreserved_untouched": http.url_encode("AZaz09-_.~"),
+        "full_query_value": http.url_encode("hello world & more =test")
+    }
