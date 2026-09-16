@@ -1,16 +1,28 @@
 // Fase 3 de --native: clases de usuario. A
 // diferencia de string/List/Dict, esta pieza no se puede probar a traves de
 // compile_native() -- ni siquiera sirviendo HTTP de verdad -- porque hoy es
-// estructuralmente inalcanzable desde cualquier programa Lux en
-// ejecucion: una funcion SUELTA no puede tocar una clase (el checker real
-// solo resuelve ConstructorCall/ClassMethodCall dentro de una ruta o un
-// metodo, que reciben ClassSigs; build_functions() en project.cpp se lo
-// niega a proposito a una funcion suelta), y un metodo nunca cruza la ABI
-// (el receptor es de tipo clase), asi que nunca entra en por_indice.
+// estructuralmente inalcanzable desde cualquier programa Lux en ejecucion:
+// un metodo nunca cruza la ABI (el receptor es de tipo clase, y
+// tipo_abi_soportado() excluye Class de la frontera fija de
+// native_abi.hpp, igual que String/List/Dict/Json), asi que nunca entra en
+// por_indice y nada de bytecode puede llamarlo como funcion nativa.
 // compile_native() maneja esto con seguridad (generadas.empty() -> vuelve
-// nullptr, nada se pierde ni se rompe) pero eso significa que, hasta que la
-// Fase 4 compile rutas a nativo, el codigo de esta pieza no tiene ningun
-// punto de entrada real.
+// nullptr, nada se pierde ni se rompe) pero eso significa que el codigo de
+// esta pieza sigue sin un punto de entrada real desde un programa Lux
+// normal.
+//
+// (Una funcion SUELTA SI puede tocar una clase hoy -- construir una
+// instancia, llamar un metodo -- exactamente igual que una ruta o un
+// metodo: build_function_signatures()/emit_function_bodies()
+// (project.cpp) reciben ClassSigs/EnumSigs como cualquier otro emisor
+// desde que eso se separo en firmas-antes-que-cuerpos, la misma razon por
+// la que build_class_signatures()/emit_class_bodies() ya estaban
+// separados. Antes de esa separacion, build_functions() hacia las dos
+// cosas en una sola pasada y JAMAS pasaba ClassSigs al Emitter -- lo que
+// de verdad faltaba no era la ABI, sino que el bytecode de una funcion
+// SUELTA no resolvia ConstructorCall/ClassMethodCall en absoluto. Eso no
+// es lo que impide alcanzar este generador: la ABI de mas arriba, que
+// sigue en pie, si.)
 //
 // Esta prueba valida el generador de todas formas -- construyendo el C++ de
 // la clase y sus metodos directamente (generar_clase_runtime()/

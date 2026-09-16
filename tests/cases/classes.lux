@@ -45,6 +45,24 @@ fn int factorial(int n):
 fn int infinita(int n):
     return infinita(n + 1)
 
+# A standalone `fn` constructing a class instance, calling a method on one,
+# and being called from ANOTHER `fn` (not just from a route directly) --
+# emit_function_bodies() (project.cpp) needs ClassSigs/EnumSigs wired for
+# exactly this; it used to be built+emitted in the same pass as function
+# SIGNATURES, before classes/enums even existed yet, so this failed with
+# "unknown function: 'Punto'" until that got split the same way
+# build_class_signatures()/emit_class_bodies() already were.
+fn Punto hacer_punto(int x, int y):
+    return Punto(x, y)
+
+fn List<int> cuadrados_de_puntos():
+    List<int> out = []
+    Punto a = hacer_punto(3, 4)
+    Punto b = hacer_punto(1, 1)
+    out.add(a.cuadrado())
+    out.add(b.cuadrado())
+    return out
+
 get endpoint("/__ping__"):
     return { "ok": true }
 
@@ -67,6 +85,9 @@ get endpoint("/factorial/:n", int n):
 
 get endpoint("/infinita"):
     return { "r": infinita(1) }
+
+get endpoint("/puntos_desde_fn"):
+    return { "cuadrados": cuadrados_de_puntos() }
 
 get endpoint("/nested/build"):
     Episode e1 = Episode("Pilot", 1320)

@@ -1452,7 +1452,7 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
     }
 }
 
-FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
+FunctionSigs build_function_signatures(Module& mod, DiagnosticBag& diags) {
     FunctionSigs index;
 
     for (const auto& f : mod.program.functions) {
@@ -1466,10 +1466,29 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
         mod.functions.push_back(std::make_shared<Chunk>());
     }
 
+    return index;
+}
+
+// Bodies, once EVERYTHING callable has a signature -- classes included.
+// This used to be the second half of build_functions() itself, with
+// `classes`/`enums` never passed to Emitter at all (always nullptr): a
+// standalone `fn` could not construct a class instance or call a method on
+// one ("unknown function: 'Item'" for a class named Item), not because the
+// language forbids it -- nothing about a Value::Dict cares whether the
+// code building it is a route handler or a plain function -- but because
+// this half ran before build_class_signatures()/build_enum_signatures()
+// even existed yet, a purely historical ordering accident (the comment
+// this replaces called it "on purpose", which was true only in the sense
+// that nobody had gone back to fix it once classes/enums got their own
+// signature-then-body split). Splitting this the same way removes the
+// asymmetry: a route/method already resolves ConstructorCall/
+// ClassMethodCall/enum values fine, and now a standalone function does too.
+void emit_function_bodies(Module& mod, const FunctionSigs& fns, const ClassSigs& classes,
+                          const EnumSigs& enums, DiagnosticBag& diags) {
     for (const auto& f : mod.program.functions) {
-        auto it = index.find(f.name);
-        if (it == index.end()) continue;
-        Emitter emitter(diags, &index, nullptr, &mod.program.imports);
+        auto it = fns.find(f.name);
+        if (it == fns.end()) continue;
+        Emitter emitter(diags, &fns, &classes, &mod.program.imports, nullptr, &enums);
         size_t  antes = diags.size();
         emitter.emit_function(f, *mod.functions[it->second.index]);
         if (shadow_check_enabled()) {
@@ -1478,7 +1497,6 @@ FunctionSigs build_functions(Module& mod, DiagnosticBag& diags) {
             shadow_compare(("funcion " + f.name).c_str(), diags, antes, shadow);
         }
     }
-    return index;
 }
 
 void build_error_handlers(Module& mod, const FunctionSigs& fns,
@@ -1990,12 +2008,17 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     if (diags.empty()) {
         // Order: first the signatures of everything callable —standalone
         // functions, methods and constructors— and only then the bodies.  That
-        // way anyone can call anyone regardless of declaration order.
-        auto fns   = build_functions(*mod, diags);
+        // way anyone can call anyone regardless of declaration order -- a
+        // standalone function's OWN body is no exception: it needs
+        // ClassSigs/EnumSigs in hand before it compiles, exactly like a
+        // route or a method does, to construct an instance or use an enum
+        // value itself.
+        auto fns   = build_function_signatures(*mod, diags);
         mod->function_sigs = fns;
         auto enums = build_enum_signatures(*mod, diags);
+        auto sigs  = build_class_signatures(*mod, diags);
 
-        auto sigs = build_class_signatures(*mod, diags);
+        emit_function_bodies(*mod, fns, sigs, enums, diags);
         emit_class_bodies(*mod, sigs, fns, enums, diags);
 
         // --native (Fase 3): despues de las firmas/cuerpos de clase (necesita

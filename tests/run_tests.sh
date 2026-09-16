@@ -285,6 +285,7 @@ check "method with a default"  GET /label/1/2     200 '"other":"Q(1,2)"'
 check "user function"  GET /doble/21         200 '"r":42'
 check "recursion"           GET /factorial/5      200 '"r":120'
 check "recursion cap"   GET /infinita         500 'too much recursion'
+check "a standalone fn can construct a class and call a method on it" GET /puntos_desde_fn 200 '"cuadrados":[25,2]'
 
 check "class field: List<Class>, built and returned as JSON" GET /nested/build 200 '"episodes":[{"title":"Pilot","duration_s":1320},{"title":"Episode 2","duration_s":1290}]'
 check "class field: List<Class>, forward reference (Season before Episode) resolves" GET /nested/build 200 '"name":"Season 1"'

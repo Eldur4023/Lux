@@ -870,6 +870,26 @@ Declaration order does not matter: a function can call another declared further 
 another file. Recursion works, with a cap of 200 nested calls — going over gives a language
 error, it does not exhaust the process memory.
 
+A function can construct a class, call a method on one, or use an enum value exactly like a
+route handler can — useful for logic shared across several routes (building a result several
+endpoints return, say) that would otherwise have to be duplicated inside each one:
+
+```lux
+class Episode:
+    string title
+
+fn Episode make_episode(string title):
+    return Episode(title)
+
+fn List<Episode> scan():
+    List<Episode> out = []
+    out.add(make_episode("Pilot"))
+    return out
+
+get endpoint("/episodes"):
+    return scan()
+```
+
 Parameters accept default values, and the missing ones are filled in at the call site. A
 parameter without a default cannot come after one that has one.
 
