@@ -1130,9 +1130,10 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, nine
-so far. Every one but `http` is synchronous (no `await`) and usually needs no
-`<name>: { ... }` block in `app:` at all:
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, ten
+so far. Most are fully synchronous (no `await` anywhere); `http` (every function) and `proc`
+(`read`/`wait` only — the two that can genuinely block for a while) are the exceptions. None of
+them usually needs an `<name>: { ... }` block in `app:` at all:
 
 - **`hash`** — `sha256(s)`, `hmac_sha256(key, msg)`, `random_hex(n)`, all hex-encoded.
 - **`csv`** — parse, filter (`filter_eq`/`filter_gt`/`filter_lt`/`filter_ge`/`filter_le`/
@@ -1185,6 +1186,25 @@ so far. Every one but `http` is synchronous (no `await`) and usually needs no
   the full example. Membership in a room a connection never explicitly `leave()`s is dropped
   lazily, on the next `join`/`broadcast`/`count` that touches that room, not the instant the
   connection closes.
+- **`proc`** — a subprocess handle that outlives a single call, for when `os.run()`'s "spawn,
+  capture everything, wait, all in one blocking call" shape does not fit: a long-running
+  process one request starts and a LATER, different request reads from, checks on, or kills
+  (a transcoding session across a video player's requests; a background job a status page
+  polls for hours). `start(command, args[, options])` returns a handle immediately, without
+  waiting for any output or for the process to exit — `options` is a `Dict` with `"stdout"`
+  (`"pipe"` (default) / `"null"` / a file path) and `"stderr"` (`"null"` (default) / a file
+  path — never `"pipe"`, since nothing reads a second stream). `alive(handle)` never blocks.
+  `await read(handle, max_bytes, timeout_ms)` returns new output (possibly `""` if none arrived
+  before the timeout — the process may still be running), or `null` on EOF. `await
+  wait(handle, timeout_ms)` returns the exit code, or `null` if it is still running when the
+  timeout elapses — call it again, or in a loop, for a job that outlives one call's timeout.
+  `kill(handle[, signal])` (default `SIGTERM`) only signals; it does not wait to see whether
+  the process actually died — `kill(); wait(h, 5000); if that is null, kill(h, 9)` is the
+  pattern for "ask nicely, then insist". `close(handle)` releases the handle; it never kills
+  anything, and reaps the process only if it had already exited — a still-running one is left
+  for a background sweep instead of waited on right there (see the module's own comment,
+  `src/lux_script/modules/base_modules/proc.cpp`, for why). Same argv-list-never-a-shell-string
+  rule as `os.run()`, same reason.
 
 ```lux
 import hash
@@ -1196,6 +1216,7 @@ import math
 import time
 import regex
 import rooms
+import proc
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }

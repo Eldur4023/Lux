@@ -13,6 +13,7 @@ import math
 import time
 import regex
 import rooms
+import proc
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -166,3 +167,48 @@ get endpoint("/rooms/broadcast_empty"):
 
 get endpoint("/rooms/join_outside_ws"):
     return { "ok": rooms.join("x") }
+
+# `proc` (NATIVE-MODULES.md): a live subprocess handle, distinct from
+# os.run() (which spawns, drains, and waits inside ONE blocking call) --
+# start() returns immediately, and read()/alive()/wait()/kill() operate on
+# the handle from wherever/whenever later. The real point of this module --
+# a second request reading from or killing a process a FIRST request
+# started, potentially on a different thread -- needs an actual live
+# server exchange this HTTP-only harness cannot script; verified by hand
+# instead (see proc.cpp's own module comment). Each check below is
+# self-contained (start+use+close in one handler) so it does not depend on
+# handle numbers assigned by requests earlier in this same file -- that
+# numbering is an implementation detail, not something a test should pin.
+get endpoint("/proc/echo_full"):
+    int h = proc.start("/bin/echo", ["hello", "from", "proc"])
+    string? out = await proc.read(h, 4096, 2000)
+    int? code = await proc.wait(h, 2000)
+    proc.close(h)
+    return { "out": out, "code": code }
+
+# start() is synchronous (it never blocks -- posix_spawn either succeeds or
+# fails immediately), so unlike os.run()'s OWN "missing command" test
+# (os.run is async, so its failure is a soft {"error": ...} at 200), a
+# failing proc.start() is a hard error on the route, same as any other
+# synchronous native call misused.
+get endpoint("/proc/missing_command"):
+    int h = proc.start("/definitely/not/a/real/command/xyz123")
+    return { "h": h }
+
+get endpoint("/proc/kill_and_wait"):
+    int h = proc.start("/bin/sleep", ["10"])
+    bool was_alive = proc.alive(h)
+    proc.kill(h)
+    int? code = await proc.wait(h, 2000)
+    bool still_alive = proc.alive(h)
+    proc.close(h)
+    return { "was_alive": was_alive, "code": code, "still_alive": still_alive }
+
+get endpoint("/proc/read_without_pipe"):
+    int h = proc.start("/bin/echo", ["x"], { "stdout": "null" })
+    Json out = await proc.read(h, 100, 500)
+    proc.close(h)
+    return { "out": out }
+
+get endpoint("/proc/unknown_handle"):
+    return { "alive": proc.alive(999999) }

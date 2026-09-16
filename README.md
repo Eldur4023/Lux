@@ -376,6 +376,7 @@ get endpoint("/valid_email/:s", string s):
 | `time` | Unix time plus ISO 8601 formatting and parsing |
 | `regex` | `test`, `find`, `find_all`, `groups`, `replace`, `split` |
 | `rooms` | Cross-connection WebSocket broadcast: join a room, leave it, send to everyone in it |
+| `proc` | A subprocess handle that outlives one call — start it here, read/check/kill it from a later request |
 | `pdf` | Generates PDFs, needs cairo at build time |
 | `http` | Outbound HTTP calls, needs libcurl at build time |
 

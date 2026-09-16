@@ -360,6 +360,13 @@ check "rooms.count on an unknown room is 0, not an error" GET /rooms/count_empty
 check "rooms.broadcast to an unknown room reaches nobody" GET /rooms/broadcast_empty 200 '"reached":0'
 check "rooms.join outside a ws route is rejected"         GET /rooms/join_outside_ws 500 'can only be called from a ws route'
 
+check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
+check "proc.start with a bad command is a hard error"  GET /proc/missing_command  500 'proc.start(): could not start'
+check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
+check "proc.kill + wait leaves it not alive"           GET /proc/kill_and_wait    200 '"still_alive":false'
+check "proc.read without stdout: pipe is a soft error" GET /proc/read_without_pipe 200 '"error":"proc.read(): this process was not started with stdout'
+check "proc.alive on an unknown handle errors"         GET /proc/unknown_handle   500 'proc: unknown handle'
+
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
