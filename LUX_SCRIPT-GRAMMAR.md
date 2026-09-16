@@ -73,7 +73,7 @@
 A comment starts at `#` and runs to the end of the line. There are no block comments — if you
 needed one for a long string, that string should probably be a triple-quoted string (§5).
 
-```lum
+```lux
 # this is a comment
 int x = 1   # and so is this
 ```
@@ -82,7 +82,7 @@ Blocks are marked by indentation, as in Python: the lexer emits `INDENT` and `DE
 by comparing each line's indentation with the previous one's, and a block is the sequence of
 statements indented more than the line that opens it.
 
-```lum
+```lux
 if x > 0:
     log.info("positive")
     if x > 100:
@@ -142,7 +142,7 @@ IDENT ::= ( letter | "_" ) { letter | digit | "_" }
 `letter` includes Unicode: `contraseña`, `título`, `año` are valid identifiers — the lexer
 does not force you to transliterate names into ASCII to write them in your own language.
 
-```lum
+```lux
 class User:
     string  name
     string? contraseña
@@ -178,7 +178,7 @@ STRING ::= '"' { character } '"' | '"""' { character | line break } '"""'
 
 Escapes, the same in both forms: `\n` `\t` `\r` `\0` `\"` `\\`.
 
-```lum
+```lux
 string greeting = "hello\tworld\n"
 ```
 
@@ -186,7 +186,7 @@ string greeting = "hello\tworld\n"
 
 For SQL or HTML, where fighting `\n` on every line would be pure noise:
 
-```lum
+```lux
 string q = """
     SELECT id, title
     FROM posts
@@ -205,7 +205,7 @@ text's. It is stripped with three rules:
 The example above is exactly `SELECT id, title\nFROM posts\nWHERE author = ?`, with no line
 break at the start or the end. With relative indentation:
 
-```lum
+```lux
 string html = """
     <ul>
       <li>one</li>
@@ -228,7 +228,7 @@ worth and risking getting it wrong.
 The lexer **does not merge** two consecutive `>` into a right-shift token, so a nested
 generic closes without a separating space:
 
-```lum
+```lux
 Dict<string, List<int>> by_category
 ```
 
@@ -257,7 +257,7 @@ four words exist because code ported from another language usually arrives writt
 of the two, and forcing a rewrite would be ceremony with no benefit — but as far as range and
 precision go, choosing `int` over `long`, or `float` over `double`, changes nothing.
 
-```lum
+```lux
 int    a = 9223372036854775807   # it fits, it is a long long inside
 long   b = 5                     # exactly the same type as 'a'
 float  c = 3.14159265358979      # double precision, even though it is called float
@@ -302,7 +302,7 @@ type ::= base_type [ "?" ]
 
 `T?` marks that the value may be missing.
 
-```lum
+```lux
 class User:
     string  name
     string? nickname       # may not arrive
@@ -322,7 +322,7 @@ POST /u  {"name":"ana"}            -> 200 {"name":"ana","nickname":null}
 "it arrived and is an empty string" from "it did not arrive". To ask about presence you have
 to compare against `null` explicitly:
 
-```lum
+```lux
 if nickname == null:
     nickname = name
 ```
@@ -343,7 +343,7 @@ the order between files does not matter (§12).
 `?` appears in two places in the grammar with different meanings, and both are valid in the
 same syntactic position:
 
-```lum
+```lux
 string?  x = a ? b : c
 ```
 
@@ -382,7 +382,7 @@ It introduces a namespace. The available modules are `sqlite`, `postgres` and `m
 three persistence modules— and each one also needs its own configuration block inside `app:`
 (§14, §46).
 
-```lum
+```lux
 import postgres
 
 app:
@@ -421,7 +421,7 @@ It can be in any file of the project, but **only once** — there is no way to s
 configuration between two files, on purpose: whoever reads the project for the first time
 knows there is a single place to look.
 
-```lum
+```lux
 app:
     name      "My application"
     version   "1.0.0"
@@ -475,7 +475,7 @@ method         ::= "fn" type IDENT "(" [ params ] ")" ":" block
 
 ### Fields and validation
 
-```lum
+```lux
 class User:
     int     id
     string  name
@@ -502,7 +502,7 @@ is a compile error and never reaches production:
 
 ### Constructors
 
-```lum
+```lux
 class Point:
     int x
     int y
@@ -520,7 +520,7 @@ assigns its parameters to the fields of the same name in declaration order; fiel
 not appear among the parameters stay `null` (only valid if they are optional). With no
 constructor declared at all, the class gets an implicit one with every field, in order:
 
-```lum
+```lux
 class Box:
     string name
     int    width
@@ -533,7 +533,7 @@ Box b = Box("large", 3, 4)   # the implicit constructor
 
 ### Methods
 
-```lum
+```lux
 class Point:
     int x
     int y
@@ -573,7 +573,7 @@ params  ::= param { "," param }
 param   ::= type IDENT [ "=" expr ]
 ```
 
-```lum
+```lux
 fn int double(int x):
     return x * 2
 
@@ -597,14 +597,14 @@ Recursion works with a cap of 200 nested calls. Going over produces a language e
 process `stack overflow`, because the VM has its own stack (§40)— so a recursion bug with no
 base case stays a readable `500`, not a binary that crashes:
 
-```lum
+```lux
 fn int endless(int n):
     return endless(n + 1)
 ```
 
 An error inside a function can be caught where it is called:
 
-```lum
+```lux
 fn int breaks(int n):
     return n / 0
 
@@ -618,7 +618,7 @@ get endpoint("/catch/:n", int n):
 Declaring a function with the same name as a builtin (`len`, `str`, `render`...) is a compile
 error. Functions can also be called inside a `validate:` block:
 
-```lum
+```lux
 fn bool is_email(string s):
     return s.contains("@") and s.contains(".")
 
@@ -637,7 +637,7 @@ method     ::= "get" | "post" | "put" | "patch" | "delete" | "any" | "sse" | "ws
 modifier   ::= "origins" "(" STRING { "," STRING } ")"
 ```
 
-```lum
+```lux
 get    endpoint("/path"):
 post   endpoint("/path"):
 put    endpoint("/path"):
@@ -669,7 +669,7 @@ A route whose whole body is resolved at compile time —a single `return` of a c
 or of a native call with only literal arguments— becomes a **native action**: an entry in the
 route radix tree that does not run a single bytecode step.
 
-```lum
+```lux
 get endpoint("/"):
     return render("index.html")        # declarative: zero bytecode per request
 ```
@@ -691,7 +691,7 @@ Everything a handler needs is declared in its signature — there is no `request
 things out of by hand inside the body, except for what is genuinely outside the schema
 (`request.path`, `request.method`, `request.ip`, see §45).
 
-```lum
+```lux
 get endpoint("/users/:id", int id, int page = 1, string q):
     return { "id": id, "page": page, "q": q }
 ```
@@ -708,7 +708,7 @@ The *query string* takes priority if the same name appears in both places at onc
 case, but a deterministic one. This is what allows mixing files and text in the same form with
 nothing special in the signature:
 
-```lum
+```lux
 post endpoint("/avatar", File image, string title):
     require title != "" else status(422)
     string name = image.save("./uploads")
@@ -732,7 +732,7 @@ group_decl   ::= "group" "(" STRING ")" ":" INDENT { group_member } DEDENT
 group_member ::= require_stmt | route_decl | group_decl
 ```
 
-```lum
+```lux
 group("/api/v1"):
     require jwt.valid else status(401)
 
@@ -765,7 +765,7 @@ what `require` expresses.
 error_decl ::= "on" "error" [ INT ] ":" block
 ```
 
-```lum
+```lux
 on error 404:
     return render("404.html", path=request.path, method=request.method)
 
@@ -787,7 +787,7 @@ Inside the block the reserved object `error` exists (§45). In an `on error 422`
 `error.messages` carries the complete list of messages from a failed `validate:` —empty if the
 422 did not come from there:
 
-```lum
+```lux
 on error 422:
     return { "details": error.messages }
 ```
@@ -812,7 +812,7 @@ statement  ::= var_decl | assign_stmt | if_stmt | while_stmt | for_stmt
 var_decl ::= type IDENT [ "=" expr ] NEWLINE
 ```
 
-```lum
+```lux
 int    n = 5
 string name
 List<int> xs = [1, 2, 3]
@@ -828,7 +828,7 @@ assign_stmt ::= lvalue ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" ) expr NEWLINE
 lvalue      ::= IDENT { "." IDENT | "[" expr "]" }
 ```
 
-```lum
+```lux
 n = n + 1
 n += 1              # sugar for the above
 obj.field = 5
@@ -841,7 +841,7 @@ list[0] += 10       # the compound form works on an index too
 overload `+` (there is no operator overloading in Lux Script), so `+=` on a `string`
 concatenates and on a `List` it appends the elements of another list:
 
-```lum
+```lux
 string s = "hel"
 s += "lo"                 # "hello"
 
@@ -860,7 +860,7 @@ if_stmt ::= "if" expr ":" block
 `elif` and `else if` are interchangeable — the grammar accepts both forms on purpose, so as
 not to break code written by someone coming from a language with one convention or the other:
 
-```lum
+```lux
 get endpoint("/elif/:n", int n):
     if n < 0:
         return { "r": "negative" }
@@ -889,7 +889,7 @@ because there is no way to write it ambiguously.
 while_stmt ::= "while" expr ":" block
 ```
 
-```lum
+```lux
 int total = 0
 int k = 0
 while k < 5:
@@ -906,7 +906,7 @@ for_stmt ::= "for" type IDENT "in" expr ":" block
 It walks a `List<T>` by value, or the **keys** of a `Dict<K,V>` (the type declared in the
 `for` must match `K`, almost always `string`):
 
-```lum
+```lux
 List<int> xs = [1, 2, 3, 4, 5]
 int total = 0
 for int x in xs:
@@ -942,14 +942,14 @@ return type is `void`; inside a handler, a `return` with no value is equivalent 
 require_stmt ::= "require" expr "else" expr NEWLINE
 ```
 
-```lum
+```lux
 require image.content_type.starts_with("image/") else status(415)
 require image.size <= 5 * 1024 * 1024             else status(413)
 ```
 
 Exact sugar for:
 
-```lum
+```lux
 if not (image.content_type.starts_with("image/")):
     return status(415)
 ```
@@ -964,7 +964,7 @@ a function, not only at the start of a route or a group (§19).
 try_stmt ::= "try" ":" block "catch" [ IDENT ] ":" block
 ```
 
-```lum
+```lux
 get endpoint("/basic/:n", int n):
     try:
         int x = n / 0
@@ -989,7 +989,7 @@ compile time, not with a runtime handler stack, so:
 - A `return` cannot leave a handler "dangling" for later: as soon as execution leaves the
   `try`'s range —by whatever path— that `catch` stops being active.
 
-  ```lum
+  ```lux
   get endpoint("/no_leak/:n", int n):
       int acc = 0
       for int i in [1, 2]:
@@ -1004,7 +1004,7 @@ compile time, not with a runtime handler stack, so:
 
 - Nested, the innermost one wins:
 
-  ```lum
+  ```lux
   get endpoint("/nested"):
       try:
           try:
@@ -1017,7 +1017,7 @@ compile time, not with a runtime handler stack, so:
 
 - Execution can carry on after catching, without leaving the handler:
 
-  ```lum
+  ```lux
   get endpoint("/carries_on"):
       int total = 0
       for int d in [2, 0, 5]:
@@ -1034,7 +1034,7 @@ error` that applies (§20)— shaped as `{"error": message, "en": file:line:colu
 
 ## 29. `break` and `continue`
 
-```lum
+```lux
 for int x in [1, 2, 3, 4, 5]:
     if x == 3:
         break
@@ -1056,7 +1056,7 @@ unary   ::= [ "-" | "++" | "--" ] postfix
 postfix ::= primary { "." IDENT | "(" [ args ] ")" | "[" expr "]" | "++" | "--" }
 ```
 
-```lum
+```lux
 int i = 5
 int a = i++          # a = 5, i = 6   -- postfix: gives the value BEFORE incrementing
 int b = ++i          # b = 7, i = 7   -- prefix:  gives the value AFTER
@@ -1066,7 +1066,7 @@ int d = --i          # d = 5, i = 5
 
 On a field:
 
-```lum
+```lux
 class Box:
     int n
 
@@ -1079,7 +1079,7 @@ get endpoint("/field"):
 
 On a list index, chained with the `[ ]` itself:
 
-```lum
+```lux
 List<int> l = [10, 20, 30]
 int i = 0
 int first   = l[i++]        # first = 10, i becomes 1
@@ -1088,7 +1088,7 @@ int second  = l[i++]        # second = 20, i becomes 2
 
 As a bare statement, the value it produces is simply discarded:
 
-```lum
+```lux
 i++
 ++i
 i--
@@ -1096,7 +1096,7 @@ i--
 
 And inside a `while` condition, exactly as in C:
 
-```lum
+```lux
 int total = 0
 int k = 0
 while k < 5:
@@ -1155,14 +1155,14 @@ operators.
 
 ## 32. Ternary
 
-```lum
+```lux
 string role = is_admin ? "admin" : "user"
 ```
 
 Right-associative and the lowest precedence of all — it wraps practically any expression
 without needing parentheses around either branch:
 
-```lum
+```lux
 return rows == 0 ? status(404) : status(204)
 ```
 
@@ -1186,14 +1186,14 @@ See also §9 for the `if x:` trap with an optional value.
 `true` as in JavaScript, and not a compile error either — it simply compares an integer
 against a string and the result is that they are not equal.
 
-```lum
+```lux
 0 == "0"        # false, no error raised
 1 + "1"         # COMPILE ERROR: cannot add int and string
 ```
 
 To concatenate a number with text you have to convert it explicitly:
 
-```lum
+```lux
 "n = " + str(n)
 ```
 
@@ -1207,7 +1207,7 @@ lexicographic ordering of strings in the comparison operators.
 `string`s or two `List<T>` with the same element type. Any other combination is an error **at
 compile time**, not a silent implicit conversion and not a run-time `NaN`:
 
-```lum
+```lux
 1 + "1"             # compile error
 "a" - "b"           # compile error: '-' does not apply to string
 [1, 2] + [3]        # [1, 2, 3] — concatenation, valid
@@ -1215,7 +1215,7 @@ compile time**, not a silent implicit conversion and not a run-time `NaN`:
 
 ## 36. List and dictionary literals
 
-```lum
+```lux
 List<int> xs = [1, 2, 3]
 List<int> empty = []
 
@@ -1233,7 +1233,7 @@ the exact error the opposite produces.
 
 ## 37. Indexing
 
-```lum
+```lux
 List<int> l = [10, 20, 30]
 l[0] = 99                    # indexed assignment
 l[2] = l[1] + 5              # the right-hand side can read from the same container
@@ -1257,7 +1257,7 @@ known size and running off it is almost always a handler bug that is better off 
 loudly; a dictionary is often used as a sparse map where "the key is not there" is a normal
 business case, not a programming error.
 
-```lum
+```lux
 Dict<string,int> d = { "a": 1 }
 d["z"]          # null, not an error
 List<int> l = [1]
@@ -1271,7 +1271,7 @@ args ::= arg { "," arg }
 arg  ::= expr | IDENT "=" expr
 ```
 
-```lum
+```lux
 render("page.html", title="T", note="N")
 ```
 
@@ -1288,7 +1288,7 @@ postfix ::= primary { "." IDENT | "(" [ args ] ")" | "[" expr "]" | "++" | "--" 
 Everything that follows a value —field access, call, index, increment— chains in the same
 syntactic position, left to right, with no depth limit:
 
-```lum
+```lux
 orders[0].customer.address.city.upper()
 render("x.html").status(203).header("X-Cache", "miss")
 ```
@@ -1298,7 +1298,7 @@ that point — see Part VI.
 
 ## 40. `await` and async
 
-```lum
+```lux
 get endpoint("/slow/:ms", int ms):
     await sleep(ms)
     return { "waited": ms }
@@ -1316,7 +1316,7 @@ one of those is the same compile error as `await text("x")` below.
 
 Three rules checked **at compile time**, not in production:
 
-```lum
+```lux
 sleep(100)             # ERROR: 'sleep()' is asynchronous: you must write 'await sleep(...)'
 await text("x")        # ERROR: 'text()' is not asynchronous: the 'await' is unnecessary
 await 5                # ERROR: 'await' only applies to an asynchronous call
@@ -1345,7 +1345,7 @@ When the receiver's type is known at the call site —a parameter with a declare
 variable declared with a type, a literal— the method name and the argument count are checked
 **there**, not the first time that code runs:
 
-```lum
+```lux
 get endpoint("/a", string who):
     return { "r": who.mayusculas() }
 ```
@@ -1360,7 +1360,7 @@ The check continues **down the whole chain**, because every method knows what ty
 returns: `s.upper().recortar()` also fails at compile time, at the exact position of
 `.recortar()`. The same goes for a class's fields:
 
-```lum
+```lux
 class Point:
     int x
     int y
@@ -1399,7 +1399,7 @@ The complete table of available methods, by receiver type:
 The expected type on the left-hand side of an assignment **flows down** into the literal on
 the right:
 
-```lum
+```lux
 List<string> xs = []
 ```
 
@@ -1431,7 +1431,7 @@ object to fill in and carry around the function body.
 | `return status(code)` | The status code, no body |
 | `return` (no expression) | `204` |
 
-```lum
+```lux
 get endpoint("/download"):
     return send_file("/var/files/report.pdf")
 
@@ -1455,7 +1455,7 @@ redirect).
 
 Every form of `return` accepts chaining these three calls, in any order and any combination:
 
-```lum
+```lux
 return { "id": 1 }.status(201)
 return { "a": 1 }.header("X-Thing", "value")
 return { "n": 1 }.status(202).header("X-One", "1").header("X-Two", "2")
@@ -1489,7 +1489,7 @@ return { "ok": true }.cookie("theme", "dark",
 `session` is a store of free fields, not a class with a fixed shape — `session.<whatever>`
 accepts any name, and reading one that was never written gives `null`:
 
-```lum
+```lux
 post endpoint("/login", Login data):
     session.user = data.name
     session.role = data.name == "alice" ? "admin" : "user"
@@ -1514,7 +1514,7 @@ shared between different machines.
 `jwt.claims` and the result of a database query are `Json` values: they are read with `[ ]`,
 never with `.`, because a `Json` has no fixed fields the checker could verify:
 
-```lum
+```lux
 get endpoint("/me"):
     return { "sub": jwt.claims["sub"], "role": jwt.claims["role"] }
 ```
@@ -1527,7 +1527,7 @@ in `sqlite` and `mysql`, because postgres has no reliable equivalent and the mod
 instead of making one up. Every one of their methods is asynchronous: they are always called
 with `await` (§40).
 
-```lum
+```lux
 get endpoint("/articles/:id", int id):
     List<Json> rows = await sqlite.query(
         "select title from articles where id = ?", id)
@@ -1541,7 +1541,7 @@ engine error —a table that does not exist, a constraint violation— **does no
 handler**: it arrives as a `Json` value with the `error` key, so the handler decides what to
 do with it instead of the failure jumping straight to a generic `500`:
 
-```lum
+```lux
 get endpoint("/bad"):
     Json r = await sqlite.query("select * from table_that_does_not_exist")
     return r          # { "error": "no such table: table_that_does_not_exist" }
@@ -1553,7 +1553,7 @@ it wrong. The placeholder is `?` in all three engines: although postgres numbers
 internally (`$1`, `$2`...), the driver itself translates the query before sending it, so the
 same string works without changing a letter in `sqlite`, `mysql` and `postgres`:
 
-```lum
+```lux
 await sqlite.query(  "select title from articles where id = ?", id)
 await mysql.query(   "select title from articles where id = ?", id)
 await postgres.query("select title from articles where id = ?", id)
@@ -1569,7 +1569,7 @@ Transactions: `begin()` pins the pool connection for the rest of the request, an
 Lux issues a `ROLLBACK` on its own and warns on the console; without that, the next request
 reusing that pool connection would inherit a half-finished transaction that is not its own.
 
-```lum
+```lux
 post endpoint("/transfer"):
     await sqlite.begin()
     await sqlite.exec("update accounts set balance = balance - 30 where name = ?", "ana")
@@ -1598,7 +1598,7 @@ post endpoint("/transfer"):
 
 ## Login with a session and a role-protected area
 
-```lum
+```lux
 app:
     port      8090
     templates "./templates"
@@ -1662,7 +1662,7 @@ group("/api"):
 
 ## CRUD with transactions on sqlite
 
-```lum
+```lux
 import sqlite
 
 app:
@@ -1713,7 +1713,7 @@ on error:
 
 ## Real time: SSE and WebSocket over shared state
 
-```lum
+```lux
 app:
     port 8087
 

@@ -172,7 +172,7 @@ which already existed for session/JWT signing), stateless, no configuration. Add
 no change to `kNatives`, no change to `DbDriver`, and no change to anything `--native`-specific
 beyond "gracefully do not support it yet."
 
-```lum
+```lux
 import hash
 
 get endpoint("/hash/:s", string s):
@@ -195,7 +195,7 @@ it, `close` frees it. Twenty-two functions, still zero external dependencies, st
 mechanism change — see §5.2 for the pattern that made that true, filled in once there was a
 real module to draw it from rather than guess at it.
 
-```lum
+```lux
 import csv
 
 get endpoint("/report"):
@@ -213,7 +213,7 @@ external dependency (cairo's PDF surface — already liberally licensed and alre
 almost everywhere that does graphics work, so no new library had to be vetted). It surfaced a
 genuine bug in the `--native` build path that neither `hash` nor `csv` could have (§5.2).
 
-```lum
+```lux
 import pdf
 
 get endpoint("/invoice/:id"):
@@ -234,7 +234,7 @@ built on libcurl — proved the fourth case: a dependency that could not be a na
 there, skip the module" story, because it forces a real, deliberate exception to a stated
 project principle.
 
-```lum
+```lux
 import http
 
 get endpoint("/weather/:city", string city):

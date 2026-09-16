@@ -146,7 +146,7 @@ declared, and can live in another file.
 
 It can be in any file, but **only once**.
 
-```lum
+```lux
 app:
     name      "My application"
     version   "1.0.0"
@@ -179,7 +179,7 @@ the `.lux`.
 
 ## 4. Routes
 
-```lum
+```lux
 get    endpoint("/path"):
 post   endpoint("/path"):
 put    endpoint("/path"):
@@ -198,7 +198,7 @@ A route whose body is resolved entirely at compile time —a single `return` of 
 value or of a native call with literal arguments— becomes a **native action** and does not
 run a single bytecode step:
 
-```lum
+```lux
 get endpoint("/"):
     return render("index.html")        # declarative: zero bytecode
 ```
@@ -217,7 +217,7 @@ A route with group guards is **never** declarative: the native action would not 
 
 Everything the handler needs is declared in the signature.
 
-```lum
+```lux
 get endpoint("/users/:id", int id, int page = 1, string q):
     return { "id": id, "page": page, "q": q }
 ```
@@ -245,7 +245,7 @@ A value that does not fit its type is a **400**, not an exception:
 
 ## 6. Classes and validation
 
-```lum
+```lux
 class User:
     int     id
     string  name
@@ -260,7 +260,7 @@ class User:
 
 Used as a parameter, it binds to the body:
 
-```lum
+```lux
 post endpoint("/users", User u):
     # Here `u` is always valid.
     return { "created": u.name }
@@ -286,7 +286,7 @@ never reaches production:
 
 ### Constructors
 
-```lum
+```lux
 class Point:
     int x
     int y
@@ -303,7 +303,7 @@ field in declaration order is offered. Fields the constructor does not touch are
 
 ### Methods
 
-```lum
+```lux
 class Point:
     int x
     int y
@@ -318,7 +318,7 @@ class Point:
         return Point(this.x + dx, this.y + dy)
 ```
 
-```lum
+```lux
 Point p = Point(3, 4)
 p.squared()           # 25
 p.label("Q")          # "Q(3,4)"
@@ -343,7 +343,7 @@ work the same on both.
 
 Everything goes out through `return`. There is no `response` object to carry around.
 
-```lum
+```lux
 return { "key": "value" }                # 200, JSON
 return [1, 2, 3]                         # 200, JSON
 return render("page.html", k=v)          # HTML with Lux Script templates
@@ -359,7 +359,7 @@ A handler that returns nothing and writes no response produces **204**.
 
 ### Chaining
 
-```lum
+```lux
 return { "id": 1 }.status(201)
 return { "a": 1 }.header("X-Thing", "value")
 return render("x.html").status(203)
@@ -375,7 +375,7 @@ return { "ok": true }.cookie("theme", "dark",
 
 ## 8. Groups and guards
 
-```lum
+```lux
 group("/api/v1"):
     require jwt.valid else status(401)
 
@@ -403,7 +403,7 @@ Guards go **before** the routes inside the block.
 
 A cookie signed with HMAC-SHA256, Flask style. No server-side state.
 
-```lum
+```lux
 post endpoint("/login", Login data):
     session.user = data.name
     session.role = "admin"
@@ -433,7 +433,7 @@ field that does not exist is `null`.
 
 HS256, verified against the `Authorization: Bearer ...` header.
 
-```lum
+```lux
 group("/api"):
     require jwt.valid else status(401)
 
@@ -452,7 +452,7 @@ OpenSSL.
 
 ## 11. Async
 
-```lum
+```lux
 get endpoint("/slow/:ms", int ms):
     await sleep(ms)
     return { "waited": ms }
@@ -479,7 +479,7 @@ Available asynchronous builtins: `sleep(ms)` and `ws.recv()`.
 Three modules: `sqlite`, `postgres` and `mysql`. You import and configure them; they manage
 the connection.
 
-```lum
+```lux
 import postgres
 
 app:
@@ -511,7 +511,7 @@ passwords: it is resolved at compile time and does not stay written in the `.lux
 
 ### Querying
 
-```lum
+```lux
 get endpoint("/articles"):
     return await postgres.query("select id, title from articles order by id")
 
@@ -530,7 +530,7 @@ a preference: a blob is arbitrary bytes, and returning them as text left the res
 valid UTF-8, so the client receiving it failed rather than the request. In postgres a `bytea`
 arrives in libpq's hex form (`\x68656c6c6f`).
 
-```lum
+```lux
 post endpoint("/articles", Article a):
     int rows = await sqlite.exec(
         "insert into articles (title, views) values (?, ?)", a.title, a.views)
@@ -545,7 +545,7 @@ post endpoint("/articles", Article a):
 is asked for in the query itself, which is more reliable anyway because it does not depend on
 which connection served the insert.
 
-```lum
+```lux
 post endpoint("/articles", Article a):
     List<Json> rows = await postgres.query(
         "insert into articles (title, views) values (?, ?) returning id",
@@ -560,7 +560,7 @@ The placeholder is **`?` in all three engines**. Postgres numbers its own —`$1
 its driver takes care of that, so the same query works on sqlite, mysql and postgres without
 changing a letter:
 
-```lum
+```lux
 await sqlite.query(  "select title from articles where id = ?", id)
 await mysql.query(   "select title from articles where id = ?", id)
 await postgres.query("select title from articles where id = ?", id)
@@ -579,7 +579,7 @@ Mixing `?` and `$1` in the same query is an error, because the numbering would c
 
 ### Transactions
 
-```lum
+```lux
 post endpoint("/transfer"):
     await sqlite.begin()
     await sqlite.exec("update accounts set balance = balance - 30 where id = 1")
@@ -597,7 +597,7 @@ request to take that connection from the pool would inherit the state.
 
 An engine error does not blow up the handler: it arrives as a dictionary with `error`.
 
-```lum
+```lux
 get endpoint("/bad"):
     Json r = await sqlite.query("select * from does_not_exist")
     return r          # { "error": "no such table: does_not_exist" }
@@ -614,7 +614,7 @@ would make the whole efficiency argument collapse.
 
 ## 13. Server-Sent Events
 
-```lum
+```lux
 sse endpoint("/metrics/:every", int every):
     int tick = 0
     sse.send("snapshot", "{\"startup\":true}")
@@ -642,7 +642,7 @@ response to return.
 
 ## 14. WebSockets
 
-```lum
+```lux
 ws endpoint("/echo") origins("https://myapp.com", "http://localhost:5173"):
     int n = 0
     ws.send("welcome")
@@ -672,7 +672,7 @@ gets a `403`.
 
 ## 15. Shared state
 
-```lum
+```lux
 get endpoint("/visits"):
     return { "n": state.incr("visits") }
 
@@ -698,7 +698,7 @@ It lives in process memory: it is lost on restart, and is not shared between mac
 
 ## 16. File uploads
 
-```lum
+```lux
 post endpoint("/avatar", File image):
     require image.content_type.starts_with("image/") else status(415)
     require image.size <= 5 * 1024 * 1024             else status(413)
@@ -724,7 +724,7 @@ With `File` (not `List<File>`), a missing file is a `422`. With `List<File>`, an
 
 ## 17. Error handlers
 
-```lum
+```lux
 on error 404:
     return render("404.html", path=request.path, method=request.method)
 
@@ -739,7 +739,7 @@ on error:
 In an `on error 422`, `error.messages` carries the complete list of validation messages —
 empty if the 422 did not come from validating a body:
 
-```lum
+```lux
 on error 422:
     return { "details": error.messages }
 ```
@@ -754,7 +754,7 @@ The status code is preserved. If the handler writes nothing, the default body is
 
 ## 18. Functions
 
-```lum
+```lux
 fn int double(int x):
     return x * 2
 
@@ -775,7 +775,7 @@ parameter without a default cannot come after one that has one.
 A function without `return` returns `null`. An error inside it **can be caught by the
 caller**:
 
-```lum
+```lux
 fn int divide(int a, int b):
     return a / b
 
@@ -788,7 +788,7 @@ get endpoint("/x"):
 
 They can also be used inside a `validate:` block:
 
-```lum
+```lux
 class Signup:
     string email
 
@@ -803,7 +803,7 @@ Declaring a function with a builtin's name is a compile error.
 A bare function name, used where a value is expected instead of being called, is a
 reference to that function:
 
-```lum
+```lux
 fn int double_it(int x):
     return x * 2
 
@@ -840,7 +840,7 @@ and they disappear before the bytecode. There are no user-defined generic classe
 
 ### Enums
 
-```lum
+```lux
 enum Status:
     PENDING, ACTIVE, DONE
 
@@ -862,7 +862,7 @@ many there are. A typo in the member name is a compile error, listing the real o
 
 Three quotes, for SQL or HTML without fighting the line breaks:
 
-```lum
+```lux
 get endpoint("/posts"):
     return await sqlite.query("""
         select id, title
@@ -885,7 +885,7 @@ Python's rule.
 
 It is not coercion: there is no type conversion inside the operators.
 
-```lum
+```lux
 1 + "1"     # error
 0 == "0"    # false
 "n = " + str(n)     # this is how you concatenate a number
@@ -896,7 +896,7 @@ A trap inherited from Python: with an optional value, `if x:` does not tell "it 
 
 ### Statements
 
-```lum
+```lux
 int n = 5
 n = n + 1
 
@@ -954,7 +954,7 @@ same `==` the rest of the language uses. `else` is optional — with no match an
 Precedence, lowest to highest: `?:` · `or` · `and` · `not` · `==` `!=` · `<` `<=` `>` `>=` ·
 `+` `-` · `*` `/` `%` · unary `-` · `.` `()` `[]`.
 
-```lum
+```lux
 string role = age >= 18 ? "adult" : "minor"
 ```
 
@@ -1134,7 +1134,7 @@ so far. Every one but `http` is synchronous (no `await`) and usually needs no
   the pattern fresh on every call, no caching — fine for the microsecond-scale patterns most
   routes need, a real (not yet addressed) repeated cost for a complex one reused very often.
 
-```lum
+```lux
 import hash
 import csv
 import pdf
