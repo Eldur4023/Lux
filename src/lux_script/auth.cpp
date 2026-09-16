@@ -98,9 +98,14 @@ bool verify_jwt(const std::string& token, const std::string& secret,
         if (static_cast<long long>(it->second.as_float()) < now) return false;
     }
     if (!issuer.empty()) {
+        // When an issuer is configured, a token with no `iss` claim at all
+        // must be rejected exactly like one with the wrong issuer -- the
+        // previous check only looked at `iss` when the claim was PRESENT,
+        // so an issuer-less token (trivial to mint: just omit the field)
+        // walked straight through the whole issuer restriction.
         auto it = payload.as_dict().find("iss");
-        if (it != payload.as_dict().end() &&
-            (!it->second.is_str() || it->second.as_str() != issuer))
+        if (it == payload.as_dict().end() ||
+            !it->second.is_str() || it->second.as_str() != issuer)
             return false;
     }
 

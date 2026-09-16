@@ -944,9 +944,27 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             std::string final_name;
             int fd = -1;
             for (int attempt = 0; attempt < 6 && fd < 0; ++attempt) {
-                std::string candidate = (attempt == 0)
-                    ? base
-                    : stem + "-" + to_hex(crypto::random_bytes(4)) + ext;
+                std::string candidate;
+                if (attempt == 0) {
+                    candidate = base;
+                } else {
+                    // crypto::random_bytes() returns "" on failure
+                    // (/dev/urandom would not open, or a short read) --
+                    // to_hex("") is also "", which would make every
+                    // remaining retry build the exact same candidate as the
+                    // last one and fail deterministically on the same
+                    // collision instead of actually trying a fresh name.
+                    // Fail loudly here instead: silently degrading to a
+                    // name with no real entropy is the kind of "carry on
+                    // with a predictable value" crypto.hpp's own comment on
+                    // random_bytes() says never to do.
+                    std::string suffix = crypto::random_bytes(4);
+                    if (suffix.empty()) {
+                        error = "save(): could not get random bytes for '" + base + "'";
+                        return Value::null();
+                    }
+                    candidate = stem + "-" + to_hex(suffix) + ext;
+                }
                 fd = ::open((dir + candidate).c_str(),
                             O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
                 if (fd >= 0) { final_name = candidate; break; }

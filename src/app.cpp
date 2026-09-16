@@ -94,6 +94,30 @@ static std::string url_decode_path(const std::string& s) {
     return out;
 }
 
+// True if `candidate` lives inside `root` (root is a component-wise prefix
+// of candidate). Both must already be canonical/weakly-canonical paths.
+//
+// This is NOT std::mismatch(root.begin(), root.end(), candidate.begin()):
+// that three-iterator overload walks `root`'s length and advances
+// candidate's iterator in lockstep WITHOUT ever comparing it against
+// candidate.end() — the moment a resolved path has fewer components than
+// the serve root (a symlink inside the root pointing at a shallower
+// directory, e.g. "public/assets -> /opt/assets" under root
+// "/home/user/app/public"), it walks candidate's iterator straight past
+// end() and dereferences it, which is a real SEGV (confirmed with
+// AddressSanitizer), not just theoretical UB — in exactly the branch that
+// exists to reject that path with a 403. Advancing both iterators together
+// and stopping the instant either one runs out avoids that entirely.
+static bool path_is_within(const std::filesystem::path& root,
+                            const std::filesystem::path& candidate) {
+    auto r = root.begin(), rend = root.end();
+    auto c = candidate.begin(), cend = candidate.end();
+    for (; r != rend; ++r, ++c) {
+        if (c == cend || *c != *r) return false;
+    }
+    return true;
+}
+
 // Returns true and fills res if a static mount covers this path.
 // Sets ETag, Cache-Control, and honours If-None-Match for 304 responses.
 static bool try_serve_static(
@@ -136,13 +160,9 @@ static bool try_serve_static(
         // target file does not exist yet (needed for the 404 branch below).
         std::error_code ec;
         auto preliminary = fs::weakly_canonical(file);
-        {
-            auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
-                                          preliminary.begin());
-            if (ri != canonical_root.end()) {
-                res.status(403).json_text(R"({"error":"Forbidden"})");
-                return true;
-            }
+        if (!path_is_within(canonical_root, preliminary)) {
+            res.status(403).json_text(R"({"error":"Forbidden"})");
+            return true;
         }
 
         auto canonical_file = preliminary;
@@ -161,10 +181,7 @@ static bool try_serve_static(
                 // Re-check that the resolved path still lives inside canonical_root
                 // so a misconfigured/compromised dist directory cannot exfiltrate
                 // arbitrary files via the SPA fallback.
-                auto [ri3, fi3] = std::mismatch(canonical_root.begin(),
-                                                 canonical_root.end(),
-                                                 canonical_file.begin());
-                if (ri3 != canonical_root.end()) {
+                if (!path_is_within(canonical_root, canonical_file)) {
                     res.status(403).json_text(R"({"error":"Forbidden"})");
                     return true;
                 }
@@ -181,9 +198,7 @@ static bool try_serve_static(
                 res.status(404).json_text(R"({"error":"Not Found"})");
                 return true;
             }
-            auto [ri2, fi2] = std::mismatch(canonical_root.begin(), canonical_root.end(),
-                                             canonical_file.begin());
-            if (ri2 != canonical_root.end()) {
+            if (!path_is_within(canonical_root, canonical_file)) {
                 res.status(403).json_text(R"({"error":"Forbidden"})");
                 return true;
             }

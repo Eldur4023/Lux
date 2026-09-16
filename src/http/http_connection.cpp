@@ -218,9 +218,14 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->_conn_fd     = fd_;
 
     // TLS-aware writer for SSE / WebSocket / any path that needs direct socket
-    // I/O.  Captures `this` via shared_from_this so the fd stays valid
-    // for the lifetime of the lambda.  After close(), fd_ is
-    // -1, so calls degrade to write(-1) which returns EBADF cleanly.
+    // I/O.  Captures `this` via shared_from_this so the connection object
+    // stays alive for the lifetime of the lambda.  close() does NOT reset
+    // fd_ to -1 (only header_tfd_/timeout_tfd_/file_fd_ get that treatment;
+    // fd_ itself is closed and left as-is) -- what makes a write after
+    // close() safe is the explicit self->closed_ check right below, not the
+    // fd value. Without that check, writing to fd_ after ::close(fd_) has
+    // run would target whatever the kernel already reused that same
+    // descriptor number for on a busy server, not fail cleanly with EBADF.
     {
         auto self = shared_from_this();
         req_ptr->_raw_write = [self](const char* data, size_t len) -> ssize_t {

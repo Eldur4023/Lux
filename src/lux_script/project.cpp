@@ -632,6 +632,25 @@ struct ParamBind {
     std::shared_ptr<ClassInfo> cls;   // Body only
 };
 
+// std::stod() happily parses three spellings a route-param float must not
+// accept: "nan", "inf"/"-inf" (case-insensitively) and hexadecimal float
+// notation ("0x1p4") -- all three consume the whole string, so the
+// full-consumption check below does not catch them. No FINITE decimal
+// float can contain an 'x'/'X' (hex marker) or an 'n'/'N'/'i'/'I' (only
+// "nan"/"inf" do), so rejecting any of those six characters up front is
+// exact, not a heuristic. Shared with native_gen.cpp's
+// lux_route_coerce_float, which must reject the exact same inputs.
+bool looks_like_decimal_float(const std::string& text) {
+    for (unsigned char c : text) {
+        switch (c) {
+            case 'x': case 'X': case 'n': case 'N': case 'i': case 'I':
+                return false;
+            default: break;
+        }
+    }
+    return true;
+}
+
 // Converts the raw URL text to the declared type.  A malformed value is a 400:
 // the client sent it wrong, it is not a server failure.
 bool coerce(const std::string& text, const std::string& type, Value& out) {
@@ -652,6 +671,7 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
             return true;
         }
         if (type == "float" || type == "double") {
+            if (!looks_like_decimal_float(text)) return false;
             size_t pos = 0;
             double v = std::stod(text, &pos);
             if (pos != text.size()) return false;

@@ -2888,18 +2888,30 @@ std::string dict_runtime_prelude() {
 }
 
 std::string route_runtime_prelude() {
-    // Mismas tres reglas que coerce() en project.cpp, reproducidas a mano
-    // (ver el comentario de generate_native_route): std::stoll/std::stod
-    // aceptan basura al final ("12abc" -> 12) sin comprobar cuanto
-    // consumieron -- eso NO es un descuido de aqui, es replicar el mismo
-    // comportamiento del interprete bit a bit, para que --native nunca
-    // acepte (o rechace) un valor que bytecode habria tratado distinto.
+    // Mismas reglas que coerce() en project.cpp, reproducidas a mano (ver
+    // el comentario de generate_native_route): std::stoll/std::stod
+    // aceptan basura al final ("12abc" -> 12) o formas no decimales
+    // ("nan", "inf", "0x10") sin que baste con comprobar la excepcion --
+    // ambas rutas exigen que se consuma la cadena entera Y que el texto
+    // tenga pinta de numero decimal, para que --native nunca acepte (o
+    // rechace) un valor que bytecode habria tratado distinto.
     return
         "inline bool lux_route_coerce_int(const std::string& t, int64_t& out) {\n"
-        "    try { out = std::stoll(t); return true; } catch (...) { return false; }\n"
+        "    try {\n"
+        "        size_t pos = 0;\n"
+        "        out = std::stoll(t, &pos);\n"
+        "        return pos == t.size();\n"
+        "    } catch (...) { return false; }\n"
         "}\n"
         "inline bool lux_route_coerce_float(const std::string& t, double& out) {\n"
-        "    try { out = std::stod(t); return true; } catch (...) { return false; }\n"
+        "    for (unsigned char c : t) {\n"
+        "        if (c=='x'||c=='X'||c=='n'||c=='N'||c=='i'||c=='I') return false;\n"
+        "    }\n"
+        "    try {\n"
+        "        size_t pos = 0;\n"
+        "        out = std::stod(t, &pos);\n"
+        "        return pos == t.size();\n"
+        "    } catch (...) { return false; }\n"
         "}\n"
         "inline bool lux_route_coerce_bool(const std::string& t, bool& out) {\n"
         "    if (t == \"true\" || t == \"1\")  { out = true;  return true; }\n"

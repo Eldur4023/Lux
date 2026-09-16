@@ -87,6 +87,27 @@ public:
         };
         strip_crlf(key);
         strip_crlf(value);
+
+        // Content-Length is computed by build()/build_sse_headers() from the
+        // actual body/file size, and this framework never emits
+        // Transfer-Encoding (no chunked support) -- so both are always
+        // framing information, never content a handler legitimately states.
+        // Without this, `res.header("Content-Length", "0")` or
+        // `res.header("Transfer-Encoding", "chunked")` would put a second,
+        // handler-controlled value for one of these next to (or, for
+        // Content-Length, silently replacing) the framework's own, and a
+        // proxy in front of Lux that resolves the resulting ambiguity
+        // differently than the framework's own client does is exactly the
+        // setup a request-smuggling attack needs.
+        std::string lower = key;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        if (lower == "content-length" || lower == "transfer-encoding") {
+            std::cerr << "[lux] Response.header(\"" << key << "\", ...) ignored -- "
+                         "this header is controlled by the framework, not a handler\n";
+            return *this;
+        }
+
         state_->headers[std::move(key)] = std::move(value);
         return *this;
     }

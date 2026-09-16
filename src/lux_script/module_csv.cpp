@@ -103,11 +103,38 @@ std::vector<std::vector<std::string>> parse_csv_text(const std::string& text) {
     return rows;
 }
 
+// OWASP "CSV Injection": a cell whose text starts with '=', '+', '-', '@',
+// TAB, or CR is read as a formula by Excel/LibreOffice/Sheets the moment
+// someone opens the file, not as literal text -- a name field of
+// `=HYPERLINK("http://evil","click")` or one of the old Excel DDE payloads
+// (`=cmd|'/c calc'!A1`) runs the instant whoever opens the export looks at
+// that cell. csv.to_csv() exists specifically to hand user-controlled rows
+// back as a file people open in a spreadsheet app, so this is the module's
+// actual threat model, not an edge case worth skipping.
+bool looks_like_formula(const std::string& s) {
+    if (s.empty()) return false;
+    switch (s.front()) {
+        case '=': case '+': case '-': case '@': case '\t': case '\r':
+            return true;
+        default:
+            return false;
+    }
+}
+
 std::string csv_escape(const std::string& s) {
-    bool needs_quotes = s.find_first_of(",\"\n\r") != std::string::npos;
-    if (!needs_quotes) return s;
+    // Prefixing with a single quote is the standard mitigation (OWASP CSV
+    // Injection cheat sheet): every spreadsheet app treats a leading `'` as
+    // "force this cell to text" and never displays it, while RFC 4180
+    // itself assigns no meaning to one. round-tripping the output back
+    // through csv.parse() does surface that `'` (there is no way to hide a
+    // defused formula AND stay losslessly parseable), which is the accepted
+    // trade-off of this mitigation everywhere it is used.
+    const std::string field = looks_like_formula(s) ? "'" + s : s;
+
+    bool needs_quotes = field.find_first_of(",\"\n\r") != std::string::npos;
+    if (!needs_quotes) return field;
     std::string out = "\"";
-    for (char c : s) { if (c == '"') out += "\"\""; else out += c; }
+    for (char c : field) { if (c == '"') out += "\"\""; else out += c; }
     out += "\"";
     return out;
 }

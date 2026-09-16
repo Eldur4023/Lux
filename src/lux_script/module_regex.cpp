@@ -18,6 +18,13 @@
 // compilation cost this way. Not addressed here, the same "real but not
 // theoretical, not solved yet" honesty NATIVE-MODULES.md already gives
 // http.*'s blocking-thread limitation, not a gap unique to this module.
+//
+// The subject text passed to every function below is capped
+// (kMaxSubjectLength) before it ever reaches std::regex: libstdc++'s
+// backtracking engine recurses per character of the subject and reliably
+// overflows the calling thread's stack well within the 16 MB a request body
+// is otherwise allowed to be. See check_subject()'s comment for the
+// measurements behind the limit.
 #include <lux_script/builtin_module.hpp>
 
 #include <regex>
@@ -39,8 +46,40 @@ bool compile(const std::string& pattern, std::regex& out, std::string& error) {
     }
 }
 
+// libstdc++'s std::regex_search/regex_replace/etc. recurse into the C++
+// call stack once per character of the SUBJECT text (not the pattern) --
+// measured to SEGV a normal 8 MB thread stack around ~30 000 characters
+// even for a trivial pattern like `[a-z]+`, and far sooner (under 1 000)
+// once the pattern has a few nested capture groups. The subject is exactly
+// the side of every regex.* call that is realistically attacker-controlled
+// (a request body, a query param, a header); the pattern is
+// developer-authored, written into the .lux source. Capping the subject
+// here turns what was a guaranteed, unauthenticated, process-wide crash
+// into a normal 4xx-shaped error.
+//
+// This does not fully remove catastrophic backtracking hanging one
+// event-loop thread on a pathological pattern against a subject at or
+// under this cap -- closing that for good would mean leaving std::regex's
+// backtracking engine for a linear one (e.g. RE2), which is a bigger change
+// than this limit. Keep patterns reasonably flat (avoid nested quantified
+// groups) for anything that runs against untrusted input.
+constexpr size_t kMaxSubjectLength = 4096;
+
+bool check_subject(const std::string& text, const char* fn_name, std::string& error) {
+    if (text.size() > kMaxSubjectLength) {
+        error = std::string("regex.") + fn_name + "(): subject text is " +
+                std::to_string(text.size()) + " bytes, over the " +
+                std::to_string(kMaxSubjectLength) + "-byte limit -- std::regex "
+                "recurses over the subject and a long enough string can "
+                "overflow the thread stack";
+        return false;
+    }
+    return true;
+}
+
 Value fn_regex_test(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str() || !args[1].is_str()) { error = "regex.test() expects two strings"; return Value::null(); }
+    if (!check_subject(args[1].as_str(), "test", error)) return Value::null();
     std::regex re;
     if (!compile(args[0].as_str(), re, error)) return Value::null();
     return Value::boolean(std::regex_search(args[1].as_str(), re));
@@ -52,6 +91,7 @@ Value fn_regex_test(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // parameter) is the routine case, not exceptional.
 Value fn_regex_find(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str() || !args[1].is_str()) { error = "regex.find() expects two strings"; return Value::null(); }
+    if (!check_subject(args[1].as_str(), "find", error)) return Value::null();
     std::regex re;
     if (!compile(args[0].as_str(), re, error)) return Value::null();
     std::smatch m;
@@ -62,6 +102,7 @@ Value fn_regex_find(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
 Value fn_regex_find_all(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str() || !args[1].is_str()) { error = "regex.find_all() expects two strings"; return Value::null(); }
+    if (!check_subject(args[1].as_str(), "find_all", error)) return Value::null();
     std::regex re;
     if (!compile(args[0].as_str(), re, error)) return Value::null();
     const std::string& text = args[1].as_str();
@@ -79,6 +120,7 @@ Value fn_regex_find_all(NativeCtx&, std::vector<Value>& args, std::string& error
 // at all -- the same absence-is-null rule as find().
 Value fn_regex_groups(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str() || !args[1].is_str()) { error = "regex.groups() expects two strings"; return Value::null(); }
+    if (!check_subject(args[1].as_str(), "groups", error)) return Value::null();
     std::regex re;
     if (!compile(args[0].as_str(), re, error)) return Value::null();
     std::smatch m;
@@ -99,6 +141,7 @@ Value fn_regex_replace(NativeCtx&, std::vector<Value>& args, std::string& error)
     if (!args[0].is_str() || !args[1].is_str() || !args[2].is_str()) {
         error = "regex.replace() expects three strings"; return Value::null();
     }
+    if (!check_subject(args[1].as_str(), "replace", error)) return Value::null();
     std::regex re;
     if (!compile(args[0].as_str(), re, error)) return Value::null();
     return Value::str(std::regex_replace(args[1].as_str(), re, args[2].as_str()));
@@ -106,6 +149,7 @@ Value fn_regex_replace(NativeCtx&, std::vector<Value>& args, std::string& error)
 
 Value fn_regex_split(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str() || !args[1].is_str()) { error = "regex.split() expects two strings"; return Value::null(); }
+    if (!check_subject(args[1].as_str(), "split", error)) return Value::null();
     std::regex re;
     if (!compile(args[0].as_str(), re, error)) return Value::null();
     const std::string& text = args[1].as_str();
