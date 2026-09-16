@@ -1,0 +1,12 @@
+# A root static mount (static "/" -> "..."), the shape a SPA's dist folder
+# always uses. try_serve_static() (src/app.cpp) used to only ever match the
+# exact path "/": its segment-boundary check (`req.path[plen] != '/'`)
+# assumed the prefix never itself ends in '/', which is false for the root
+# mount ("/" is 1 character, so req.path[1] is never '/' for anything
+# longer than the root itself) -- every real file under the mount, even
+# index.html itself by name, fell through to 404.
+app:
+    name "static-check"
+    port 8089
+
+    static "/" -> "tests/cases/static_fixture" spa

@@ -431,6 +431,14 @@ check_range "start past EOF is 416"                "bytes=99999-100005" 416 "Con
 check_range "unparseable Range is ignored -- whole file" "not-a-range" 200 "" "0123456789"
 check_range "multi-range is ignored (unsupported) -- whole file" "bytes=0-9,20-29" 200 "" "0123456789"
 
+echo "== static mount at the root (static \"/\" -> ...) =="
+start_server "$HERE/cases/static.lux" || exit 1
+check "GET / serves index.html"            GET /              200 '<html>index</html>'
+check "a real file by its own name"        GET /index.html    200 '<html>index</html>'
+check "a real file in a subdirectory"      GET /css/style.css 200 'body{color:red}'
+check "another real file at the root"      GET /test.txt      200 'plain file'
+check "unknown path falls back to index.html (spa)" GET /whatever/nope 200 '<html>index</html>'
+
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"

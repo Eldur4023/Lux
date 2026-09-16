@@ -129,7 +129,19 @@ static bool try_serve_static(
     for (const auto& m : mounts) {
         if (req.path.rfind(m.prefix, 0) != 0) continue;
         const size_t plen = m.prefix.size();
-        if (req.path.size() > plen && req.path[plen] != '/') continue;
+        // A prefix ending in '/' (almost always the root mount, "/") already
+        // consumes the separator itself, so anything after it is fair game
+        // with no further check. A prefix WITHOUT a trailing '/' ("/static")
+        // still needs this: without it, "/static" would also match a sibling
+        // that merely starts with the same letters ("/staticky"), since
+        // rfind() above only checked the prefix, not a path-segment boundary.
+        // Missing the '/'-ending case entirely used to mean a root mount
+        // (`static "/" -> "./dist"`) only ever matched the exact path "/" --
+        // every other file under it, even ones that exist, fell straight
+        // through to 404, since m.prefix[1] never lines up with req.path[1]
+        // for any longer path.
+        if (m.prefix.back() != '/' &&
+            req.path.size() > plen && req.path[plen] != '/') continue;
 
         std::string rel = url_decode_path(req.path.substr(plen));
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
