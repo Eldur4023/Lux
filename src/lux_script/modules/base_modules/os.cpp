@@ -193,7 +193,7 @@ Value fn_os_make_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
 // ─── Process spawning ───────────────────────────────────────────────────────
 
-// Bounded the same way http.*'s remote-server call is (module_http.cpp):
+// Bounded the same way http.*'s remote-server call is (http.cpp):
 // there is no way to interrupt a blocking wait from outside once it starts,
 // so a hard ceiling has to exist before the child is even spawned. 15s
 // matches http's own timeout for the same reason -- neither is trying to
@@ -342,8 +342,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_os_module() {
-    return std::make_unique<OsModule>();
-}
+LUX_REGISTER_MODULE(OsModule)
 
 } // namespace lux_script

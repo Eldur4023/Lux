@@ -118,6 +118,46 @@ endif()
 
 target_compile_options(lux PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
+# ── Native modules: drop-in discovery ───────────────────────────────────────
+#
+# Anything under src/lux_script/modules/base_modules/ (the officially shipped
+# modules) or directly under src/lux_script/modules/ (a user's own, dropped
+# next to that folder) that ends in .cpp gets compiled into lux_script with
+# no other edit anywhere in the project -- see
+# src/lux_script/modules/README.md and builtin_module.hpp's
+# LUX_REGISTER_MODULE for the registration half of the mechanism this feeds.
+# CONFIGURE_DEPENDS asks CMake to re-run this glob whenever the directory's
+# contents might have changed, not only when CMakeLists.txt itself did --
+# without it, "drop a file in" would need a CMakeLists.txt touch (even a
+# no-op one) to be noticed, defeating the point.
+file(GLOB LUX_BASE_MODULE_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lux_script/modules/base_modules/*.cpp)
+file(GLOB LUX_USER_MODULE_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lux_script/modules/*.cpp)
+set(LUX_MODULE_SOURCES ${LUX_BASE_MODULE_SOURCES} ${LUX_USER_MODULE_SOURCES})
+
+# User-settable opt-out (`-DLUX_MODULE_EXCLUDE="path/a.cpp;path/b.cpp"`, paths
+# relative to the repo root) -- see src/lux_script/modules/README.md.  Kept
+# separate from the pdf/http exclusions appended below so setting it never
+# clobbers what THIS file needs excluded for its own reasons.
+set(LUX_MODULE_EXCLUDE "" CACHE STRING
+    "Semicolon-separated .cpp paths (relative to the repo root) to skip from the automatic module build")
+
+# pdf (cairo) and http (libcurl) cannot be compiled unconditionally -- the
+# #include alone fails on a system without that library's -dev package.
+# Pulled out of the glob result by name (not by skipping the whole
+# base_modules/ glob) so every OTHER official module keeps being picked up
+# automatically even though these two need special handling; each comes
+# back further down via target_sources(), gated on its own dependency
+# check succeeding, exactly as before this mechanism existed.
+set(_lux_module_exclude
+    ${LUX_MODULE_EXCLUDE}
+    "src/lux_script/modules/base_modules/pdf.cpp"
+    "src/lux_script/modules/base_modules/http.cpp")
+foreach(_excluded ${_lux_module_exclude})
+    list(REMOVE_ITEM LUX_MODULE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${_excluded})
+endforeach()
+
 # ── Lux Script: the language frontend ───────────────────────────────────────
 add_library(lux_script STATIC
     src/lux_script/token.cpp
@@ -133,21 +173,33 @@ add_library(lux_script STATIC
     src/lux_script/template.cpp
     src/lux_script/natives.cpp
     src/lux_script/builtin_module.cpp
-    src/lux_script/module_hash.cpp
-    src/lux_script/module_csv.cpp
-    src/lux_script/module_os.cpp
-    src/lux_script/module_math.cpp
-    src/lux_script/module_time.cpp
-    src/lux_script/module_regex.cpp
     src/lux_script/emitter.cpp
     src/lux_script/native_gen.cpp
     src/lux_script/native_build.cpp
     src/lux_script/vm.cpp
     src/lux_script/autotest.cpp
     src/lux_script/project.cpp
+    ${LUX_MODULE_SOURCES}
 )
 target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
+
+# Every module registers itself with a namespace-scope object that nothing
+# else in the project references by symbol (LUX_REGISTER_MODULE,
+# builtin_module.hpp) -- so the plain archive-member linking a STATIC
+# library gets by default would silently discard an unreferenced module's
+# .o file, registration and all, the moment nothing else in a binary calls
+# into it directly. lux_link_script() replaces a plain
+# `target_link_libraries(<target> PRIVATE lux_script)` wherever lux_script
+# is linked, wrapping it in `--whole-archive`/`--no-whole-archive` so every
+# member of THAT archive is kept regardless -- scoped to just this one
+# archive, not `lux` or libc, by the matching --no-whole-archive right after.
+function(lux_link_script target)
+    target_link_libraries(${target} PRIVATE
+        -Wl,--whole-archive
+        lux_script
+        -Wl,--no-whole-archive)
+endfunction()
 
 # --native (phase 4/5, routes): native_build.cpp invokes g++ as a subprocess
 # to compile the .cpp a route generates -- it needs to know, at runtime of the
@@ -218,13 +270,13 @@ if(LUX_PDF)
         pkg_check_modules(CAIRO QUIET cairo)
     endif()
     if(CAIRO_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/module_pdf.cpp)
+        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/pdf.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_PDF)
         target_include_directories(lux_script PRIVATE ${CAIRO_INCLUDE_DIRS})
         target_link_libraries(lux_script PRIVATE ${CAIRO_LIBRARIES})
         # native_build.cpp compiles each --native .so with a fresh g++
         # invocation that links the WHOLE liblux_script.a (see
-        # LUX_NATIVE_SCRIPT_LIB below) -- since module_pdf.cpp's object
+        # LUX_NATIVE_SCRIPT_LIB below) -- since pdf.cpp's object
         # file is in that archive and references cairo, that g++ invocation
         # needs cairo's link flags too, or loading ANY generated .so (not
         # just a route using `pdf`) fails with "undefined symbol:
@@ -251,12 +303,12 @@ if(LUX_HTTP)
         pkg_check_modules(LUX_CURL QUIET libcurl)
     endif()
     if(LUX_CURL_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/module_http.cpp)
+        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_HTTP)
         target_include_directories(lux_script PRIVATE ${LUX_CURL_INCLUDE_DIRS})
         target_link_libraries(lux_script PRIVATE ${LUX_CURL_LIBRARIES})
         # Same reason as LUX_NATIVE_CAIRO_LIBS just above: every --native
-        # .so links the whole liblux_script.a, so module_http.cpp's curl
+        # .so links the whole liblux_script.a, so http.cpp's curl
         # references need curl's link flags on EVERY --native build, not
         # only one that happens to use `http`.
         list(JOIN LUX_CURL_LDFLAGS " " LUX_CURL_LDFLAGS_STR)
@@ -272,7 +324,7 @@ target_compile_options(lux_script PRIVATE -Wall -Wextra)
 # The Lux binary.
 add_executable(lux-bin src/lux_script/main.cpp)
 set_target_properties(lux-bin PROPERTIES OUTPUT_NAME lux)
-target_link_libraries(lux-bin PRIVATE lux_script)
+lux_link_script(lux-bin)
 # --native (Fase 5, `await`): sin esto, el .so que dlopen() carga en tiempo
 # de ejecucion NO comparte los `inline thread_local` de task.hpp
 # (lux::detail::current_loop/current_token, que HttpConnection::dispatch()
@@ -287,10 +339,10 @@ target_link_options(lux-bin PRIVATE -rdynamic)
 
 # Frontend development tools.
 add_executable(dump_tokens src/lux_script/tools/dump_tokens.cpp)
-target_link_libraries(dump_tokens PRIVATE lux_script)
+lux_link_script(dump_tokens)
 
 add_executable(crypto_check src/lux_script/tools/crypto_check.cpp)
-target_link_libraries(crypto_check PRIVATE lux_script)
+lux_link_script(crypto_check)
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 # The suite is a script that drives the binary over the socket, the way it is
@@ -301,7 +353,7 @@ enable_testing()
 # Templates are tested separately and in process: compiling and rendering do not
 # go through the socket, so the regression script cannot reach them.
 add_executable(test_templates tests/templates.cpp)
-target_link_libraries(test_templates PRIVATE lux_script)
+lux_link_script(test_templates)
 add_test(NAME templates COMMAND test_templates)
 
 # --native phase 1: compares Emitter::check_expr/
@@ -309,32 +361,32 @@ add_test(NAME templates COMMAND test_templates)
 # here, not in tests/run_tests.sh, because it calls the library directly
 # instead of the binary: it is a test of an internal piece not wired up yet.
 add_executable(test_check_expr_shadow tests/check_expr_shadow.cpp)
-target_link_libraries(test_check_expr_shadow PRIVATE lux_script)
+lux_link_script(test_check_expr_shadow)
 add_test(NAME check_expr_shadow COMMAND test_check_expr_shadow)
 
 add_executable(test_check_stmt_shadow tests/check_stmt_shadow.cpp)
-target_link_libraries(test_check_stmt_shadow PRIVATE lux_script)
+lux_link_script(test_check_stmt_shadow)
 add_test(NAME check_stmt_shadow COMMAND test_check_stmt_shadow)
 
 # The other half of phase 1: not just that check_expr/check_stmt reproduce
 # the same diagnostics (above), but that the emitter consuming the IR
 # produces bytecode that BEHAVES the same when actually run on the VM.
 add_executable(test_emit_ir_shadow tests/emit_ir_shadow.cpp)
-target_link_libraries(test_emit_ir_shadow PRIVATE lux_script)
+lux_link_script(test_emit_ir_shadow)
 add_test(NAME emit_ir_shadow COMMAND test_emit_ir_shadow)
 
 # --native phase 2: generates real C++ from the IR, compiles it with the
 # system compiler (invokes `g++` as a subprocess) and compares its execution
 # against the VM -- the phase's acceptance criterion.
 add_executable(test_native_gen_shadow tests/native_gen_shadow.cpp)
-target_link_libraries(test_native_gen_shadow PRIVATE lux_script)
+lux_link_script(test_native_gen_shadow)
 add_test(NAME native_gen_shadow COMMAND test_native_gen_shadow)
 
 # The other half: compile_native() for real (invokes g++, dlopen, dlsym) and
 # dispatch inside the VM (VM::start with the native table wired up) give the
 # same result as bytecode -- see the comment in tests/native_build_shadow.cpp.
 add_executable(test_native_build_shadow tests/native_build_shadow.cpp)
-target_link_libraries(test_native_build_shadow PRIVATE lux_script)
+lux_link_script(test_native_build_shadow)
 add_test(NAME native_build_shadow COMMAND test_native_build_shadow)
 
 # User classes: generates the C++ for a class and its methods directly
@@ -342,7 +394,7 @@ add_test(NAME native_build_shadow COMMAND test_native_build_shadow)
 # a class-only program -- see the comment in tests/native_class_shadow.cpp)
 # and compares its execution against the VM.
 add_executable(test_native_class_shadow tests/native_class_shadow.cpp)
-target_link_libraries(test_native_class_shadow PRIVATE lux_script)
+lux_link_script(test_native_class_shadow)
 add_test(NAME native_class_shadow COMMAND test_native_class_shadow)
 
 # Phase 4: one HTTP route compiled to native, end to end, through the real
@@ -352,7 +404,7 @@ add_test(NAME native_class_shadow COMMAND test_native_class_shadow)
 # native_build.cpp already uses (see the comment on LUX_NATIVE_INCLUDE_DIR
 # on the lux_script target), so there is no need to repeat them here.
 add_executable(test_native_route_shadow tests/native_route_shadow.cpp)
-target_link_libraries(test_native_route_shadow PRIVATE lux_script)
+lux_link_script(test_native_route_shadow)
 # Same reason as lux-bin above, and the same kind of symptom found the same
 # way (by testing for real, not guessed beforehand): state.incr()/state.get()
 # (phase 5.9) resolve against SharedState::instance(), a function-local
@@ -366,6 +418,14 @@ add_test(NAME native_route_shadow COMMAND test_native_route_shadow)
 
 # The postgres placeholder translator is a pure function: it is tested without a
 # server by including the driver's .cpp, to test THE code and not a copy.
+#
+# Deliberately NOT lux_link_script() here: this test #includes db_postgres.cpp
+# directly (see placeholders.cpp), so its own translation unit already
+# defines make_postgres_driver() -- a plain link then correctly skips pulling
+# THAT archive member out of liblux_script.a a second time (nothing else in
+# this test needs it). --whole-archive would force it in regardless and
+# collide with the copy this test already carries, since this executable is
+# not exercising BuiltinModuleRegistry/module self-registration at all.
 if(LUX_POSTGRES AND PQ_INC AND PQ_LIB)
     add_executable(test_placeholders tests/placeholders.cpp)
     target_include_directories(test_placeholders PRIVATE ${PQ_INC})
@@ -421,11 +481,11 @@ set_tests_properties(http PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 # only that child, the campaign carries on.
 if(LUX_FUZZ)
     add_executable(fuzz_language fuzz/fuzz_language.cpp)
-    target_link_libraries(fuzz_language PRIVATE lux_script)
+    lux_link_script(fuzz_language)
 
     add_executable(fuzz_http fuzz/fuzz_http.cpp)
     target_include_directories(fuzz_http PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(fuzz_http PRIVATE lux_script)
+    lux_link_script(fuzz_http)
 endif()
 
 # ── Examples ──────────────────────────────────────────────────────────────────

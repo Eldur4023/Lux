@@ -336,7 +336,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     cmd << std::quoted(src_path.string()) << " -o " << std::quoted(so_path.string());
     cmd << " " << std::quoted(std::string(LUX_NATIVE_SCRIPT_LIB));
 #ifdef LUX_NATIVE_CAIRO_LIBS
-    // liblux_script.a carries module_pdf.cpp's object file unconditionally
+    // liblux_script.a carries pdf.cpp's object file unconditionally
     // (it is part of the archive regardless of which .lux is being compiled
     // right now), so cairo's own link flags are needed on EVERY --native
     // build, not only one that happens to use `pdf` -- see the comment next
@@ -346,7 +346,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     cmd << " " << LUX_NATIVE_CAIRO_LIBS;
 #endif
 #ifdef LUX_NATIVE_CURL_LIBS
-    // Same reasoning, same fix, for module_http.cpp/libcurl.
+    // Same reasoning, same fix, for http.cpp/libcurl.
     cmd << " " << LUX_NATIVE_CURL_LIBS;
 #endif
     // liblux.a: SOLO si hay rutas -- una funcion suelta nunca usa

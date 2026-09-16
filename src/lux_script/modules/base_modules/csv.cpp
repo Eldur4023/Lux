@@ -469,8 +469,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_csv_module() {
-    return std::make_unique<CsvModule>();
-}
+LUX_REGISTER_MODULE(CsvModule)
 
 } // namespace lux_script

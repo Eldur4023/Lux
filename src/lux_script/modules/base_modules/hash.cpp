@@ -65,8 +65,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_hash_module() {
-    return std::make_unique<HashModule>();
-}
+LUX_REGISTER_MODULE(HashModule)
 
 } // namespace lux_script

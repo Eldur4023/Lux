@@ -272,8 +272,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_http_module() {
-    return std::make_unique<HttpModule>();
-}
+LUX_REGISTER_MODULE(HttpModule)
 
 } // namespace lux_script

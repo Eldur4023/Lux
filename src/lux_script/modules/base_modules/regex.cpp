@@ -178,8 +178,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_regex_module() {
-    return std::make_unique<RegexModule>();
-}
+LUX_REGISTER_MODULE(RegexModule)
 
 } // namespace lux_script

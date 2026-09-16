@@ -500,7 +500,7 @@ lux::Task<Value> run_db(const VM::Result& r, int op, lux::Request& req,
 // hand `ctx` to the pool thread here even though it carries live
 // lux::Request&/Response& references: control has fully passed to the
 // worker until it posts back, and every is_async function today (verified:
-// grepped for `ctx.` in module_os.cpp/module_http.cpp -- zero hits) ignores
+// grepped for `ctx.` in os.cpp/http.cpp -- zero hits) ignores
 // ctx entirely, taking it only for NativeFn's uniform signature. A future
 // is_async function that DID read/write req/res from here would still be
 // memory-safe under that same contract, just worth calling out since

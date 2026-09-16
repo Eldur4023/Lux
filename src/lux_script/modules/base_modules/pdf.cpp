@@ -3,7 +3,7 @@
 // already widely deployed, and already installed on most systems that do any
 // graphics work -- no new dependency to vet, just one already trustworthy.
 //
-// Stateful, like `csv` (module_csv.cpp) -- `create()` hands back an opaque
+// Stateful, like `csv` (csv.cpp) -- `create()` hands back an opaque
 // `int` handle wrapping a cairo_t*/cairo_surface_t* pair kept in this
 // module's own mutex-protected table, freed by `close()`. See that file's
 // header comment for why this needed no change to BuiltinModule itself.
@@ -240,8 +240,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_pdf_module() {
-    return std::make_unique<PdfModule>();
-}
+LUX_REGISTER_MODULE(PdfModule)
 
 } // namespace lux_script

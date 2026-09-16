@@ -388,13 +388,15 @@ somebody has to remember to write.
 
 Writing a module is just C++, nothing else. It's a name (`sha256`) mapped to a plain function with a fixed signature, grouped under a class that says "I'm called `hash`" — the exact same calling convention every other builtin already uses, just namespaced behind an `import`.
 
-Roughly:
+It's a drop-in: write the file, and that's the whole thing.
 
-1. Write the functions in a new `src/lux_script/module_whatever.cpp` — `module_hash.cpp` is
-   the simplest one to copy from.
-2. Register it with one line in `builtin_module.cpp`.
-3. Add the file to `CMakeLists.txt`.
-4. Write a test, rebuild, and actually check the compiler rejects what it should: a missing
+1. Write the functions in a new `.cpp` inside `src/lux_script/modules/` — a sibling of
+   `base_modules/`, where the officially shipped ones (`hash.cpp` is the simplest to copy
+   from) live. Name the file after the module — `qrcode.cpp` for `import qrcode`.
+2. End it with one line, `LUX_REGISTER_MODULE(YourClassName)`. That's the registration —
+   no other file changes, nothing to add to a list anywhere.
+3. Reconfigure (`cmake -S . -B build`) and rebuild. The file is picked up automatically.
+4. Write a test, and actually check the compiler rejects what it should: a missing
    `import`, the wrong number of arguments, an `await` where there shouldn't be one.
 
 No dynamic loading, no ABI to keep stable, no plugin system — the module gets compiled
@@ -403,9 +405,9 @@ survives between calls, like `csv`'s tables? Hand back a plain `int` handle and 
 real object in a table inside your module's own file — a convention, not something the
 compiler needs to know about.
 
-The full walkthrough is in [NATIVE-MODULES.md](NATIVE-MODULES.md).
-
-(I'll try to make this process simpler and more "shareable" in the future)
+The full walkthrough — including what changes if the module needs a third-party library,
+which is the one case that still needs a few lines of `CMakeLists.txt` by hand — is in
+[NATIVE-MODULES.md](NATIVE-MODULES.md) and [src/lux_script/modules/README.md](src/lux_script/modules/README.md).
 
 ---
 

@@ -60,7 +60,7 @@ Value fn_time_format_iso(NativeCtx& ctx, std::vector<Value>& args, std::string& 
 
 // Absence (a string that does not match `fmt`) is null, not an error: the
 // same "the caller decides what a failed lookup means" convention
-// module_os.cpp already uses for a missing file -- a timestamp parsed from
+// os.cpp already uses for a missing file -- a timestamp parsed from
 // untrusted input (a query parameter, a header) failing to parse is a
 // routine, expected outcome a route should be able to check for, not a
 // 500 the caller cannot react to.
@@ -104,8 +104,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_time_module() {
-    return std::make_unique<TimeModule>();
-}
+LUX_REGISTER_MODULE(TimeModule)
 
 } // namespace lux_script

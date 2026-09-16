@@ -86,18 +86,34 @@ machinery stay almost untouched — a module function is dispatched exactly like
 
 ### 3.2 The registry
 
-`BuiltinModuleRegistry` (`builtin_module.hpp`/`.cpp`) mirrors `DbRegistry` deliberately:
+`BuiltinModuleRegistry` (`builtin_module.hpp`/`.cpp`) mirrors `DbRegistry` in shape (`has(name)`
+/ `available()` back the same "not compiled into this binary; available: ..." error in
+`project.cpp`; `activate()` just runs `configure()` once, with the `app:` block if there is one
+— unlike a DB module, a native module's `app:` block is **optional**, since most need no
+configuration at all), but differs in one deliberate way: **it does not list its modules by
+hand.**
 
-- Its constructor lists every compiled-in module with a plain factory call
-  (`make_hash_module()`), `#ifdef`-gated for any module that carries an external dependency —
-  exactly `DbRegistry::DbRegistry()`'s pattern. `hash` carries none, so it is unconditional; a
-  future module with one would add a cmake `option()` the same way `LUX_SQLITE` etc. do
-  (`CMakeLists.txt`).
-- `has(name)` / `available()` — same shape as `DbRegistry`, used for the same "not compiled
-  into this binary; available: ..." error (`project.cpp`).
-- No `DbPool`, no per-connection anything: `activate()` just runs `configure()` once (with the
-  `app:` block if there is one, an empty map if there is none — unlike a DB module, a native
-  module's `app:` block is **optional**, since most need no configuration at all).
+A module registers itself: its `.cpp` ends with `LUX_REGISTER_MODULE(ItsClassName)`, a macro
+(`builtin_module.hpp`) that defines a namespace-scope object whose constructor — run before
+`main()`, like every namespace-scope object's — pushes a factory closure into a Meyer's-
+singleton list (`detail::module_factories()`). `BuiltinModuleRegistry`'s constructor just walks
+that list, calls each factory, and reads the resulting module's own `name()` to key it in
+`slots_` — so there is no second string (an old `slots_["hash"] = ...` literal) that could drift
+from what the class itself reports. §5 covers what this means in practice: adding a
+dependency-free module needs zero edits to this file, or to `CMakeLists.txt`.
+
+The one thing this trades away is automatic for free: `lux_script` is a plain `STATIC` library
+(an `ar` archive), and archives link member-by-member — the linker keeps an object file only if
+something already-included already references one of its symbols. A module whose only
+externally-visible effect is `LUX_REGISTER_MODULE`'s namespace-scope object (true of every
+module, by design: the class itself lives in an anonymous namespace) is exactly the kind of
+"nothing references it" member a plain link would silently drop, registration and all.
+`CMakeLists.txt`'s `lux_link_script()` function is the fix: it wraps `lux_script` in
+`-Wl,--whole-archive`/`-Wl,--no-whole-archive` wherever it is linked, which keeps every member
+of *that* archive regardless of whether anything already references it. Every target that links
+`lux_script` uses it, with one documented exception (`test_placeholders` — see the comment next
+to it in `CMakeLists.txt`, it `#include`s a driver `.cpp` directly and would collide with its own
+copy under `--whole-archive`).
 
 It also builds a flat table, once, concatenating every registered module's `functions()` in
 registration order — `id_of("hash", "sha256")` resolves a `(module, function)` pair to a single
@@ -166,7 +182,7 @@ than optimizing before there was anything to measure.
 
 ## 4. Three modules, three points proven
 
-**`hash`** (`src/lux_script/module_hash.cpp`) is deliberately the *smallest* module that could
+**`hash`** (`src/lux_script/modules/base_modules/hash.cpp`) is deliberately the *smallest* module that could
 exercise the mechanism: zero external dependencies (three thin wrappers over `crypto.hpp`,
 which already existed for session/JWT signing), stateless, no configuration. Adding it required
 no change to `kNatives`, no change to `DbDriver`, and no change to anything `--native`-specific
@@ -187,7 +203,7 @@ $ curl localhost:8080/hash/hello
 Matches Python's `hashlib.sha256(b"hello").hexdigest()` byte for byte — checked directly, not
 assumed.
 
-**`csv`** (`src/lux_script/module_csv.cpp`) proved the harder case §5.2 originally left open:
+**`csv`** (`src/lux_script/modules/base_modules/csv.cpp`) proved the harder case §5.2 originally left open:
 *state*. It parses CSV text into an internal table and hands back an opaque `int` handle instead
 of the data itself — `filter_eq`/`filter_gt`/`sort_by`/`select`/`slice` each take a handle and
 return a *new* one, `rows`/`get`/`sum`/`mean`/`group_sum`/`to_csv` read one without consuming
@@ -208,7 +224,7 @@ Pandas-*shaped*, deliberately not pandas-*equivalent*: Lux Script has no functio
 there is no `df[df.age > 18]` — `filter_gt(h, "age", 18)` is the honest equivalent a language
 without closures can actually offer (§5.2 argues this is a fair trade, not a shortfall).
 
-**`pdf`** (`src/lux_script/module_pdf.cpp`) proved the third case: a module with a real
+**`pdf`** (`src/lux_script/modules/base_modules/pdf.cpp`) proved the third case: a module with a real
 external dependency (cairo's PDF surface — already liberally licensed and already installed
 almost everywhere that does graphics work, so no new library had to be vetted). It surfaced a
 genuine bug in the `--native` build path that neither `hash` nor `csv` could have (§5.2).
@@ -229,7 +245,7 @@ version 1.7", `pdfinfo` reports the right page count and page size, `pdftotext` 
 exact text placed on each page, and `pdftoppm` rasterizes it to confirm the shapes and colors
 land where they were drawn, not just that *something* got written.
 
-**`http`** (`src/lux_script/module_http.cpp`) — outbound `GET`/`POST`/`PUT`/`PATCH`/`DELETE`,
+**`http`** (`src/lux_script/modules/base_modules/http.cpp`) — outbound `GET`/`POST`/`PUT`/`PATCH`/`DELETE`,
 built on libcurl — proved the fourth case: a dependency that could not be a narrow "if it's not
 there, skip the module" story, because it forces a real, deliberate exception to a stated
 project principle.
@@ -275,7 +291,7 @@ build gives the same "not compiled into this binary" error any other absent modu
 `tests/run_http.sh`'s ctest entry skips with `SKIP_RETURN_CODE 77`, verified by actually forcing
 that path, not assumed). The module's actual HTTP behavior was still verified for real, not
 skipped: real curl 8.5.0 headers (matching the system's installed runtime `.so`) were fetched
-straight from curl's own source repository, `module_http.cpp` was compiled and linked against
+straight from curl's own source repository, `http.cpp` was compiled and linked against
 them and the system's `libcurl.so.4` directly (bypassing only the missing `-dev` symlink, not
 curl itself), and the resulting real binary was run against a local echo server
 (`tests/http_echo_server.py`) — the exact compiled code this file describes, not a
@@ -289,44 +305,53 @@ there.
 
 Say the next module is `qrcode` (`qrcode.generate(text) -> string`, no third-party dependency —
 follow §5.1 as written; it is deliberately parallel to how `hash` was actually added). If it
-instead needs an external library (like `pdf`'s cairo dependency), the only difference is §5.1
-step 1 and the cmake option in step 6 — everything else is identical, and §5.2 spells that
-difference out, now with a real example (`pdf`) instead of a hypothetical one.
+instead needs an external library (like `pdf`'s cairo dependency), §5.1 covers where that
+changes things, and §5.2 spells the difference out with a real example (`pdf`) instead of a
+hypothetical one.
 
 ### 5.1 Steps
 
-1. **Write the module.** A new file, `src/lux_script/module_qrcode.cpp`, following
-   `module_hash.cpp`'s shape: free functions matching `NativeFn`'s signature
-   (`Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string& error)`), a
-   class implementing `BuiltinModule`, a factory function (`make_qrcode_module()`) the registry
-   calls. `NativeCtx&` can be ignored if the module needs no request/response/session access,
-   the way `hash`'s and `csv`'s functions do — accept it, do not use it. If the module needs to
-   carry state across calls (`csv`'s tables, `pdf`'s documents), see §5.2 for the pattern that
-   answers that — it is not a core-mechanism change, just a convention inside the module's own
-   file.
-2. **Register it.** `builtin_module.cpp`'s `BuiltinModuleRegistry::BuiltinModuleRegistry()`:
-   declare the factory (`std::unique_ptr<BuiltinModule> make_qrcode_module();`) and add
-   `{ Slot s; s.module = make_qrcode_module(); slots_["qrcode"] = std::move(s); }` — one line,
-   same pattern as `hash`'s and `csv`'s.
-3. **Add it to the build.** `CMakeLists.txt`, `lux_script`'s `add_library` sources:
-   `src/lux_script/module_qrcode.cpp`.
-4. **Write the corpus test.** `tests/cases/modules.lux` (or a new file with its own `run_*.sh`,
+1. **Write the module.** A new file, `src/lux_script/modules/qrcode.cpp` (a *user's* module
+   would instead go in `src/lux_script/modules/` itself, one level up — see
+   `src/lux_script/modules/README.md`; this walkthrough is adding an official one, so it goes
+   in `base_modules/`), following `hash.cpp`'s shape: free functions matching `NativeFn`'s
+   signature (`Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string&
+   error)`), a class implementing `BuiltinModule`, and `LUX_REGISTER_MODULE(QrcodeModule)` as
+   the file's last line. `NativeCtx&` can be ignored if the module needs no
+   request/response/session access, the way `hash`'s and `csv`'s functions do — accept it, do
+   not use it. If the module needs to carry state across calls (`csv`'s tables, `pdf`'s
+   documents), see §5.2 for the pattern that answers that — it is not a core-mechanism change,
+   just a convention inside the module's own file.
+2. **That's it for the build.** No second step here on purpose: `CMakeLists.txt` globs
+   `src/lux_script/modules/base_modules/*.cpp` (and `src/lux_script/modules/*.cpp` for a user's
+   own) and compiles whatever it finds, and `LUX_REGISTER_MODULE` is what makes the resulting
+   object file register itself with `BuiltinModuleRegistry` at startup with no
+   `builtin_module.cpp` edit needed — see §3.2 for the mechanism behind both halves of that.
+   Reconfigure (`cmake -S . -B build`) if the new file does not seem to get picked up — a plain
+   incremental `cmake --build` does not always notice a brand new source on its own, but the
+   glob is `CONFIGURE_DEPENDS`, so the next full configure always will.
+3. **Write the corpus test.** `tests/cases/modules.lux` (or a new file with its own `run_*.sh`,
    if the module carries an optional external dependency the way `pdf`'s does — see §7) plus a
    `check` block in `tests/run_tests.sh`.
-5. **Rebuild and check the error paths, not just the happy path**, before trusting it:
+4. **Rebuild and check the error paths, not just the happy path**, before trusting it:
    - `import qrcode` missing → `"missing 'import qrcode' in order to use 'qrcode.generate'"`.
    - Wrong arity → `"'qrcode.generate()' takes at most N argument(s)"`.
    - `await qrcode.generate(...)` → `"is not asynchronous"`.
    - `lux app.lux --native --check` → reports the route `-> bytecode`, not a compile error
      and not a crash. This is the one step it is easy to skip — and, if the module carries a
      third-party dependency, the one step that actually caught a real bug: see §5.2.
-6. **That's it for a dependency-free module.** For one that needs a third-party library —
-   `pdf`'s cairo is the real, worked example, not a hypothetical one — add a cmake `option()`
-   the way `LUX_SQLITE`/`LUX_PDF` do (`CMakeLists.txt`), locate the library
-   (`pkg_check_modules`/`find_path`+`find_library`), `#ifdef` the factory declaration and the
-   registration line in `builtin_module.cpp` on that option (mirroring exactly how `db.cpp`'s
-   `DbRegistry` constructor gates `make_postgres_driver()`) — and then read §5.2 before calling
-   it done, because linking the library into `lux_script` is not the only place it is needed.
+5. **A module that needs a third-party library** — `pdf`'s cairo is the real, worked example,
+   not a hypothetical one — still needs a few lines by hand in `CMakeLists.txt`, because CMake
+   cannot know a `pkg-config`/`find_library` check is needed just from a `.cpp` file existing:
+   add a cmake `option()` the way `LUX_SQLITE`/`LUX_PDF` do, locate the library
+   (`pkg_check_modules`/`find_path`+`find_library`), add the module's path to
+   `LUX_MODULE_EXCLUDE`'s built-in list right above the module glob (so the *unconditional*
+   automatic build does not try to compile it — mirroring `pdf.cpp`/`http.cpp` there) and
+   `target_sources(lux_script PRIVATE ...)` it back in only inside the `if()` branch where the
+   dependency was actually found. `LUX_REGISTER_MODULE` inside the file itself needs no
+   `#ifdef` — it only ever runs if the file was compiled at all, which is exactly what that
+   `if()` branch now controls. Read §5.2 before calling it done regardless, because linking the
+   library into `lux_script` is not the only place it is needed.
 
 ### 5.2 What was actually harder: state, and a third-party dependency
 
@@ -339,7 +364,7 @@ native type would mean touching the core type system for every module, defeating
 *general* mechanism). The pattern that worked, in both: an **opaque handle** — a plain `int` the
 module hands back from its "create" function and expects as the first argument to every later
 call — with the real C++ object kept in a mutex-protected table *inside that module's own file*
-(`module_csv.cpp`'s `HandleTable`, `std::unordered_map<int, CsvTable>`; `module_pdf.cpp`'s,
+(`csv.cpp`'s `HandleTable`, `std::unordered_map<int, CsvTable>`; `pdf.cpp`'s,
 `std::unordered_map<int, std::unique_ptr<PdfDoc>>`). The mutex matters and is not optional: a
 module's state outlives any single request and every event-loop thread can reach it (GUIDE.md
 §22, "N threads: event loop + its own VM") — `SharedState` (`state.*`, `natives.hpp`) already
@@ -359,7 +384,7 @@ plausible, not yet built, flagged here rather than assumed to be fine.
 **A third-party dependency — the thing `hash` and `csv` could not have caught, because neither
 carries one.** `liblux_script.a` is linked as a whole archive into every `--native`-generated
 `.so` (`native_build.cpp`) — not just into routes that use a particular module. The moment
-`module_pdf.cpp`'s object file (referencing cairo) became part of that archive, loading *any*
+`pdf.cpp`'s object file (referencing cairo) became part of that archive, loading *any*
 `--native`-compiled `.so` — including one for a route with nothing to do with `pdf` — started
 failing with `undefined symbol: cairo_pdf_surface_create_for_stream`. Caught immediately by the
 existing `native_route_shadow` test suite, not discovered later: adding `LUX_PDF` regressed a

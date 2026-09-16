@@ -2,37 +2,36 @@
 
 namespace lux_script {
 
-// Every compiled-in module is declared here, the same way DbRegistry (db.cpp)
-// declares sqlite/postgres/mysql -- a plain factory call, `#ifdef`-gated for
-// any module that carries an external dependency (hash carries none, so it
-// is unconditional; see NATIVE-MODULES.md for a module that would need a
-// cmake option).
-std::unique_ptr<BuiltinModule> make_hash_module();
-std::unique_ptr<BuiltinModule> make_csv_module();
-std::unique_ptr<BuiltinModule> make_os_module();
-std::unique_ptr<BuiltinModule> make_math_module();
-std::unique_ptr<BuiltinModule> make_time_module();
-std::unique_ptr<BuiltinModule> make_regex_module();
-#ifdef LUX_PDF
-std::unique_ptr<BuiltinModule> make_pdf_module();
-#endif
-#ifdef LUX_HTTP
-std::unique_ptr<BuiltinModule> make_http_module();
-#endif
+namespace detail {
 
+std::vector<ModuleFactory>& module_factories() {
+    // Meyer's singleton -- see builtin_module.hpp's comment on
+    // LUX_REGISTER_MODULE for why this has to be a function-local static
+    // and not a namespace-scope std::vector.
+    static std::vector<ModuleFactory> factories;
+    return factories;
+}
+
+} // namespace detail
+
+// Every module that ended its .cpp with LUX_REGISTER_MODULE (base_modules/
+// for the officially-shipped ones, or a user's own .cpp dropped next to
+// that folder -- see NATIVE-MODULES.md) already pushed its factory into
+// detail::module_factories() by the time this constructor runs: that list
+// is what used to be a hand-written sequence of
+// `{ Slot s; s.module = make_x_module(); slots_["x"] = std::move(s); }`
+// lines here, one per module, each requiring an edit to THIS file. A
+// module's own name() is what keys it in `slots_` -- the single source of
+// truth `import` resolves against, never a second string (like the old
+// `slots_["x"]` literal) that could silently drift from the class's own
+// name() if one changed and the other did not.
 BuiltinModuleRegistry::BuiltinModuleRegistry() {
-    { Slot s; s.module = make_hash_module(); slots_["hash"] = std::move(s); }
-    { Slot s; s.module = make_csv_module();  slots_["csv"]  = std::move(s); }
-    { Slot s; s.module = make_os_module();   slots_["os"]   = std::move(s); }
-    { Slot s; s.module = make_math_module(); slots_["math"] = std::move(s); }
-    { Slot s; s.module = make_time_module(); slots_["time"] = std::move(s); }
-    { Slot s; s.module = make_regex_module(); slots_["regex"] = std::move(s); }
-#ifdef LUX_PDF
-    { Slot s; s.module = make_pdf_module();  slots_["pdf"]  = std::move(s); }
-#endif
-#ifdef LUX_HTTP
-    { Slot s; s.module = make_http_module(); slots_["http"] = std::move(s); }
-#endif
+    for (detail::ModuleFactory factory : detail::module_factories()) {
+        Slot s;
+        s.module = factory();
+        std::string name = s.module->name();
+        slots_[std::move(name)] = std::move(s);
+    }
 
     build_flat_table();
 }

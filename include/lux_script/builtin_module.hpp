@@ -1,5 +1,6 @@
 #pragma once
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -139,5 +140,68 @@ private:
 // only ever hands out ids id_of() returned), so it is not defensive here,
 // exactly like native_at() is not.
 const BuiltinModuleFn& builtin_module_function_at(int id);
+
+// ─── Drop-in registration ────────────────────────────────────────────────────
+//
+// A module used to need THREE edits spread across the project: write the
+// .cpp, declare its factory function and add it to BuiltinModuleRegistry's
+// constructor in builtin_module.cpp, and list the .cpp in CMakeLists.txt.
+// The middle one is what LUX_REGISTER_MODULE below removes -- combined with
+// CMakeLists.txt globbing src/lux_script/modules/ and
+// src/lux_script/modules/base_modules/ (see NATIVE-MODULES.md), adding a
+// module with no third-party dependency is now just "drop a .cpp in that
+// folder": nothing else in the project changes.
+//
+// Mechanism: each module .cpp ends with one line, `LUX_REGISTER_MODULE(X)`,
+// which defines a namespace-scope object whose constructor pushes a factory
+// for X into module_factories() below. BuiltinModuleRegistry's constructor
+// (builtin_module.cpp) then just calls every registered factory and reads
+// each one's own name() -- the module's class is the single source of
+// truth for the name `import` uses, never a second string that could drift
+// from it.
+//
+// Why a Meyer's singleton (a function-local `static`) and not a plain
+// namespace-scope `std::vector`: relying on the order two DIFFERENT
+// translation units' namespace-scope objects get constructed in is
+// undefined behavior in C++ ("static initialization order fiasco") --  a
+// module's LUX_REGISTER_MODULE object and a plain global vector it tries to
+// push into are exactly two such objects, with no guarantee the vector
+// exists yet when a module registers into it. A function-local static
+// sidesteps that: it is constructed lazily, on its FIRST call, no matter
+// who makes that call or when -- including a call made from inside another
+// namespace-scope object's own constructor, which is exactly what
+// LUX_REGISTER_MODULE's registrar does below.
+namespace detail {
+
+using ModuleFactory = std::unique_ptr<BuiltinModule> (*)();
+
+// Every LUX_REGISTER_MODULE in the binary appends itself here before
+// main() runs. BuiltinModuleRegistry's constructor drains this list.
+std::vector<ModuleFactory>& module_factories();
+
+struct ModuleRegistrar {
+    explicit ModuleRegistrar(ModuleFactory f) { module_factories().push_back(f); }
+};
+
+} // namespace detail
+
+// A module .cpp with NOTHING ELSE referenced from outside its own
+// translation unit (true of every module: the class lives in an anonymous
+// namespace, and the only thing calling its constructor is this macro,
+// right here, in the same file) can end up as a member of liblux_script.a
+// that the final linker discards entirely -- an .a is linked member by
+// member, and the linker only keeps one if something ALREADY pulled in
+// already references one of its symbols. CMakeLists.txt's
+// `lux_link_script()` function compensates with `--whole-archive` on every
+// target that links lux_script, specifically so this stays true: dropping
+// a module .cpp in the folder and doing nothing else is enough for it to
+// actually run, not just to compile.
+#define LUX_REGISTER_MODULE(ClassName)                                        \
+    namespace {                                                               \
+    ::lux_script::detail::ModuleRegistrar lux_module_registrar_##ClassName(   \
+        +[]() -> std::unique_ptr<::lux_script::BuiltinModule> {               \
+            return std::make_unique<ClassName>();                             \
+        });                                                                   \
+    }
 
 } // namespace lux_script

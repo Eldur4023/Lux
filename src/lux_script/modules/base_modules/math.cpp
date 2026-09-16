@@ -1,6 +1,6 @@
 // Math module (NATIVE-MODULES.md): the arithmetic Lux Script's own
 // operators do not cover -- sqrt, pow, rounding, trig, randomness. Follows
-// module_hash.cpp's shape exactly: zero dependencies (<cmath> + <random>),
+// hash.cpp's shape exactly: zero dependencies (<cmath> + <random>),
 // unconditionally compiled in, stateless.
 //
 // abs()/min()/max() are deliberately HERE, not core builtins the way len()/
@@ -128,8 +128,6 @@ public:
 
 } // namespace
 
-std::unique_ptr<BuiltinModule> make_math_module() {
-    return std::make_unique<MathModule>();
-}
+LUX_REGISTER_MODULE(MathModule)
 
 } // namespace lux_script
