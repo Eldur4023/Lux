@@ -232,6 +232,27 @@ get endpoint("/fn_transitively_awaits"):
     int v = await add_one_after_await(10)
     return { "v": v }
 
+class ChainPoint:
+    int x
+    int y
+
+    fn int squared():
+        return this.x * this.x + this.y * this.y
+
+fn ChainPoint make_chain_point(int x, int y):
+    return ChainPoint(x, y)
+
+# type_of() used to only know the type of a Call expression for a BUILTIN
+# method on an already-typed receiver, never for a call to a user function
+# or constructor -- chaining a class method straight off one
+# (`make_chain_point(3, 4).squared()`, no intermediate variable) failed at
+# runtime with "Dicts have no method 'squared'" even though this compiled
+# clean: the checker had no way to know the call's result was a
+# ChainPoint, so it fell through to the generic Dict method dispatch. See
+# To_Add.md for the full writeup (now marked fixed).
+get endpoint("/chain_call_method"):
+    return { "r": make_chain_point(3, 4).squared() }
+
 get endpoint("/range"):
     return {
         "one_arg": range(5), "two_args": range(2, 6),

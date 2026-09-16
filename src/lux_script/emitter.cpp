@@ -543,10 +543,45 @@ Type Emitter::type_of(const Expr& e) const {
         case ExprKind::BoolLit:   return Type::primitive(Type::Kind::Bool);
         case ExprKind::Ident:     return local_type(e.text);
         case ExprKind::This:      return local_type("this");
-        // Metodo builtin on un receptor de tipo conocido: la cadena sigue.
+        // A call's own type, so chaining straight off it (`f().campo`,
+        // `f().metodo()`) resolves exactly like chaining off a variable
+        // that already holds the same value does -- see FnSig::devuelve's
+        // comment (emitter.hpp) for the bug this closes (an untyped call
+        // result silently fell back to whatever a receiver of unknown type
+        // dispatches as at runtime, which for a Value::Dict is "only has
+        // Dict's own methods", not the user class it actually was).
         case ExprKind::Call: {
-            if (!e.object || e.object->kind != ExprKind::Member) return Type::unknown();
+            if (!e.object) return Type::unknown();
+
+            // A bare name: either a standalone function (`hacer_punto(3, 4)`,
+            // typed by its OWN declared return type) or a constructor
+            // (`Item("a")` -- any successful call to one always produces
+            // exactly that class, regardless of which overload matched).
+            if (e.object->kind == ExprKind::Ident) {
+                const std::string& name = e.object->text;
+                if (functions_) {
+                    auto it = functions_->find(name);
+                    if (it != functions_->end()) return it->second.devuelve;
+                }
+                if (classes_ && classes_->count(name)) return Type::class_ref(name);
+                return Type::unknown();
+            }
+
+            if (e.object->kind != ExprKind::Member) return Type::unknown();
             const Type recv = type_of(*e.object->object);
+
+            // A method on a user-defined class (`p.cuadrado()`), typed by
+            // that method's OWN declared return type -- checked before the
+            // builtin-method table below, since a class is never in it.
+            if (classes_) {
+                auto cls = classes_->find(recv.base_name());
+                if (cls != classes_->end()) {
+                    auto m = cls->second.methods.find(e.object->text);
+                    if (m != cls->second.methods.end()) return m->second.devuelve;
+                }
+            }
+
+            // Metodo builtin on un receptor de tipo conocido: la cadena sigue.
             const auto* lista = methods_of(recv.base_name());
             if (!lista) return Type::unknown();
             for (const auto& m : *lista)
@@ -1287,11 +1322,13 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         shape = IrCallShape::BuiltinGlobalCall;
     }
     else if (e.object->kind == ExprKind::Member && classes_) {
-        Type recv_type = Type::unknown();
-        if (e.object->object->kind == ExprKind::Ident)
-            recv_type = local_type(e.object->object->text);
-        else if (e.object->object->kind == ExprKind::This)
-            recv_type = local_type("this");
+        // type_of(), not a hand-rolled Ident/This-only check: the receiver
+        // can be any expression whose type is known, including a call to
+        // a function/constructor/method (`hacer_punto(3, 4).cuadrado()`,
+        // chaining straight off the result) -- see type_of()'s own Call
+        // case (added alongside FnSig::devuelve) for why that now resolves
+        // to something other than unknown.
+        Type recv_type = type_of(*e.object->object);
         const std::string recv_name = recv_type.base_name();
 
         auto cls = recv_type.is_unknown() ? classes_->end() : classes_->find(recv_name);

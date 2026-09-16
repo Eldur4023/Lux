@@ -1323,9 +1323,11 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
 // they were declared in or the file they are in.
 // Fills FnSig from a parameter list, checking that no required one comes after
 // one with a default value.
-FnSig make_sig(size_t index, const std::vector<Param>& params, DiagnosticBag& diags) {
+FnSig make_sig(size_t index, const std::vector<Param>& params, const TypeRef& return_type,
+              DiagnosticBag& diags) {
     FnSig sig;
-    sig.index = index;
+    sig.index    = index;
+    sig.devuelve = Type::from_declared(return_type);
     bool seen_default = false;
     for (const auto& p : params) {
         sig.defaults.push_back(p.default_value.get());
@@ -1369,7 +1371,7 @@ ClassSigs build_class_signatures(Module& mod, DiagnosticBag& diags) {
         for (const auto& m : c.methods) {
             size_t idx = mod.functions.size();
             mod.functions.push_back(std::make_shared<Chunk>());
-            sig.methods[m.name] = make_sig(idx, m.params, diags);
+            sig.methods[m.name] = make_sig(idx, m.params, m.return_type, diags);
         }
         for (const auto& ct : c.ctors) {
             size_t idx = mod.functions.size();
@@ -1462,7 +1464,7 @@ FunctionSigs build_function_signatures(Module& mod, DiagnosticBag& diags) {
         }
         if (index.count(f.name)) continue;   // the parser already reported the duplicate
 
-        index[f.name] = make_sig(mod.functions.size(), f.params, diags);
+        index[f.name] = make_sig(mod.functions.size(), f.params, f.return_type, diags);
         mod.functions.push_back(std::make_shared<Chunk>());
     }
 

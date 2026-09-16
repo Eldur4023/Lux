@@ -204,6 +204,7 @@ check "await inside a map() callback is rejected" GET /list_map_await_rejected 5
 check "a plain fn that awaits keeps its return value for the caller" GET /fn_return_after_await 200 '"v":5'
 check "same, with a bare 'return await fn()'"                        GET /fn_return_after_await_bare 200 '5'
 check "has_await propagates two calls deep"                          GET /fn_transitively_awaits 200 '"v":15'
+check "chaining a method call straight off a function/constructor result" GET /chain_call_method 200 '"r":25'
 
 check "range(n)"              GET /range 200 '"one_arg":[0,1,2,3,4]'
 check "range(start, end)"     GET /range 200 '"two_args":[2,3,4,5]'

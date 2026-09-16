@@ -337,6 +337,17 @@ method never reaches production:
 An instance built by hand and one bound from the request body are the same thing: methods
 work the same on both.
 
+The receiver does not have to be a variable — chaining a method straight off a function or
+constructor call works too, with no intermediate variable needed:
+
+```lux
+fn Point make_point(int x, int y):
+    return Point(x, y)
+
+get endpoint("/squared"):
+    return { "r": make_point(3, 4).squared() }
+```
+
 ### Nesting
 
 A field can also be another class, or a `List` of one — not just the four scalars:

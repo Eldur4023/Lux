@@ -22,6 +22,14 @@ struct FnSig {
     size_t index    = 0;
     size_t required = 0;                    // parameters without a default value
     std::vector<const Expr*> defaults;      // one per parameter; null if it has none
+    // The function's/method's own declared return type -- what
+    // Emitter::type_of() needs to know the type of a CALL to it (so that
+    // chaining straight off the call, `f().campo`, resolves the same way
+    // chaining off a variable already does). Unknown() for a constructor's
+    // synthetic FnSig-less path (see build_class_signatures(): ctors are
+    // looked up by arity, never through this struct at all, so there is
+    // nothing to fill in here for them).
+    Type devuelve = Type::unknown();
 };
 using FunctionSigs = std::map<std::string, FnSig>;
 

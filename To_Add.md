@@ -7,10 +7,35 @@ qué falla, por qué, el workaround actual, y dónde mirar para arreglarlo de ve
 
 ---
 
-## `type_of()` no conoce el tipo de retorno de una llamada a función de usuario
+## `type_of()` no conoce el tipo de retorno de una llamada a función de usuario — ARREGLADO
 
 **Encontrado:** 2026-09-16, mientras se arreglaba que un `fn` suelto no podía usar
 constructores de clase (ver el commit "Standalone functions can now use classes").
+
+**Arreglado:** mismo día, commit "Resolve chained method calls on function/constructor
+results". `FnSig` ganó un campo `devuelve` (el tipo de retorno declarado), rellenado por
+`make_sig()`, y `type_of()`/`check_call` lo consultan en el caso `ExprKind::Call` (tanto
+para una función suelta como para un método de clase) en vez de devolver `Type::unknown()`.
+`check_call`'s propia resolución del receptor de un `.método()` (antes un chequeo a mano
+solo para `Ident`/`this`) pasó a usar `type_of()` también, que es lo que de verdad
+resuelve el ejemplo de abajo. Verificado con 60 peticiones seguidas contra un proceso
+limpio (sin nada más escuchando en el puerto) — ver la nota al final sobre el
+falso-positivo de no-determinismo que salió al verificarlo.
+
+**Nota sobre un no-determinismo que resultó ser falso:** durante la verificación, el mismo
+repro daba 204 en vez de `{"r":25}" en una fracción de las peticiones, de forma
+aparentemente aleatoria, incluso con concurrencia y con ThreadSanitizer sin quejarse.
+Resultó ser un artefacto del entorno de pruebas, no un bug: `SO_REUSEPORT` permite que
+más de un proceso escuche el mismo puerto a la vez, y un proceso de la extensión de
+VSCode de otro repo (`.../Github/Lux/build/lux .`) llevaba un rato escuchando por
+casualidad en el mismo puerto (8098) usado para este repro de prueba en `/tmp`. El
+kernel repartía las conexiones nuevas entre los dos procesos (pegajoso por conexión,
+de ahí que pareciera "a veces sí, a veces no" pero siempre igual dentro de la misma
+conexión) — el proceso ajeno no tiene esa ruta y devolvía 204 sin más. Confirmado
+matando ambos procesos y repitiendo la prueba en un puerto verificado como libre:
+60/60 peticiones correctas. Moraleja para la próxima vez que algo parezca no
+determinista en un puerto reusado entre pruebas: `ss -tlnp | grep <puerto>` primero,
+no asumir que solo el proceso propio está escuchando ahí.
 
 **Qué falla:**
 
