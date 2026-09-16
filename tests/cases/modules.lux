@@ -125,6 +125,89 @@ get endpoint("/os/run_missing"):
     Json r = await os.run("/definitely/not/a/real/command/xyz123")
     return r
 
+get endpoint("/os/remove_dir_empty"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_rmdir_empty")
+    os.make_dir(dir)
+    bool removed = os.remove_dir(dir)
+    return { "removed": removed, "exists_after": os.path_exists(dir) }
+
+get endpoint("/os/remove_dir_nonempty_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_rmdir_nonempty")
+    os.make_dir(dir)
+    await os.write_file(os.path_join(dir, "f.txt"), "x")
+    Json r = os.remove_dir(dir)
+    return { "unreachable": r }
+
+get endpoint("/os/remove_dir_recursive"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_rmdir_recursive")
+    os.make_dir(os.path_join(dir, "sub"))
+    await os.write_file(os.path_join(dir, "sub", "f.txt"), "x")
+    bool removed = os.remove_dir(dir, true)
+    return { "removed": removed, "exists_after": os.path_exists(dir) }
+
+get endpoint("/os/remove_dir_on_a_file_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string file = os.path_join(tmp, "os_rmdir_on_file.txt")
+    await os.write_file(file, "x")
+    Json r = os.remove_dir(file)
+    return { "unreachable": r }
+
+get endpoint("/os/copy_file"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_copy_src.txt")
+    string dst = os.path_join(tmp, "os_copy_dst.txt")
+    await os.write_file(src, "copy me")
+    bool copied = await os.copy_file(src, dst)
+    string src_content = await os.read_file(src)
+    string dst_content = await os.read_file(dst)
+    return { "copied": copied, "src_content": src_content, "dst_content": dst_content }
+
+get endpoint("/os/copy_file_overwrite_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_copy_ow_src.txt")
+    string dst = os.path_join(tmp, "os_copy_ow_dst.txt")
+    await os.write_file(src, "new")
+    await os.write_file(dst, "old")
+    Json r = await os.copy_file(src, dst)
+    return r
+
+get endpoint("/os/copy_file_overwrite_allowed"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_copy_ow2_src.txt")
+    string dst = os.path_join(tmp, "os_copy_ow2_dst.txt")
+    await os.write_file(src, "new")
+    await os.write_file(dst, "old")
+    bool copied = await os.copy_file(src, dst, true)
+    string dst_content = await os.read_file(dst)
+    return { "copied": copied, "dst_content": dst_content }
+
+get endpoint("/os/move_file"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_move_src.txt")
+    string dst = os.path_join(tmp, "os_move_dst.txt")
+    await os.write_file(src, "moving")
+    bool moved = await os.move(src, dst)
+    string dst_content = await os.read_file(dst)
+    return { "moved": moved, "src_gone": not os.path_exists(src), "dst_content": dst_content }
+
+get endpoint("/os/move_dir"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string src = os.path_join(tmp, "os_move_dir_src")
+    string dst = os.path_join(tmp, "os_move_dir_dst")
+    os.make_dir(os.path_join(src, "inner"))
+    await os.write_file(os.path_join(src, "inner", "f.txt"), "nested")
+    bool moved = await os.move(src, dst)
+    string content = await os.read_file(os.path_join(dst, "inner", "f.txt"))
+    return { "moved": moved, "src_gone": not os.path_exists(src), "content": content }
+
+get endpoint("/os/move_missing_source_rejected"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    Json r = await os.move(os.path_join(tmp, "definitely_not_there_xyz"), os.path_join(tmp, "whatever"))
+    return r
+
 get endpoint("/math/basic"):
     return {
         "abs": math.abs(-7), "abs_f": math.abs(-2.5),

@@ -205,19 +205,18 @@ Value fn_os_list_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::list(std::move(out));
 }
 
-// Files only, on purpose -- mirroring Python's own os.remove()/os.rmdir()
-// split (and shutil.rmtree() as the separate, explicitly-named "yes, really,
-// recursively" operation): one function that can silently recurse-delete an
-// entire directory tree is a much easier mistake to make catastrophic than
-// one that only ever removes a single file. Deleting a directory tree is
-// deliberately not exposed by this module yet.
+// Files only -- mirroring Python's own os.remove()/os.rmdir() split
+// (and shutil.rmtree() as the separate, explicitly-named "yes, really,
+// recursively" operation). Directory removal is remove_dir(), below,
+// which keeps the same split: empty-only by default, recursive only on
+// explicit request.
 Value fn_os_remove_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "os.remove_file() expects a path"; return Value::null(); }
     const std::string& path = args[0].as_str();
     std::error_code ec;
     if (!fs::exists(path, ec)) return Value::boolean(false); // already gone: not an error
     if (!fs::is_regular_file(path, ec)) {
-        error = "os.remove_file(): '" + path + "' is not a regular file (use a directory-specific tool for directories)";
+        error = "os.remove_file(): '" + path + "' is not a regular file (use os.remove_dir() for directories)";
         return Value::null();
     }
     bool removed = fs::remove(path, ec);
@@ -235,6 +234,127 @@ Value fn_os_make_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
     bool created = fs::create_directories(args[0].as_str(), ec);
     if (ec) { error = "os.make_dir(): " + ec.message(); return Value::null(); }
     return Value::boolean(created);
+}
+
+// Empty-only by default -- mirroring Python's os.rmdir() vs shutil.rmtree()
+// split from remove_file()'s own comment above, but as one function with
+// an explicit second argument rather than two names: a directory
+// legitimately might or might not be empty, and the caller already has to
+// know which one it means before calling this. Without `recursive=true`,
+// an unexpectedly non-empty directory fails loudly with a message that
+// says exactly how to actually remove it, instead of a plain function
+// silently taking everything inside it along for the ride.
+Value fn_os_remove_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.remove_dir() expects a path"; return Value::null(); }
+    const std::string& path = args[0].as_str();
+    bool recursive = false;
+    if (args.size() > 1) {
+        if (!args[1].is_bool()) { error = "os.remove_dir(): the second argument is a bool (recursive)"; return Value::null(); }
+        recursive = args[1].as_bool();
+    }
+    std::error_code ec;
+    if (!fs::exists(path, ec)) return Value::boolean(false); // already gone: not an error
+    if (!fs::is_directory(path, ec)) {
+        error = "os.remove_dir(): '" + path + "' is not a directory (use os.remove_file() for files)";
+        return Value::null();
+    }
+    if (recursive) {
+        auto removed = fs::remove_all(path, ec);
+        if (ec) { error = "os.remove_dir(): " + ec.message(); return Value::null(); }
+        return Value::boolean(removed > 0);
+    }
+    bool removed = fs::remove(path, ec);
+    if (ec) {
+        if (ec == std::errc::directory_not_empty) {
+            error = "os.remove_dir(): '" + path + "' is not empty -- pass true as the "
+                    "second argument to remove it and everything inside";
+            return Value::null();
+        }
+        error = "os.remove_dir(): " + ec.message();
+        return Value::null();
+    }
+    return Value::boolean(removed);
+}
+
+// Files only, like remove_file()/make_dir() above -- a recursive directory
+// copy (shutil.copytree()'s equivalent) is a separate, bigger decision
+// (what an already-existing destination tree means) not exposed yet.
+// fs::copy_file() rather than read_file()+write_file(): that pair loads
+// the WHOLE file into memory as a Lux Script string first, which for a
+// large media file is a needless extra copy that a plain file-to-file
+// copy at the OS level does not pay.
+Value fn_os_copy_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.copy_file() expects the source path"; return Value::null(); }
+    if (!args[1].is_str()) { error = "os.copy_file() expects the destination path as the second argument"; return Value::null(); }
+    const std::string& from = args[0].as_str();
+    const std::string& to   = args[1].as_str();
+    bool overwrite = false;
+    if (args.size() > 2) {
+        if (!args[2].is_bool()) { error = "os.copy_file(): the third argument is a bool (overwrite)"; return Value::null(); }
+        overwrite = args[2].as_bool();
+    }
+    std::error_code ec;
+    if (!fs::is_regular_file(from, ec)) {
+        error = "os.copy_file(): '" + from + "' is not a regular file";
+        return Value::null();
+    }
+    auto opts = overwrite ? fs::copy_options::overwrite_existing : fs::copy_options::none;
+    bool copied = fs::copy_file(from, to, opts, ec);
+    if (ec) { error = "os.copy_file(): " + ec.message(); return Value::null(); }
+    return Value::boolean(copied);
+}
+
+// Renames/moves a file or directory, working across filesystems too --
+// which a plain fs::rename() (a single rename(2) syscall) cannot do: it
+// fails with EXDEV the moment source and destination are on different
+// mount points, and that split is *common*, not an edge case, for exactly
+// the app this was requested for (a downloads volume and a media library
+// volume are routinely separate mounts in a container/NAS setup). The
+// fast, atomic rename(2) is still tried FIRST and used whenever it works
+// (same filesystem: instant, and nothing is ever partially moved); only
+// on EXDEV does this fall back to copy-then-delete-the-source, mirroring
+// Python's shutil.move() for the same reason it exists. That fallback is
+// NOT atomic -- a crash between the copy and the delete leaves both
+// copies on disk -- an inherent limitation of moving across filesystems
+// at all, not something this function does worse than any other.
+Value fn_os_move(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.move() expects the source path"; return Value::null(); }
+    if (!args[1].is_str()) { error = "os.move() expects the destination path as the second argument"; return Value::null(); }
+    const std::string& from = args[0].as_str();
+    const std::string& to   = args[1].as_str();
+
+    std::error_code ec;
+    if (!fs::exists(from, ec)) {
+        error = "os.move(): '" + from + "' does not exist";
+        return Value::null();
+    }
+
+    fs::rename(from, to, ec);
+    if (!ec) return Value::boolean(true);
+    if (ec != std::errc::cross_device_link) {
+        error = "os.move(): " + ec.message();
+        return Value::null();
+    }
+
+    // Crossing filesystems: copy first, only remove the source once the
+    // copy fully succeeded, so a failed/interrupted copy never loses the
+    // original.
+    bool is_dir = fs::is_directory(from, ec);
+    if (is_dir) {
+        fs::copy(from, to, fs::copy_options::recursive, ec);
+    } else {
+        fs::copy_file(from, to, ec);
+    }
+    if (ec) { error = "os.move(): " + ec.message(); return Value::null(); }
+
+    if (is_dir) fs::remove_all(from, ec);
+    else        fs::remove(from, ec);
+    if (ec) {
+        error = "os.move(): copied to '" + to + "' but could not remove the original "
+                "'" + from + "': " + ec.message();
+        return Value::null();
+    }
+    return Value::boolean(true);
 }
 
 // ─── Process spawning ───────────────────────────────────────────────────────
@@ -383,7 +503,13 @@ public:
             {"write_file",   2, 2, fn_os_write_file, /*is_async=*/true},
             {"list_dir",     1, 1, fn_os_list_dir},
             {"remove_file",  1, 1, fn_os_remove_file},
+            {"remove_dir",   1, 2, fn_os_remove_dir},
             {"make_dir",     1, 1, fn_os_make_dir},
+            // is_async: real disk I/O moving file CONTENT, same class as
+            // read_file/write_file above -- not just metadata like
+            // remove_dir/make_dir/rename's own fast path.
+            {"copy_file",    2, 3, fn_os_copy_file,   /*is_async=*/true},
+            {"move",         2, 2, fn_os_move,        /*is_async=*/true},
             {"run",          1, 2, fn_os_run,        /*is_async=*/true},
         };
         return fns;

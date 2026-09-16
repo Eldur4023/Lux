@@ -359,6 +359,17 @@ check "os.mtime_ms on a real file is a positive timestamp" GET /os/stat 200 '"mt
 check "os.is_dir/is_file on a missing path are both false" GET /os/stat_missing 200 '"is_dir":false,"is_file":false'
 check "os.file_size/mtime_ms on a missing path are -1"     GET /os/stat_missing 200 '"size":-1,"mtime":-1'
 
+check "os.remove_dir removes an empty directory"        GET /os/remove_dir_empty  200 '"removed":true,"exists_after":false'
+check "os.remove_dir on a non-empty dir is rejected"     GET /os/remove_dir_nonempty_rejected 500 "is not empty -- pass true"
+check "os.remove_dir(true) removes a non-empty tree"     GET /os/remove_dir_recursive 200 '"removed":true,"exists_after":false'
+check "os.remove_dir on a file is rejected"              GET /os/remove_dir_on_a_file_rejected 500 "is not a directory"
+check "os.copy_file copies without touching the source"  GET /os/copy_file 200 '"copied":true,"src_content":"copy me","dst_content":"copy me"'
+check "os.copy_file onto an existing file is rejected"   GET /os/copy_file_overwrite_rejected 200 '"error":"os.copy_file()'
+check "os.copy_file(overwrite=true) replaces the destination" GET /os/copy_file_overwrite_allowed 200 '"copied":true,"dst_content":"new"'
+check "os.move renames a file"                           GET /os/move_file 200 '"moved":true,"src_gone":true,"dst_content":"moving"'
+check "os.move moves a whole directory tree"             GET /os/move_dir 200 '"moved":true,"src_gone":true,"content":"nested"'
+check "os.move on a missing source is rejected"          GET /os/move_missing_source_rejected 200 'does not exist'
+
 check "math.abs/min/max"           GET /math/basic  200 '"abs":7,"abs_f":2.5,"min":3,"max":9'
 check "math.round/floor/ceil"      GET /math/basic  200 '"round":3,"floor":2,"ceil":3'
 check "math.sqrt/pow/log"          GET /math/basic  200 '"sqrt":4.0,"pow":1024.0,"log":0.0'

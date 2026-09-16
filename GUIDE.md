@@ -1310,11 +1310,21 @@ them usually needs an `<name>: { ... }` block in `app:` at all:
   symlink; `file_size(path)` and `mtime_ms(path)`, a Unix timestamp in milliseconds, both `-1`
   for a missing path, and `file_size()` on a directory is `-1` too, not some arbitrary
   filesystem-reported number), file I/O (`read_file`/`write_file`/`list_dir`/`remove_file`/
-  `make_dir`), and running external commands (`run(command[, args])`, an argv `List`, never a
-  shell string — see [NATIVE-MODULES.md](NATIVE-MODULES.md) §4 for why). `run()` shares
-  `http`'s blocking-thread limitation, bounded by the same kind of fixed timeout (15s); every
-  other function here is a plain `stat()`, microseconds regardless. No path sandboxing — trusts
-  the caller exactly as much as Python's `os`/`open()`/`subprocess` do.
+  `make_dir`/`remove_dir(path[, recursive])`/`copy_file(from, to[, overwrite])`/
+  `move(from, to)`), and running external commands (`run(command[, args])`, an argv `List`,
+  never a shell string — see [NATIVE-MODULES.md](NATIVE-MODULES.md) §4 for why). `remove_dir`
+  only removes an EMPTY directory unless `recursive` is `true` (mirroring Python's
+  `os.rmdir()`/`shutil.rmtree()` split as one function instead of two names), and errors —
+  rather than silently taking everything inside along with it — on a non-empty one when it
+  isn't. `move` works on files and directories, and across filesystems too: it tries an atomic
+  rename first and only falls back to copy-then-delete-the-source when source and destination
+  are on different mounts (a downloads volume and a media library volume routinely are, in a
+  container/NAS setup) — that fallback is not atomic, an inherent limitation of moving across
+  filesystems at all, not something this does worse than any other tool. `run()` and
+  `copy_file`/`move` share `http`'s blocking-thread treatment for real, unbounded I/O — `run()`
+  additionally bounded by a fixed timeout (15s); every other function here is a plain `stat()`
+  or metadata op, microseconds regardless. No path sandboxing — trusts the caller exactly as
+  much as Python's `os`/`open()`/`subprocess`/`shutil` do.
 - **`math`** — `abs`/`min`/`max`/`round`/`floor`/`ceil`/`sqrt`/`pow`/`log`, plus
   `random()` (`[0.0, 1.0)`) and `random_int(lo, hi)` (inclusive on both ends).
 - **`time`** — a timestamp is a plain `int` (milliseconds since the Unix epoch, UTC always, no
