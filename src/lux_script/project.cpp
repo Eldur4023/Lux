@@ -1469,6 +1469,64 @@ FunctionSigs build_function_signatures(Module& mod, DiagnosticBag& diags) {
     return index;
 }
 
+// True if `code` contains an Op::CallFunction targeting a callee (looked
+// up by index into `functions`, exactly how the opcode's own operand
+// works) whose `has_await` is already true. Every user function, method
+// AND constructor call in the whole language compiles to this one opcode
+// (see Emitter::emit_call's UserFunctionCall/ConstructorCall/
+// ClassMethodCall cases, which all funnel into it) with `call_index`
+// being the callee's index into that SAME FunctionTable, so this one
+// check covers everything a route/function body can call.
+//
+// Used two ways below: iterated to a fixed point over mod.functions
+// itself (functions can call each other, in any order, including mutual
+// recursion), and as a single, non-iterated check for a route's own
+// chunk once that fixed point has already settled -- nothing ever calls
+// a route, so there is no further propagation needed past that one check.
+bool calls_something_that_awaits(const Chunk& code, const FunctionTable& functions) {
+    for (const auto& in : code.code) {
+        if (in.op != Op::CallFunction) continue;
+        size_t callee = in.operand >> 8;
+        if (callee < functions.size() && functions[callee]->has_await) return true;
+    }
+    return false;
+}
+
+// Propagates has_await through the call graph of every standalone
+// function, class method and constructor in the program.
+//
+// Emitter::emit_call already sets has_await correctly for a chunk whose
+// OWN bytecode calls something async directly (CallAsync/CallAsyncModule/
+// DbModuleCall) -- what it cannot see is a function that merely CALLS
+// another function that awaits something, however many calls deep. Left
+// unfixed, that chunk's has_await stays false, and project.cpp's plain
+// HTTP route dispatch (the ONE place that branches on it -- ws/sse routes
+// always use a resumable VM regardless, see their own dispatch code
+// further down) wrongly assumes vm.start() can only return Done/Error and
+// hands the call to a blocking-pool worker's own, unrelated thread_local
+// VM instead of the per-request one actually capable of being resumed.
+// The VM still suspends correctly there -- nothing is listening for it:
+// the thread_local VM's suspended frame is silently abandoned (leaking
+// its state into whatever request that pool worker handles NEXT), and the
+// route's own, never-actually-started VM::resume() on an empty frame
+// stack falls straight through to a default Done/null result. The
+// caller's `int v = await helper()` (or a bare `return helper()`) sees a
+// null value where the callee's real, computed return value should have
+// been -- not a crash, which is exactly what let this hide as long as it
+// did.
+void propagate_has_await(FunctionTable& functions) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (auto& chunk : functions) {
+            if (!chunk->has_await && calls_something_that_awaits(*chunk, functions)) {
+                chunk->has_await = true;
+                changed = true;
+            }
+        }
+    }
+}
+
 // Bodies, once EVERYTHING callable has a signature -- classes included.
 // This used to be the second half of build_functions() itself, with
 // `classes`/`enums` never passed to Emitter at all (always nullptr): a
@@ -1813,6 +1871,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             shadow_compare((r.method + " " + r.pattern).c_str(), diags, antes, shadow);
         }
 
+        // A route is never itself called from elsewhere, so unlike
+        // mod.functions (propagate_has_await(), already run by the time
+        // this runs) it needs no fixed point of its own -- just one check
+        // against a callee table that has already fully settled.
+        if (calls_something_that_awaits(*chunk, mod.functions)) chunk->has_await = true;
+
         ++mod.vm_routes;
         bool needs_upload = false;
         for (const auto& b : binds)
@@ -2020,6 +2084,15 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
 
         emit_function_bodies(*mod, fns, sigs, enums, diags);
         emit_class_bodies(*mod, sigs, fns, enums, diags);
+
+        // See propagate_has_await()'s own comment for the bug this closes:
+        // every function/method/constructor now has an accurate has_await,
+        // including one that only awaits transitively (by calling another
+        // one that does) -- needed before a single route gets emitted
+        // below, since a route's own has_await is decided by looking at
+        // THIS table (calls_something_that_awaits()), not recomputed from
+        // scratch.
+        propagate_has_await(mod->functions);
 
         // --native (Fase 3): despues de las firmas/cuerpos de clase (necesita
         // ClassSigs para constructores/metodos) y antes de construir rutas,

@@ -160,6 +160,27 @@ fn Json calls_await(int x):
     Json r = await sleep(1)
     return r
 
+# A plain `fn` that awaits something directly, called normally (not through
+# a callback like .map() above) -- project.cpp's has_await used to only be
+# set on THIS function's own chunk, never propagated to a caller that just
+# calls it, so the caller's own chunk looked synchronous when it was not.
+# That sent the whole call through a blocking-pool worker's unrelated
+# thread_local VM instead of the per-request one actually capable of being
+# resumed: the callee still suspended correctly, but nothing was listening
+# for it, and the caller ended up resuming an empty, never-started VM that
+# fell straight through to a default null result -- the value made it out
+# of `five_after_await` and was lost one frame up, every time, with no
+# error at all.
+fn int five_after_await():
+    await sleep(1)
+    return 5
+
+# Two calls deep: five_after_await()'s has_await has to propagate through
+# THIS function too, not just to its immediate, direct caller.
+fn int add_one_after_await(int x):
+    int v = await five_after_await()
+    return v + x
+
 get endpoint("/func_ref"):
     Json f = double_it
     return { "is_not_null": f != null }
@@ -199,6 +220,17 @@ get endpoint("/list_map_nested"):
 get endpoint("/list_map_await_rejected"):
     List<int> l = [1]
     return { "r": l.map(calls_await) }
+
+get endpoint("/fn_return_after_await"):
+    int v = await five_after_await()
+    return { "v": v }
+
+get endpoint("/fn_return_after_await_bare"):
+    return await five_after_await()
+
+get endpoint("/fn_transitively_awaits"):
+    int v = await add_one_after_await(10)
+    return { "v": v }
 
 get endpoint("/range"):
     return {

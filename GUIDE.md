@@ -528,6 +528,25 @@ Rules checked at compile time:
 
 Available asynchronous builtins: `sleep(ms)` and `ws.recv()`.
 
+A plain `fn` can `await` too, and calling it works exactly like calling any other function —
+`await` at the call site if you want its result, plain `return` if the caller is itself
+returning it straight through:
+
+```lux
+fn List<Json> episode_titles(int series_id):
+    return await sqlite.query(
+        "select title from episodes where series_id = ?", series_id)
+
+get endpoint("/titles/:series_id", int series_id):
+    List<Json> titles = await episode_titles(series_id)
+    return { "titles": titles }
+```
+
+This is what lets shared logic that needs a database (or anything else async) live in one
+function several routes call, instead of being copied into each one. It works through any
+number of calls — a function that awaits something only via a chain of other functions is
+exactly as awaitable from its own caller as one that awaits directly.
+
 ---
 
 ## 12. Databases
