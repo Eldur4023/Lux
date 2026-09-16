@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <algorithm>
@@ -301,6 +302,41 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     h.resume();
 }
 
+// Parses a single-range "Range: bytes=..." value into [start, end] (both
+// inclusive), against `total` (the file's actual size). Supports the three
+// forms RFC 7233 §2.1 defines for one range: "start-end", "start-" (to
+// EOF) and "-suffix_length" (the last N bytes).
+//
+// Returns false — leave `start`/`end` untouched, serve the file whole — on
+// anything this does not handle: no Range header, multiple ranges
+// (comma-separated; no real video player sends these for a seek, so
+// multipart/byteranges responses are not implemented), a unit other than
+// "bytes", or text that does not parse. RFC 7233 §3.1 is explicit that an
+// unparseable Range is not a server error: the server "SHOULD ignore the
+// Range header field" and return the full representation, exactly as if
+// the header had never arrived.
+static bool parse_single_byte_range(const std::string& header, std::uintmax_t total,
+                                    std::uintmax_t& start, std::uintmax_t& end) {
+    if (header.rfind("bytes=", 0) != 0) return false;
+    std::string spec = header.substr(6);
+    if (spec.find(',') != std::string::npos) return false;
+    auto dash = spec.find('-');
+    if (dash == std::string::npos) return false;
+    std::string a = spec.substr(0, dash), b = spec.substr(dash + 1);
+    try {
+        if (a.empty()) {
+            if (b.empty()) return false;
+            std::uintmax_t suffix = std::stoull(b);
+            start = suffix >= total ? 0 : total - suffix;
+            end   = total > 0 ? total - 1 : 0;
+        } else {
+            start = std::stoull(a);
+            end   = b.empty() ? (total > 0 ? total - 1 : 0) : std::stoull(b);
+        }
+    } catch (...) { return false; }
+    return true;
+}
+
 void HttpConnection::finish_dispatch(lux::Request& request,
                                      lux::Response& response) {
     // Record the request in the global metrics counter.
@@ -342,6 +378,41 @@ void HttpConnection::finish_dispatch(lux::Request& request,
         file_fd_        = fd;
         file_offset_    = 0;
         file_remaining_ = static_cast<size_t>(response.sendfile_size());
+
+        // Range support (RFC 7233) — a video player seeking sends this;
+        // this is the one place in the framework that ever sees the
+        // request's Range header, so it is also the only place that can
+        // validate one against this specific file's size.
+        if (auto range = request.header("range")) {
+            std::uintmax_t total = response.sendfile_size();
+            std::uintmax_t start = 0, end = 0;
+            if (parse_single_byte_range(*range, total, start, end)) {
+                // A start past the end of the file (or a zero-length file)
+                // cannot be satisfied at all — 416, per RFC 7233 §4.4.
+                // An end past the end of the file is NOT invalid, though
+                // (§2.1): it is clamped to the last actual byte instead of
+                // rejected, the same way a slice with an out-of-range
+                // upper bound is clamped elsewhere in this codebase, not
+                // an error.
+                if (total == 0 || start >= total) {
+                    ::close(fd);
+                    file_fd_ = -1;
+                    lux::Response err;
+                    err.status(416).header("Content-Range", "bytes */" + std::to_string(total));
+                    err.header("Connection", "close");
+                    keep_alive_ = false;
+                    send_response(err.build());
+                    return;
+                }
+                if (end >= total) end = total - 1;
+                file_offset_    = static_cast<off_t>(start);
+                file_remaining_ = static_cast<size_t>(end - start + 1);
+                response.partial_content(start, end);
+            }
+            // parse_single_byte_range() returned false: leave file_offset_/
+            // file_remaining_ as set above (the whole file) and fall
+            // through to serving it in full, per RFC 7233 §3.1.
+        }
     }
 
     send_response(response.build());

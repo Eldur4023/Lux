@@ -367,6 +367,48 @@ check "proc.kill + wait leaves it not alive"           GET /proc/kill_and_wait  
 check "proc.read without stdout: pipe is a soft error" GET /proc/read_without_pipe 200 '"error":"proc.read(): this process was not started with stdout'
 check "proc.alive on an unknown handle errors"         GET /proc/unknown_handle   500 'proc: unknown handle'
 
+echo "== Range support on send_file() (RFC 7233) =="
+start_server "$HERE/cases/range.lux" || exit 1
+
+# check() only inspects status + body; Range needs a request header AND a
+# response header (Content-Range/Accept-Ranges) neither of that checks, so
+# this is its own small helper -- same "custom curl invocation" shape
+# json_utf8() above already uses for the same reason (needing more than
+# check() inspects).
+#
+# The fixture (range_fixture.bin) is a fixed 144 bytes, four repeats of
+# "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" -- known content, so every check
+# below asserts the actual bytes returned, not just a status code.
+check_range() {
+    local name="$1" range_header="$2" want_code="$3" header_needle="$4" body_needle="${5:-}"
+    local args=(-sS --max-time 10 -D "$TMP/headers" -o "$TMP/body" -w '%{http_code}')
+    [ -n "$range_header" ] && args+=(-H "Range: $range_header")
+    local got
+    got=$(curl "${args[@]}" "http://127.0.0.1:$PORT/range/file" 2>/dev/null)
+    if [ "$got" != "$want_code" ]; then
+        fail "$name" "code $want_code" "code $got"
+        return
+    fi
+    if [ -n "$header_needle" ] && ! grep -qiF "$header_needle" "$TMP/headers"; then
+        fail "$name" "a header containing '$header_needle'" "$(cat "$TMP/headers")"
+        return
+    fi
+    if [ -n "$body_needle" ] && ! grep -qF "$body_needle" "$TMP/body"; then
+        fail "$name" "body to contain '$body_needle'" "$(cat -v "$TMP/body")"
+        return
+    fi
+    ok "$name"
+}
+
+check_range "no Range header -- whole file, advertises support" "" 200 "Accept-Ranges: bytes" "0123456789"
+check_range "bytes=0-9 -- first 10 bytes"          "bytes=0-9"     206 "Content-Range: bytes 0-9/144"     "0123456789"
+check_range "bytes=-10 -- suffix, last 10 bytes"   "bytes=-10"     206 "Content-Range: bytes 134-143/144" "QRSTUVWXYZ"
+check_range "bytes=134- -- start to EOF, same 10 bytes" "bytes=134-" 206 "Content-Range: bytes 134-143/144" "QRSTUVWXYZ"
+check_range "end past EOF is clamped, not rejected" "bytes=100-99999" 206 "Content-Range: bytes 100-143/144" ""
+check_range "start past EOF is 416"                "bytes=99999-100005" 416 "Content-Range: bytes */144" ""
+check_range "unparseable Range is ignored -- whole file" "not-a-range" 200 "" "0123456789"
+check_range "multi-range is ignored (unsupported) -- whole file" "bytes=0-9,20-29" 200 "" "0123456789"
+
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"

@@ -30,6 +30,10 @@ class Response {
         // uses sendfile(2) to stream the file body directly to the socket.
         std::string     sendfile_path;
         std::uintmax_t  sendfile_size = 0;
+        // 0 = no active range (serve the whole file). Set only by
+        // partial_content(), once http_connection.cpp has already validated
+        // a Range header against this exact file's size.
+        std::uintmax_t  sendfile_range_length = 0;
 
         // SSE / WebSocket mode: headers already written directly to the socket;
         // finish_dispatch must not send a second response.
@@ -67,6 +71,7 @@ public:
         state_->body.clear();
         state_->sendfile_path.clear();
         state_->sendfile_size = 0;
+        state_->sendfile_range_length = 0;
         state_->body_committed = false;
         return old;
     }
@@ -223,6 +228,11 @@ public:
         state_->sendfile_path = path.string();
         state_->sendfile_size = sz;
         state_->body_committed = true;
+        // Advertises Range support up front, on the FIRST (non-ranged)
+        // response too -- a client has to see this before it knows it is
+        // allowed to ask for a range on a later request (a video player
+        // seeking is the reason this exists at all).
+        header("Accept-Ranges", "bytes");
         return *this;
     }
 
@@ -231,6 +241,23 @@ public:
         state_->sendfile_path = path.string();
         state_->sendfile_size = known_size;
         state_->body_committed = true;
+        header("Accept-Ranges", "bytes");
+        return *this;
+    }
+
+    // Marks this sendfile response as a 206 for a range ALREADY VALIDATED
+    // by the caller (http_connection.cpp's finish_dispatch() is the only
+    // place that ever sees the request's Range header, so it is the only
+    // caller). This only touches status/headers -- it does not move a
+    // single byte itself; sendfile(2) still does the actual streaming,
+    // using the offset/remaining finish_dispatch() already set on the
+    // connection before calling this.
+    Response& partial_content(std::uintmax_t range_start, std::uintmax_t range_end) {
+        state_->status_code = 206;
+        state_->sendfile_range_length = range_end - range_start + 1;
+        header("Content-Range", "bytes " + std::to_string(range_start) + "-"
+                                + std::to_string(range_end) + "/"
+                                + std::to_string(state_->sendfile_size));
         return *this;
     }
 
@@ -314,10 +341,15 @@ public:
         std::ostringstream os;
         os << "HTTP/1.1 " << state_->status_code
            << ' ' << reason_phrase(state_->status_code) << "\r\n";
-        // Content-Length: use file size when sendfile is in play
+        // Content-Length: use file size when sendfile is in play, or the
+        // range's length instead when partial_content() set one -- a 206
+        // sends fewer bytes than the file's own size, and Content-Length
+        // has to say so, not the full file size.
         auto clen = state_->sendfile_path.empty()
                     ? state_->body.size()
-                    : static_cast<std::size_t>(state_->sendfile_size);
+                    : static_cast<std::size_t>(state_->sendfile_range_length
+                                                ? state_->sendfile_range_length
+                                                : state_->sendfile_size);
         os << "Content-Length: " << clen << "\r\n";
         emit_headers(os);
         for (const auto& c : state_->cookies)
@@ -373,6 +405,7 @@ private:
             case 410: return "Gone";
             case 413: return "Content Too Large";
             case 415: return "Unsupported Media Type";
+            case 416: return "Range Not Satisfiable";
             case 422: return "Unprocessable Entity";
             case 429: return "Too Many Requests";
             case 500: return "Internal Server Error";

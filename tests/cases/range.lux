@@ -1,0 +1,10 @@
+# Range support (RFC 7233) on send_file(): response.hpp/http_connection.cpp,
+# not a module -- exercised against a fixed 144-byte fixture
+# (tests/cases/range_fixture.bin, four repeats of "0..9A..Z") so every
+# check below can assert on exact bytes, not just a status code.
+app:
+    name "range-check"
+    port 8087
+
+get endpoint("/range/file"):
+    return send_file("tests/cases/range_fixture.bin")

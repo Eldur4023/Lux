@@ -371,6 +371,25 @@ return { "ok": true }.cookie("theme", "dark",
 `cookie` options: `max_age`, `path`, `domain`, `secure`, `http_only`, `same_site`
 (`"lax"`, `"strict"`, `"none"`). Defaults: `path=/`, `HttpOnly`, `SameSite=Lax`.
 
+### Serving files
+
+`send_file(path)` and a `static "..." -> "..."` mount (§3) both end up going through the same
+`sendfile(2)`-backed path, so everything here applies to either:
+
+```lux
+return send_file("/var/videos/episode.mp4")
+```
+
+The response always carries `Accept-Ranges: bytes`, and honours a `Range` request header
+(RFC 7233) — the mechanism a video player's seek bar and a download manager's resume both rely
+on: `Range: bytes=1000-1999` gets back a `206 Partial Content` with only those 1000 bytes and a
+`Content-Range: bytes 1000-1999/<total>` header; `bytes=1000-` (open-ended) and `bytes=-500`
+(the last 500 bytes) both work too. A range whose start is past the end of the file is a `416
+Range Not Satisfiable`; one whose END is past the end is clamped to the last real byte instead
+— that is a normal request, not an error. A `Range` header with several ranges
+(`bytes=0-99,200-299`) or one this cannot parse at all is not an error either: the file is
+served in full, exactly as if the header had never arrived.
+
 ---
 
 ## 8. Groups and guards
