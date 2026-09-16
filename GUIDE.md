@@ -337,6 +337,43 @@ method never reaches production:
 An instance built by hand and one bound from the request body are the same thing: methods
 work the same on both.
 
+### Nesting
+
+A field can also be another class, or a `List` of one — not just the four scalars:
+
+```lux
+class Episode:
+    string title
+    int    duration_s
+
+class Season:
+    string        name
+    List<Episode> episodes
+    Episode?      pilot        # a single nested instance is fine too, ? or not
+```
+
+Which class comes first in the file does not matter — `Season` naming `Episode` above is
+exactly as valid as the other way around.
+
+```lux
+post endpoint("/seasons", Season s):
+    int total = 0
+    for Episode ep in s.episodes:
+        total = total + ep.duration_s
+    return { "name": s.name, "total_seconds": total }
+```
+
+Bound from a request body, the same rules apply one level deeper: a missing or wrong-typed
+field *inside* one of the episodes is exactly as much a `422` as one at the top level — the
+message just names the outer field (`"episodes: expected List"`), not which particular
+episode or subfield was the problem, matching a plain wrong-typed field's message shape.
+
+A field can be a scalar, another class, or a `List` of either — not a `List<List<...>>`, not a
+`Dict` (nobody has needed one yet). `--native` does not compile a class with a field like this
+today: a route using one of these classes stays on bytecode, silently and correctly, the same
+way an `await`-less database call or any other not-yet-native-representable shape already does
+— see `lux app.lux --native --check`'s own report of what did and did not compile.
+
 ---
 
 ## 7. Responses

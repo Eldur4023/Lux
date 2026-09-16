@@ -286,6 +286,16 @@ check "user function"  GET /doble/21         200 '"r":42'
 check "recursion"           GET /factorial/5      200 '"r":120'
 check "recursion cap"   GET /infinita         500 'too much recursion'
 
+check "class field: List<Class>, built and returned as JSON" GET /nested/build 200 '"episodes":[{"title":"Pilot","duration_s":1320},{"title":"Episode 2","duration_s":1290}]'
+check "class field: List<Class>, forward reference (Season before Episode) resolves" GET /nested/build 200 '"name":"Season 1"'
+check "class field: indexing/iterating/len() over a List<Class> field" GET /nested/access 200 '"first_title":"Pilot","total":2610,"count":2'
+check "class field: Episode? present, serialized inline"  GET /nested/optional_present 200 '"featured":{"title":"Pilot","duration_s":1320}'
+check "class field: Episode? absent is null, not omitted" GET /nested/optional_absent  200 '"featured":null'
+check "class field: POST body binds a nested List<Class> recursively" POST /nested/ingest 200 '"name":"S1","count":1,"total":100' '{"name":"S1","episodes":[{"title":"A","duration_s":100}]}'
+check "class field: POST body rejects a wrong type INSIDE a nested element" POST /nested/ingest 422 'episodes: expected List' '{"name":"S1","episodes":[{"title":"A","duration_s":"oops"}]}'
+check "class field: POST body rejects a missing field INSIDE a nested element" POST /nested/ingest 422 'episodes: expected List' '{"name":"S1","episodes":[{"title":"A"}]}'
+check "class field: POST body rejects the list itself being the wrong shape" POST /nested/ingest 422 'episodes: expected List' '{"name":"S1","episodes":"not-a-list"}'
+
 echo "== session and jwt =="
 start_server "$HERE/cases/session.lux" || exit 1
 check "no session"          GET /quien            200 '"user":null'

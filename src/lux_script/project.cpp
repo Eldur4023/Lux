@@ -541,10 +541,18 @@ lux::Task<void> rollback_pendientes(NativeCtx& ctx, lux::Request& req) {
 
 // ─── Classes ─────────────────────────────────────────────────────────────────
 
+struct ClassInfo; // needed by ClassField below, defined fully further down
+
 struct ClassField {
     std::string name;
-    std::string type;
-    bool        optional = false;
+    Type        type;   // scalar, List<scalar>, a class, or List<class>
+    // Non-null exactly when `type` is a class, or a List whose element is
+    // one -- resolved ONCE here, in build_classes(), so a consumer that
+    // needs to recurse into the nested class's own fields (JSON body
+    // validation below; OpenAPI schema generation) can follow this
+    // directly instead of re-resolving the class name against the whole
+    // ClassTable on every request.
+    std::shared_ptr<ClassInfo> nested_class;
 };
 
 // A `validate:` rule already compiled: it receives the fields as locals, in the
@@ -562,34 +570,105 @@ struct ClassInfo {
 
 using ClassTable = std::map<std::string, std::shared_ptr<ClassInfo>>;
 
+// Whether `t` is a type a class field can legally hold: one of the four
+// scalars, a List of one of those, a reference to another declared class,
+// or a List of another declared class -- one level of nesting inside a
+// List, never List<List<...>>/List<Dict<...>>, and Dict is not a field
+// type at all (not asked for; adding it would mean solving the same
+// "value fits the type" problem a second time for a shape nobody has
+// needed yet).
+//
+// `known` doubles as both "which names are legal class references" AND, on
+// a hit, the resolved shared_ptr the field's `nested_class` should point
+// at -- see build_classes()'s two-pass structure below for why every
+// class's ClassInfo already exists (if only as an empty shell) by the
+// time any field is checked against it, which is what makes a FORWARD
+// reference ("Season" declared before "Episode" in the file) resolve
+// exactly like a backward one.
+bool class_field_type_ok(const Type& t, const ClassTable& known,
+                         std::shared_ptr<ClassInfo>& nested_out) {
+    switch (t.kind()) {
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bool:
+        case Type::Kind::String:
+            return true;
+        case Type::Kind::Class: {
+            auto it = known.find(t.class_name());
+            if (it == known.end()) return false;
+            nested_out = it->second;
+            return true;
+        }
+        case Type::Kind::List: {
+            const Type& elem = t.element();
+            if (elem.is_optional()) return false;
+            switch (elem.kind()) {
+                case Type::Kind::Int:
+                case Type::Kind::Float:
+                case Type::Kind::Bool:
+                case Type::Kind::String:
+                    return true;
+                case Type::Kind::Class: {
+                    auto it = known.find(elem.class_name());
+                    if (it == known.end()) return false;
+                    nested_out = it->second;
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        }
+        default:
+            return false;
+    }
+}
+
 void build_classes(const Program& program, const FunctionSigs& fns,
                    const ClassSigs& sigs, const EnumSigs& enums,
                    const std::set<std::string>* imports,
                    ClassTable& out, DiagnosticBag& diags) {
+    // Pass 1: an empty shell for every uniquely-named class, before any
+    // field is looked at. A field referencing another class has to resolve
+    // against something regardless of which of the two classes comes first
+    // in the file -- without this, "Season" (with a field of type
+    // "Episode") declared above "Episode" in the same file would see
+    // "Episode" as unknown, a source-order dependency the language has no
+    // other reason to impose.
     for (const auto& c : program.classes) {
-        if (out.count(c.name)) {
+        if (out.count(c.name)) continue; // duplicate; reported in pass 2, in file order
+        auto info  = std::make_shared<ClassInfo>();
+        info->name = c.name;
+        out[c.name] = std::move(info);
+    }
+
+    std::set<std::string> processed;
+    for (const auto& c : program.classes) {
+        if (processed.count(c.name)) {
             diags.error(c.loc, "class '" + c.name + "' is already declared");
             continue;
         }
+        processed.insert(c.name);
 
-        auto info  = std::make_shared<ClassInfo>();
-        info->name = c.name;
+        auto& info = out[c.name]; // the shell pass 1 already created
 
         std::vector<TypedName> field_names;
         bool ok = true;
 
         for (const auto& f : c.fields) {
-            if (!is_scalar(f.type.name)) {
-                diags.error(f.loc, "type '" + f.type.str() + "' as a field is not yet "
-                                   "is not implemented; for now only "
-                                   "int, long, float, double, bool y string");
+            Type t = Type::from_declared(f.type);
+            std::shared_ptr<ClassInfo> nested;
+            if (!class_field_type_ok(t, out, nested)) {
+                diags.error(f.loc, "type '" + f.type.str() + "' as a field is not "
+                                   "supported; a field can be int, long, float, "
+                                   "double, bool, string, another class, or a List "
+                                   "of one of those");
                 ok = false;
                 continue;
             }
-            info->fields.push_back({f.name, f.type.name, f.type.optional});
+            info->fields.push_back({f.name, t, std::move(nested)});
             field_names.push_back({f.name, f.type.name});
         }
-        if (!ok) continue;
+        if (!ok) { info->fields.clear(); continue; }
 
         // Every rule is compiled against the class fields: if it mentions a name
         // that does not exist, the error comes out here and not in production.
@@ -605,8 +684,6 @@ void build_classes(const Program& program, const FunctionSigs& fns,
             }
             info->rules.push_back({chunk, r.message});
         }
-
-        out[c.name] = std::move(info);
     }
 }
 
@@ -690,33 +767,70 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
 // Checks that a JSON value fits the field's declared type.
 // There is no conversion between families: a string in an int field is an
 // error, not an attempt to parse.
-// Checks that the received value fits the type declared in the class.
 //
 // It is deliberately strict: a "30" is not good enough where an int was
 // declared.  The body saying one thing and the class another is exactly what
 // validation exists to catch.
-bool value_matches(const Value& v, const std::string& type, Value& out) {
-    if (type == "string") {
-        if (!v.is_str()) return false;
-        out = v;
-        return true;
+//
+// Recursive for a List field (checked element by element) and for a nested
+// class field (checked field by field, against THAT class's own fields --
+// `nested_class` is the same shared_ptr ClassField::nested_class already
+// carries, resolved once in build_classes(), so this never has to look a
+// class name back up in a ClassTable it was not even given). A List of a
+// class recurses through both cases at once: `type` is List<Episode>, so
+// each element goes through the Class branch below with the SAME
+// `nested_class` (the list's element class, not a different one).
+bool value_matches(const Value& v, const Type& type,
+                   const std::shared_ptr<ClassInfo>& nested_class, Value& out) {
+    switch (type.kind()) {
+        case Type::Kind::String:
+            if (!v.is_str()) return false;
+            out = v;
+            return true;
+        case Type::Kind::Bool:
+            if (!v.is_bool()) return false;
+            out = v;
+            return true;
+        case Type::Kind::Int:
+            if (!v.is_int()) return false;
+            out = v;
+            return true;
+        case Type::Kind::Float:
+            if (!v.is_num()) return false;
+            out = Value::real(v.as_float());
+            return true;
+        case Type::Kind::List: {
+            if (!v.is_list()) return false;
+            Value::List result;
+            result.reserve(v.as_list().size());
+            for (const auto& elem : v.as_list()) {
+                Value ev;
+                if (!value_matches(elem, type.element(), nested_class, ev)) return false;
+                result.push_back(std::move(ev));
+            }
+            out = Value::list(std::move(result));
+            return true;
+        }
+        case Type::Kind::Class: {
+            if (!v.is_dict() || !nested_class) return false;
+            Value::Dict result;
+            for (const auto& f : nested_class->fields) {
+                auto it = v.as_dict().find(f.name);
+                if (it == v.as_dict().end() || it->second.is_null()) {
+                    if (!f.type.is_optional()) return false;
+                    result[f.name] = Value::null();
+                    continue;
+                }
+                Value fv;
+                if (!value_matches(it->second, f.type, f.nested_class, fv)) return false;
+                result[f.name] = std::move(fv);
+            }
+            out = Value::dict(std::move(result));
+            return true;
+        }
+        default:
+            return false;
     }
-    if (type == "bool") {
-        if (!v.is_bool()) return false;
-        out = v;
-        return true;
-    }
-    if (type == "int" || type == "long") {
-        if (!v.is_int()) return false;
-        out = v;
-        return true;
-    }
-    if (type == "float" || type == "double") {
-        if (!v.is_num()) return false;
-        out = Value::real(v.as_float());
-        return true;
-    }
-    return false;
 }
 
 // Validates the parameters against the pattern and produces the binding plan.
@@ -870,14 +984,23 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
     for (const auto& f : ci.fields) {
         auto it = body.as_dict().find(f.name);
         if (it == body.as_dict().end() || it->second.is_null()) {
-            if (!f.optional) messages.push_back(f.name + ": required");
+            if (!f.type.is_optional()) messages.push_back(f.name + ": required");
             fields[f.name] = Value::null();
             ordered.push_back(Value::null());
             continue;
         }
         Value v;
-        if (!value_matches(it->second, f.type, v)) {
-            messages.push_back(f.name + ": expected " + f.type);
+        if (!value_matches(it->second, f.type, f.nested_class, v)) {
+            // base_name(), not to_string(): --native's own equivalent
+            // message (native_gen.cpp's construir_clases(), CampoNativo::
+            // ortografia) has always used the bare spelling with no `?`
+            // suffix, and the native_route_shadow suite compares the two
+            // byte for byte -- a class with a List<X>/nested-class field
+            // never reaches --native's version of this message at all (see
+            // class_field_type_ok()'s comment), so this only has to agree
+            // with native_gen.cpp for the scalar/optional-scalar case,
+            // which base_name() does exactly.
+            messages.push_back(f.name + ": expected " + f.type.base_name());
             fields[f.name] = Value::null();
             ordered.push_back(Value::null());
             continue;
@@ -1050,6 +1173,23 @@ Value jobj(std::initializer_list<std::pair<const char*, Value>> fields) {
     return Value::dict(std::move(d));
 }
 
+// The full JSON-Schema fragment for a class field -- unlike openapi_type()
+// above (a bare type name, still exactly right for a route/query param,
+// which stays scalar-only), a field can now be a List or a reference to
+// another class's own schema, so this builds the whole nested shape
+// instead of one type string. A List<Episode> becomes
+// {"type":"array","items":{"$ref":"#/components/schemas/Episode"}}; a
+// bare Episode field becomes just the $ref -- both point at the SAME
+// schema build_openapi() below already emits once per class, not a
+// second copy inlined here.
+Value openapi_field_schema(const Type& t) {
+    if (t.kind() == Type::Kind::List)
+        return jobj({{"type", jstr("array")}, {"items", openapi_field_schema(t.element())}});
+    if (t.kind() == Type::Kind::Class)
+        return jobj({{"$ref", jstr("#/components/schemas/" + t.class_name())}});
+    return jobj({{"type", jstr(openapi_type(t.base_name()))}});
+}
+
 // The document is built and serialized ONCE, when the .lux is compiled.  It
 // used to keep the tree and call dump() on every request to /openapi.json,
 // which is hot-path work for something that does not change.
@@ -1070,8 +1210,8 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
         Value::List required;
 
         for (const auto& f : info->fields) {
-            props[f.name] = jobj({{"type", jstr(openapi_type(f.type))}});
-            if (!f.optional) required.push_back(jstr(f.name));
+            props[f.name] = openapi_field_schema(f.type);
+            if (!f.type.is_optional()) required.push_back(jstr(f.name));
         }
 
         Value::Dict schema;

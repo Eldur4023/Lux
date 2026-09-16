@@ -19,6 +19,21 @@ class Punto:
     fn string label(string prefijo = "P"):
         return prefijo + "(" + str(this.x) + "," + str(this.y) + ")"
 
+# A class field can be a List of another class, or a plain reference to one
+# -- forward reference on purpose: Season names Episode before Episode is
+# declared below it, exercising build_classes()'s two-pass resolution.
+class Season:
+    string        name
+    List<Episode> episodes
+
+class Episode:
+    string title
+    int    duration_s
+
+class Library:
+    List<Episode> flat
+    Episode?      featured
+
 fn int doble(int x):
     return x * 2
 
@@ -52,6 +67,37 @@ get endpoint("/factorial/:n", int n):
 
 get endpoint("/infinita"):
     return { "r": infinita(1) }
+
+get endpoint("/nested/build"):
+    Episode e1 = Episode("Pilot", 1320)
+    Episode e2 = Episode("Episode 2", 1290)
+    Season s = Season("Season 1", [e1, e2])
+    return s
+
+get endpoint("/nested/access"):
+    Episode e1 = Episode("Pilot", 1320)
+    Episode e2 = Episode("Episode 2", 1290)
+    Season s = Season("Season 1", [e1, e2])
+    string first_title = s.episodes[0].title
+    int total = 0
+    for Episode ep in s.episodes:
+        total = total + ep.duration_s
+    return { "first_title": first_title, "total": total, "count": len(s.episodes) }
+
+get endpoint("/nested/optional_present"):
+    Episode e = Episode("Pilot", 1320)
+    Library lib = Library([e], e)
+    return lib
+
+get endpoint("/nested/optional_absent"):
+    Library lib = Library([], null)
+    return lib
+
+post endpoint("/nested/ingest", Season s):
+    int total = 0
+    for Episode ep in s.episodes:
+        total = total + ep.duration_s
+    return { "name": s.name, "count": len(s.episodes), "total": total }
 
 on error 422:
     return { "count": len(error.messages), "details": error.messages }
