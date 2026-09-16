@@ -438,6 +438,46 @@ Range Not Satisfiable`; one whose END is past the end is clamped to the last rea
 (`bytes=0-99,200-299`) or one this cannot parse at all is not an error either: the file is
 served in full, exactly as if the header had never arrived.
 
+### There is no `Response` type
+
+Since "everything goes out through `return`" (above), a helper `fn` cannot build a response
+and hand it back to the route that calls it — `send_file()`, `text()`, `html()`, `json()`,
+`status()`, `redirect()` and `render()` all write straight to the real response as a side
+effect and always return `null` to their own caller, chaining included. Declaring `Response`
+or `Response?` as a return type (or a parameter type) is a compile error for exactly that
+reason — it cannot ever tell a "no response yet" `null` apart from a "already served" one,
+since both are the same `null`:
+
+```lux
+fn Response? try_serve(string path):     # error: 'Response' cannot be used as a return type
+    if not os.is_file(path):
+        return null
+    return send_file(path)
+```
+
+Do the check inline in the route instead — this is the only shape that actually works:
+
+```lux
+get endpoint("/file/:name", string name):
+    string path = "./files/" + name
+    if not os.is_file(path):
+        return status(404)
+    return send_file(path).header("Content-Type", "text/plain")
+```
+
+If several routes share the same "does this exist, then serve it" logic, factor out the
+*check* (a `fn bool`/`fn string?` that returns a plain value), not the *serving*:
+
+```lux
+fn string? resolve_path(string name):
+    string path = "./files/" + name
+    return os.is_file(path) ? path : null
+
+get endpoint("/file/:name", string name):
+    string? path = resolve_path(name)
+    return path == null ? status(404) : send_file(path).header("Content-Type", "text/plain")
+```
+
 ---
 
 ## 8. Groups and guards

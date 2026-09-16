@@ -1,0 +1,6 @@
+fn Response? try_serve(string path):
+    return null
+
+get endpoint("/a"):
+    Response? r = try_serve("./file.txt")
+    return r == null ? status(404) : r

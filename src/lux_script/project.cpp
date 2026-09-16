@@ -1318,6 +1318,29 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
     return Value::dict(std::move(doc)).to_json_text();
 }
 
+// `Response` is not a class the checker knows about, and it never can be:
+// send_file()/text()/html()/json()/status()/redirect() all write directly
+// to ctx.res as a side effect and return Value::null() to whoever called
+// them (see call_method()/fn_send_file() et al, natives.cpp) -- there is
+// no runtime value that represents "a response", by design (GUIDE.md §7:
+// "Everything goes out through return. There is no response object to
+// carry around."). Before this check existed, `fn Response? try_serve():
+// ... return send_file(path).header(...)` compiled silently and corrupted
+// the real response at runtime: try_serve()'s return value is always
+// null (send_file() returns null; .header()'s call_method() branch passes
+// its receiver straight through), so a caller doing `r == null ? ... : r`
+// to tell "no file" from "served" always took the "no file" branch --
+// and then wrote a SECOND, conflicting response (its own status()/return)
+// on top of the first one, ending up with the second call's status and
+// body but the first call's leftover headers (nothing clears headers
+// between two response-writing calls in the same request). Caught here
+// instead, at the declaration, before any of that can happen.
+bool mentions_response_type(const TypeRef& t) {
+    if (t.name == "Response") return true;
+    for (const auto& a : t.args) if (mentions_response_type(a)) return true;
+    return false;
+}
+
 // Functions are compiled before routes and handlers, and they all see the
 // complete table: that way they can call each other regardless of the order
 // they were declared in or the file they are in.
@@ -1328,9 +1351,20 @@ FnSig make_sig(size_t index, const std::vector<Param>& params, const TypeRef& re
     FnSig sig;
     sig.index    = index;
     sig.devuelve = Type::from_declared(return_type);
+    if (mentions_response_type(return_type))
+        diags.error(return_type.loc,
+            "'Response' cannot be used as a return type: there is no response value to "
+            "hold. send_file()/text()/html()/json()/status()/redirect()/render() write "
+            "the response directly and always return null to their own caller -- write "
+            "the response inline in the route itself instead of returning it from a "
+            "helper function.");
     bool seen_default = false;
     for (const auto& p : params) {
         sig.defaults.push_back(p.default_value.get());
+        if (mentions_response_type(p.type))
+            diags.error(p.loc,
+                "'Response' cannot be used as a parameter type: there is no response "
+                "value to pass in. See the same note on a 'Response' return type.");
         if (p.default_value) seen_default = true;
         else {
             if (seen_default)
