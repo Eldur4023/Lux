@@ -447,6 +447,14 @@ public:
         return t && !t->is_cancelled();
     }
 
+    // A weak reference to this connection's underlying state -- the handle
+    // something that has to outlive a single request (a room's member
+    // list, kept by a broadcast module -- see ws_send_threadsafe() below)
+    // needs: a second WSConnection (a shared_ptr under the hood) would keep
+    // a closed connection's state alive for as long as the registry held
+    // it, which a weak_ptr does not.
+    std::weak_ptr<detail::WSState> weak_handle() const { return s_; }
+
 private:
     std::shared_ptr<detail::WSState> s_;
 
@@ -457,5 +465,39 @@ private:
         return true;
     }
 };
+
+// Posts `text` onto `target`'s own event-loop thread and sends it there as
+// a text frame -- unlike WSConnection::send()/send_binary()/ping()/close(),
+// which all assume the CALLING thread already owns this connection (the
+// normal case: called from inside that connection's own ws() handler),
+// this is safe to call from ANY thread. That is exactly what a
+// cross-connection broadcast needs: the thread handling the
+// `rooms.broadcast(...)` call that reaches this is essentially never the
+// thread that owns every OTHER member of the room -- WSState's fields
+// (read_buf, the write buffer, the fd via send_fn) are not synchronized,
+// by design: every connection is only ever touched by the ONE event-loop
+// thread that owns it. core::EventLoop::post() is already the thread-safe
+// hop used for exactly this kind of cross-thread handoff (task.hpp uses it
+// to destroy a coroutine handle from whatever thread triggers that).
+//
+// `target` is a weak_ptr, not a WSConnection, for the same reason
+// weak_handle() returns one: the natural place to keep this (a room's
+// member list) has to outlive any single request and must not itself keep
+// a closed connection's state alive. Returns false without posting
+// anything if the connection is already gone or already closed -- a
+// broadcast's target list is expected to accumulate a few stale entries
+// between prunes (see rooms.cpp), and this is how a caller finds out one
+// was stale, not an error.
+inline bool ws_send_threadsafe(const std::weak_ptr<detail::WSState>& target,
+                               std::string text) {
+    auto s = target.lock();
+    if (!s || s->closed || !s->loop) return false;
+    std::weak_ptr<detail::WSState> weak = s;
+    s->loop->post([weak, text = std::move(text)]() mutable {
+        if (auto sp = weak.lock(); sp && !sp->closed)
+            sp->raw_send(detail::build_frame(text, 0x1));
+    });
+    return true;
+}
 
 } // namespace lux

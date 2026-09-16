@@ -668,6 +668,51 @@ the same-origin policy to the WebSocket handshake: without an allowlist, any sit
 the connection from your user's browser and inherit their cookies. An origin outside the list
 gets a `403`.
 
+### Broadcasting to a room
+
+`ws` above is per-connection: `ws.send()` only ever reaches the one client that sent the
+message you are replying to. Reaching every OTHER client watching the same thing — a chat
+room, a "watch together" session, live presence — needs `rooms`, a native module built for
+exactly this:
+
+```lux
+import rooms
+
+ws endpoint("/watch/:id", string id) origins("https://myapp.com"):
+    rooms.join("movie-" + id)
+
+    while ws.open:
+        string msg = await ws.recv()
+        if msg == null:
+            break
+        rooms.broadcast_others("movie-" + id, msg)
+
+    rooms.leave("movie-" + id)
+
+get endpoint("/watch/:id/viewers", string id):
+    return { "n": rooms.count("movie-" + id) }
+```
+
+| | |
+|---|---|
+| `rooms.join(name)` | Adds the current connection to room `name`. `ws` route only. |
+| `rooms.leave(name)` | Removes it. `ws` route only. |
+| `rooms.leave_all()` | Removes it from every room it is in. `ws` route only. |
+| `rooms.broadcast(name, message)` | Sends `message` to everyone currently in `name`, sender included. |
+| `rooms.broadcast_others(name, message)` | Same, minus the calling connection — the usual "echo to everyone else" shape. |
+| `rooms.count(name)` | How many connections are currently in `name`. |
+
+A room is just a string you make up — there is nothing to declare or configure. `broadcast`/
+`broadcast_others`/`count` work from any route, `ws` or not; `join`/`leave`/`leave_all` need an
+actual connection to add or remove, so they only work inside a `ws` route.
+
+A connection that disconnects without calling `leave()` (closing the tab, losing the network)
+is not removed immediately — it is noticed and dropped the next time that room is joined,
+broadcast to, or counted. `rooms.count()` right after a disconnect can be off by however many
+clients dropped that way since the last such call; call it again and it corrects itself. This
+does not affect `broadcast()`: reaching a connection that is actually gone by then is a normal,
+silently-skipped case, not an error.
+
 ---
 
 ## 15. Shared state
@@ -1085,7 +1130,7 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, eight
+Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, nine
 so far. Every one but `http` is synchronous (no `await`) and usually needs no
 `<name>: { ... }` block in `app:` at all:
 
@@ -1133,6 +1178,13 @@ so far. Every one but `http` is synchronous (no `await`) and usually needs no
   close enough to Python's `re` that most patterns copied from either work unchanged. Compiles
   the pattern fresh on every call, no caching — fine for the microsecond-scale patterns most
   routes need, a real (not yet addressed) repeated cost for a complex one reused very often.
+- **`rooms`** — cross-connection WebSocket broadcast: `join(name)`/`leave(name)`/`leave_all()`
+  (the current connection; `ws` route only), `broadcast(name, message)`/
+  `broadcast_others(name, message)` (everyone in the room, or everyone but the caller; either
+  works from any route), `count(name)`. See [§14](#14-websockets)'s "Broadcasting to a room" for
+  the full example. Membership in a room a connection never explicitly `leave()`s is dropped
+  lazily, on the next `join`/`broadcast`/`count` that touches that room, not the instant the
+  connection closes.
 
 ```lux
 import hash
@@ -1143,6 +1195,7 @@ import os
 import math
 import time
 import regex
+import rooms
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }

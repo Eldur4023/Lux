@@ -371,10 +371,11 @@ get endpoint("/valid_email/:s", string s):
 |---|---|
 | `hash` | `sha256`, `hmac_sha256`, `random_hex` |
 | `csv` | An in-memory table: parse, filter, group, aggregate — no pandas required |
-| `os` | Env vars, paths, and async file I/O |
+| `os` | Env vars, paths, async file I/O, and running subprocesses (`os.run`, no shell involved) |
 | `math` | `abs`, `min`, `max`, `round`, `sqrt`, `pow`, `random`, the usual suspects |
 | `time` | Unix time plus ISO 8601 formatting and parsing |
 | `regex` | `test`, `find`, `find_all`, `groups`, `replace`, `split` |
+| `rooms` | Cross-connection WebSocket broadcast: join a room, leave it, send to everyone in it |
 | `pdf` | Generates PDFs, needs cairo at build time |
 | `http` | Outbound HTTP calls, needs libcurl at build time |
 

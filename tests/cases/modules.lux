@@ -12,6 +12,7 @@ import os
 import math
 import time
 import regex
+import rooms
 
 get endpoint("/hash/:s", string s):
     return { "sha256": hash.sha256(s) }
@@ -148,3 +149,20 @@ get endpoint("/regex/split"):
 
 get endpoint("/regex/bad_pattern"):
     return { "r": regex.test("(unclosed", "x") }
+
+# `rooms` (NATIVE-MODULES.md): cross-connection WebSocket broadcast. The
+# real thing (two live connections joining a room, one broadcasting to the
+# other) needs an actual WebSocket client this HTTP-only regression harness
+# does not have -- verified by hand instead (see the module's own comment
+# in modules/base_modules/rooms.cpp). What a plain GET *can* check: an
+# empty/unknown room behaves like "nobody home" rather than an error, and
+# join()/leave()/leave_all() refuse to run outside a ws route instead of
+# dereferencing a null connection.
+get endpoint("/rooms/count_empty"):
+    return { "n": rooms.count("nobody-here") }
+
+get endpoint("/rooms/broadcast_empty"):
+    return { "reached": rooms.broadcast("nobody-here", "hello") }
+
+get endpoint("/rooms/join_outside_ws"):
+    return { "ok": rooms.join("x") }

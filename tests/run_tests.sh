@@ -356,6 +356,10 @@ check "regex.replace backreferences" GET /regex/replace_backref 200 '"r":"host@u
 check "regex.split"            GET /regex/split 200 '"r":["a","b","c","d"]'
 check "regex rejects an invalid pattern" GET /regex/bad_pattern 500 'invalid regex pattern'
 
+check "rooms.count on an unknown room is 0, not an error" GET /rooms/count_empty     200 '"n":0'
+check "rooms.broadcast to an unknown room reaches nobody" GET /rooms/broadcast_empty 200 '"reached":0'
+check "rooms.join outside a ws route is rejected"         GET /rooms/join_outside_ws 500 'can only be called from a ws route'
+
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
