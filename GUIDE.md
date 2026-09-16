@@ -1178,12 +1178,16 @@ them usually needs an `<name>: { ... }` block in `app:` at all:
   [NATIVE-MODULES.md](NATIVE-MODULES.md) §2), and this is the one module where that is a real
   cost, not a theoretical one, under real concurrent load.
 - **`os`** — environment (`getenv(name[, default])`), paths (`cwd()`, `path_join(...)`,
-  `path_exists`/`path_basename`/`path_dirname`/`path_abs`), file I/O
-  (`read_file`/`write_file`/`list_dir`/`remove_file`/`make_dir`), and running external commands
-  (`run(command[, args])`, an argv `List`, never a shell string — see [NATIVE-MODULES.md](
-  NATIVE-MODULES.md) §4 for why). `run()` shares `http`'s blocking-thread limitation, bounded by
-  the same kind of fixed timeout (15s). No path sandboxing — trusts the caller exactly as much as
-  Python's `os`/`open()`/`subprocess` do.
+  `path_exists`/`path_basename`/`path_dirname`/`path_abs`), stat (`is_dir(path)`/
+  `is_file(path)`, both `false` — neither one, not an error — for a missing path or a dangling
+  symlink; `file_size(path)` and `mtime_ms(path)`, a Unix timestamp in milliseconds, both `-1`
+  for a missing path, and `file_size()` on a directory is `-1` too, not some arbitrary
+  filesystem-reported number), file I/O (`read_file`/`write_file`/`list_dir`/`remove_file`/
+  `make_dir`), and running external commands (`run(command[, args])`, an argv `List`, never a
+  shell string — see [NATIVE-MODULES.md](NATIVE-MODULES.md) §4 for why). `run()` shares
+  `http`'s blocking-thread limitation, bounded by the same kind of fixed timeout (15s); every
+  other function here is a plain `stat()`, microseconds regardless. No path sandboxing — trusts
+  the caller exactly as much as Python's `os`/`open()`/`subprocess` do.
 - **`math`** — `abs`/`min`/`max`/`round`/`floor`/`ceil`/`sqrt`/`pow`/`log`, plus
   `random()` (`[0.0, 1.0)`) and `random_int(lo, hi)` (inclusive on both ends).
 - **`time`** — a timestamp is a plain `int` (milliseconds since the Unix epoch, UTC always, no

@@ -337,6 +337,13 @@ check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":
 check "os.run exit status"         GET /os/run_echo               200 '"status":0'
 check "os.run missing command errors" GET /os/run_missing         200 '"error":"os.run(): could not start'
 
+check "os.is_dir/is_file tell a directory from a file" GET /os/stat 200 '"dir_is_dir":true,"dir_is_file":false,"file_is_dir":false,"file_is_file":true'
+check "os.file_size reads a real file's size"          GET /os/stat 200 '"size":5'
+check "os.file_size on a directory is -1, not a real size" GET /os/stat 200 '"dir_size":-1'
+check "os.mtime_ms on a real file is a positive timestamp" GET /os/stat 200 '"mtime_positive":true'
+check "os.is_dir/is_file on a missing path are both false" GET /os/stat_missing 200 '"is_dir":false,"is_file":false'
+check "os.file_size/mtime_ms on a missing path are -1"     GET /os/stat_missing 200 '"size":-1,"mtime":-1'
+
 check "math.abs/min/max"           GET /math/basic  200 '"abs":7,"abs_f":2.5,"min":3,"max":9'
 check "math.round/floor/ceil"      GET /math/basic  200 '"round":3,"floor":2,"ceil":3'
 check "math.sqrt/pow/log"          GET /math/basic  200 '"sqrt":4.0,"pow":1024.0,"log":0.0'

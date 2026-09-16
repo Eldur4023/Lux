@@ -94,6 +94,29 @@ get endpoint("/os/missing_file"):
     Json content = await os.read_file("/definitely/does/not/exist/xyz123")
     return { "content_is_null": content == null }
 
+get endpoint("/os/stat"):
+    string tmp = os.getenv("LUX_TEST_TMP", "/tmp")
+    string dir = os.path_join(tmp, "os_stat_test")
+    os.make_dir(dir)
+    string file = os.path_join(dir, "stat_me.txt")
+    await os.write_file(file, "12345")
+    bool dir_is_dir = os.is_dir(dir)
+    bool dir_is_file = os.is_file(dir)
+    bool file_is_dir = os.is_dir(file)
+    bool file_is_file = os.is_file(file)
+    int size = os.file_size(file)
+    int dir_size = os.file_size(dir)
+    bool mtime_positive = os.mtime_ms(file) > 0
+    os.remove_file(file)
+    return { "dir_is_dir": dir_is_dir, "dir_is_file": dir_is_file,
+              "file_is_dir": file_is_dir, "file_is_file": file_is_file,
+              "size": size, "dir_size": dir_size, "mtime_positive": mtime_positive }
+
+get endpoint("/os/stat_missing"):
+    string missing = "/definitely/does/not/exist/xyz123"
+    return { "is_dir": os.is_dir(missing), "is_file": os.is_file(missing),
+              "size": os.file_size(missing), "mtime": os.mtime_ms(missing) }
+
 get endpoint("/os/run_echo"):
     Json r = await os.run("/bin/echo", ["hello", "from", "os.run"])
     return r

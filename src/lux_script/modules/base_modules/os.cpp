@@ -37,6 +37,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -88,6 +89,51 @@ Value fn_os_path_exists(NativeCtx&, std::vector<Value>& args, std::string& error
     if (!args[0].is_str()) { error = "os.path_exists() expects a path"; return Value::null(); }
     std::error_code ec;
     return Value::boolean(fs::exists(fs::path(args[0].as_str()), ec));
+}
+
+// A dangling symlink is neither -- is_directory()/is_regular_file() both
+// come back false for one, matching what those two functions already do
+// with a broken symlink (they follow it, find nothing, and report false
+// rather than throwing), not a special case handled here.
+Value fn_os_is_dir(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.is_dir() expects a path"; return Value::null(); }
+    std::error_code ec;
+    return Value::boolean(fs::is_directory(fs::path(args[0].as_str()), ec));
+}
+
+Value fn_os_is_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.is_file() expects a path"; return Value::null(); }
+    std::error_code ec;
+    return Value::boolean(fs::is_regular_file(fs::path(args[0].as_str()), ec));
+}
+
+// -1 rather than null (unlike read_file()): the result is an int, and null
+// would force every caller to check for null BEFORE it could compare/add
+// the size -- the same reason remove_file() below returns false rather
+// than null when the file was already gone. -1 is never a real size, so it
+// stays unambiguous. A directory (fs::file_size() fails on one, `ec` gets
+// set) is -1 too, not some arbitrary filesystem-reported size.
+Value fn_os_file_size(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.file_size() expects a path"; return Value::null(); }
+    std::error_code ec;
+    auto sz = fs::file_size(fs::path(args[0].as_str()), ec);
+    return Value::integer(ec ? -1 : static_cast<long long>(sz));
+}
+
+Value fn_os_mtime_ms(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "os.mtime_ms() expects a path"; return Value::null(); }
+    std::error_code ec;
+    auto ftime = fs::last_write_time(fs::path(args[0].as_str()), ec);
+    if (ec) return Value::integer(-1);
+    // file_time_type's epoch is unspecified pre-C++20 but IS the system
+    // clock's epoch from C++20 on (the guarantee this project already
+    // depends on -- CMakeLists.txt requires C++20): clock_cast to
+    // system_clock is the standard, portable way to get a real Unix
+    // timestamp out of it, not the file_clock::to_sys() shim some libstdc++
+    // versions add ad hoc.
+    auto sys = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
+    auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(sys.time_since_epoch());
+    return Value::integer(static_cast<long long>(ms.count()));
 }
 
 Value fn_os_path_basename(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -324,6 +370,10 @@ public:
             {"cwd",          0, 0, fn_os_cwd},
             {"path_join",    1, -1, fn_os_path_join},
             {"path_exists",  1, 1, fn_os_path_exists},
+            {"is_dir",       1, 1, fn_os_is_dir},
+            {"is_file",      1, 1, fn_os_is_file},
+            {"file_size",    1, 1, fn_os_file_size},
+            {"mtime_ms",     1, 1, fn_os_mtime_ms},
             {"path_basename",1, 1, fn_os_path_basename},
             {"path_dirname", 1, 1, fn_os_path_dirname},
             {"path_abs",     1, 1, fn_os_path_abs},
