@@ -1329,6 +1329,14 @@ them usually needs an `<name>: { ... }` block in `app:` at all:
   close enough to Python's `re` that most patterns copied from either work unchanged. Compiles
   the pattern fresh on every call, no caching — fine for the microsecond-scale patterns most
   routes need, a real (not yet addressed) repeated cost for a complex one reused very often.
+  **Every `regex.*` call rejects a `text` (subject) over 4096 bytes**, with a clear error —
+  `std::regex` recurses over the subject once per character, which a normal 8 MB thread stack
+  cannot survive much past ~30 000 characters even for a trivial pattern, far sooner with a
+  few nested capture groups; this is a deliberate, permanent guard against that crash, not a
+  bug to work around by raising the limit. Chop a long text into pieces yourself first — with
+  `string.index_of()`/`string.slice()` (no length limit of their own), a line-by-line
+  `string.split(text, "\n")`, or whatever structure the text already has — and run `regex.*`
+  on each piece, not the whole thing at once.
 - **`rooms`** — cross-connection WebSocket broadcast: `join(name)`/`leave(name)`/`leave_all()`
   (the current connection; `ws` route only), `broadcast(name, message)`/
   `broadcast_others(name, message)` (everyone in the room, or everyone but the caller; either

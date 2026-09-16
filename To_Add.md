@@ -99,3 +99,85 @@ método (`m.devuelve ? Type::from_legacy_name(m.devuelve) : recv`), pero mirando
 método. Comprobar también si `check_call`/`emit_call` tienen el mismo tipo de hueco
 para otras formas encadenadas (`fn_que_devuelve_list()[0].campo`, etc.) una vez se
 toque esto, no solo el caso de un método.
+
+---
+
+## `:param.ext` en un patrón de ruta no liga el parámetro — y `{param}.ext` "compila" pero liga el valor equivocado
+
+**Encontrado:** 2026-09-17, reportado desde Homeflix al intentar `get endpoint("/hls/:n.ts", int n)`
+para servir segmentos HLS con la extensión incrustada en la URL.
+
+**Qué falla — dos capas, no solo una:**
+
+1. `:n.ts` da un error de compilación confuso:
+   ```
+   error: the pattern declares ':n.ts' but no parameter binds it
+   ```
+   Esto viene de `pattern_params()` (`src/lux_script/project.cpp`), que para la sintaxis `:nombre`
+   busca el siguiente `/` como delimitador de cierre (`char close = (pattern[i] == '{') ? '}' : '/';`)
+   — para `:n.ts`, el "nombre" que extrae es literalmente `n.ts` (todo hasta la barra o el final),
+   no `n`. El checker exige entonces un parámetro llamado `n.ts`, que nadie declara nunca.
+
+2. Cambiar a `{n}.ts` (delimitador `}`, distinto en `pattern_params()`) hace que el checker SÍ
+   extraiga `n` correctamente y compile limpio — pero **el valor que llega en tiempo de
+   ejecución es el equivocado**, no un error: `GET /segment/42.ts` contra `get
+   endpoint("/segment/{n}.ts", int n)` devuelve `{"n":0}`, no `{"n":42}`. Esto es un bug
+   **distinto y más profundo**, en el router de C++ (`src/router.cpp`), no en el checker de
+   Lux Script:
+   - `Router::normalize_pattern()` convierte `{n}.ts` a `:n.ts` ANTES de registrar la ruta
+     (sustituye `{` por `:` y quita el `}`, dejando todo lo demás igual) — así que en tiempo de
+     ejecución `{n}.ts` y `:n.ts` son exactamente el mismo patrón interno.
+   - `Router::add_internal()` (línea `name = seg.substr(1);`) trata el segmento entero
+     `n.ts` (todo lo que sigue a `:`) como el NOMBRE del parámetro — liga
+     `params["n.ts"] = "42.ts"` (el valor CRUDO del segmento completo), nunca `params["n"]`.
+   - El binding de Lux Script busca `req.params["n"]` (porque el checker, vía la sintaxis
+     `{n}`, cree que el parámetro se llama `n`) — no lo encuentra, y el `int n` cae a su valor
+     por defecto (`0`), sin error ni aviso.
+
+   Conclusión: **el router no soporta en absoluto un parámetro combinado con texto literal
+   dentro del mismo segmento** (`:id.json`, `file-:id`, `{id}.ts`, lo que sea) — no es un hueco
+   del checker nada más, es una limitación real de emparejamiento de segmentos. Un segmento de
+   patrón solo puede ser enteramente estático, enteramente un parámetro, o `*`.
+
+**Workaround actual (funciona perfectamente):** usar un segmento de ruta limpio para el
+parámetro, sin incrustar la extensión (`/segment/:n` en vez de `/segment/:n.ts`) — HLS no exige
+que la URL termine literalmente en `.ts`, basta con el `Content-Type` de la respuesta.
+
+**Dónde mirar para arreglarlo:**
+- `pattern_params()` (`src/lux_script/project.cpp`, cerca de la línea 373): tendría que saber
+  parsear un segmento MIXTO (`:nombre` seguido de texto literal antes del `/`), no solo
+  `:nombre-hasta-la-barra` o `{nombre}`.
+- `Router::normalize_pattern()`/`Router::add_internal()`/`Router::match_recursive()`
+  (`src/router.cpp`): el `Node` de tipo `PARAM` tendría que poder llevar un sufijo/prefijo
+  literal, y `match_recursive()` tendría que comprobar ese sufijo contra el segmento real
+  ANTES de aceptar el match y extraer solo la parte variable como valor — hoy asume que un
+  segmento `PARAM` consume el segmento completo, sin más.
+- Los dos ficheros tienen que quedar consistentes entre sí (el nombre que el checker de Lux
+  Script cree que tiene el parámetro tiene que ser EXACTAMENTE la clave que el router real usa
+  al ligar `params[...]`) — el bug de `{n}.ts` de arriba es precisamente esa inconsistencia.
+
+---
+
+## `/*` no cubre la ruta raíz vacía `/`
+
+**Encontrado:** 2026-09-17, reportado desde Homeflix al montar un fallback SPA con
+`any endpoint("/*")`.
+
+**Qué pasa:** `get endpoint("/*")` (o `any`) coincide con `/algo`, `/a/b/c`, etc., pero NO con
+`/` a secas — hace falta al menos un carácter después de la barra. No está confirmado si es
+intencional (un wildcard normalmente implica "uno o más segmentos", no "cero o más"), pero
+sorprende si no se dice en ningún sitio, así que hay que documentarlo bien visible aunque se
+decida no cambiar el comportamiento.
+
+**Workaround actual (funciona perfectamente):** declarar también un `get endpoint("/")`
+explícito junto al comodín `/*`.
+
+**Dónde mirar:** `Router::match_recursive()`/`split_path()` (`src/router.cpp`) — `/` produce
+una lista de segmentos VACÍA (`split_path` descarta segmentos vacíos), así que el nodo
+`WILDCARD` nunca llega a probarse para ella (el bucle `for (const auto& seg : segments)` en
+`match_recursive` no itera nada, y el caso terminal en `index == segments.size()` solo mira
+`node->handlers`, no los hijos wildcard del nodo raíz). Si se decide soportarlo, sería en ese
+caso terminal: comprobar también `node->find_wildcard_child()` cuando `index == segments.size()`
+antes de darse por vencido. Si se decide NO soportarlo (razonable: es coherente con que un
+wildcard siempre capture "el resto de la ruta", nunca "nada"), basta con una nota en GUIDE.md
+junto a la sección de rutas.
