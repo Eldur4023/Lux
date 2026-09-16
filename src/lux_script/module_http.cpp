@@ -24,6 +24,7 @@
 
 #include <curl/curl.h>
 
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 
@@ -39,6 +40,20 @@ namespace {
 constexpr long kTimeoutMs = 15000;
 constexpr long kMaxRedirects = 5;
 
+// A remote server behind http.* is attacker-controlled just as often as any
+// client hitting this framework's own listener is (it is a URL a handler
+// built from user input, or a third-party API that gets compromised) --
+// yet unlike the inbound side (http_parser.hpp's kMaxBodySize), nothing
+// capped what write_body()/write_header() below would accumulate. A
+// malicious or hung-but-still-sending server could pin this pool worker's
+// memory to whatever size it liked for the whole kTimeoutMs window.
+// Returning anything other than the full byte count from a libcurl
+// write/header callback aborts the transfer with CURLE_WRITE_ERROR, which
+// do_request() already turns into a normal `error` result below -- no new
+// failure path needed.
+constexpr size_t kMaxResponseBodyBytes   = 16 * 1024 * 1024; // matches inbound kMaxBodySize
+constexpr size_t kMaxResponseHeaderBytes = 64 * 1024;
+
 // curl_global_init() is NOT thread-safe against concurrent calls, but IS
 // safe to call once, early, before any other thread touches curl -- exactly
 // what a call from BuiltinModuleRegistry's constructor gives (single-
@@ -49,14 +64,29 @@ struct CurlGlobal {
 };
 
 size_t write_body(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    static_cast<std::string*>(userdata)->append(ptr, size * nmemb);
-    return size * nmemb;
+    auto*  out = static_cast<std::string*>(userdata);
+    size_t n   = size * nmemb;
+    if (out->size() + n > kMaxResponseBodyBytes) return 0; // short write -> curl aborts
+    out->append(ptr, n);
+    return n;
 }
+
+// Bundles the Dict together with a running byte total: the total has to be
+// tracked incrementally here since summing the Dict's own strings on every
+// call would make the cap itself O(n^2) over a header block with many lines.
+struct HeaderSink {
+    Value::Dict headers;
+    size_t      bytes = 0;
+};
 
 // Collects response headers into a Dict -- a repeated header keeps its LAST
 // occurrence, documented (GUIDE.md), not an oversight.
 size_t write_header(char* buffer, size_t size, size_t nitems, void* userdata) {
     size_t total = size * nitems;
+    auto*  sink  = static_cast<HeaderSink*>(userdata);
+    if (sink->bytes + total > kMaxResponseHeaderBytes) return 0; // short write -> curl aborts
+    sink->bytes += total;
+
     std::string_view line(buffer, total);
     // The status line ("HTTP/1.1 200 OK") and the blank line that ends the
     // header block both arrive through this callback too -- neither has a
@@ -70,7 +100,7 @@ size_t write_header(char* buffer, size_t size, size_t nitems, void* userdata) {
     while (vend > vstart && (line[vend - 1] == '\r' || line[vend - 1] == '\n')) --vend;
     std::string value(line.substr(vstart, vend - vstart));
     for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    (*static_cast<Value::Dict*>(userdata))[name] = Value::str(value);
+    sink->headers[name] = Value::str(value);
     return total;
 }
 
@@ -91,14 +121,26 @@ Value do_request(const std::string& method, const std::string& url,
     if (!curl) { error = "http: could not initialize the request"; return Value::null(); }
 
     std::string response_body;
-    Value::Dict response_headers;
+    HeaderSink  response_headers;
     struct curl_slist* header_list = nullptr;
     bool content_type_set = false;
 
     if (headers_arg && headers_arg->is_dict()) {
         for (const auto& [key, val] : headers_arg->as_dict()) {
             if (!val.is_str()) continue; // a non-string header value is silently skipped, not an error
-            std::string line = key + ": " + val.as_str();
+            // Strip CR/LF and NUL before handing the line to curl_slist_append:
+            // Response::header() (response.hpp) and build_set_cookie()
+            // (cookies.hpp) both strip CR/LF on the INBOUND side of this
+            // framework for exactly this reason -- without it here, a
+            // key/value built from request data lets a handler inject
+            // arbitrary extra header lines (or truncate this one at an
+            // embedded NUL) into the OUTBOUND request this module sends.
+            auto strip = [](std::string s) {
+                s.erase(std::remove_if(s.begin(), s.end(),
+                    [](char c) { return c == '\r' || c == '\n' || c == '\0'; }), s.end());
+                return s;
+            };
+            std::string line = strip(key) + ": " + strip(val.as_str());
             header_list = curl_slist_append(header_list, line.c_str());
             std::string lower = key;
             for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -133,6 +175,15 @@ Value do_request(const std::string& method, const std::string& url,
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, kTimeoutMs);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, kMaxRedirects);
+    // A redirect is server-controlled, not just the initial URL: without
+    // this, a 30x response could point CURLOPT_FOLLOWLOCATION at
+    // file:///etc/passwd or another non-HTTP scheme curl happens to support,
+    // regardless of what scheme this module's own `url.rfind(...)` check
+    // above validated on the way in. The bitmask form (not the _STR variant
+    // added in curl 7.85) is used so this keeps building against whatever
+    // older libcurl-dev a distro ships.
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Lux/1.0");
     // Secure by default, and never made configurable to "off" from Lux
     // Script: the whole reason this module exists as an exception to "no
@@ -156,7 +207,7 @@ Value do_request(const std::string& method, const std::string& url,
 
     Value::Dict out;
     out["status"] = Value::integer(status);
-    out["headers"] = Value::dict(std::move(response_headers));
+    out["headers"] = Value::dict(std::move(response_headers.headers));
     // The body is handed back parsed whenever it looks like JSON -- the
     // common case for an API client -- and as the raw text otherwise (HTML,
     // plain text, an error page that is not JSON): Value::parse_json()

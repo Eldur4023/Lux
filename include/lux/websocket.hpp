@@ -173,6 +173,13 @@ struct WSState {
         buf[3] = char(code & 0xFF);
         raw_send(std::string(buf, 4));
         closed = true;
+        // Nothing still buffered will ever be parsed after this -- drop it
+        // now rather than let it sit until the WSState is destroyed. feed()
+        // also stops appending once `closed` is set, so this bounds the
+        // total to whatever arrived before this call, not whatever a peer
+        // that ignores the Close frame keeps sending afterward.
+        read_buf.clear();
+        read_buf.shrink_to_fit();
     }
 
     void try_parse() {
@@ -232,7 +239,12 @@ struct WSState {
             }
 
             // Reject oversized frames before any arithmetic that could overflow.
-            if (payload_len > kMaxFramePayload) { closed = true; return; }
+            // 1009 (message too big) instead of a bare `closed = true`: the
+            // peer gets the same courtesy Close frame every other violation
+            // in this function sends, and read_buf is dropped immediately
+            // instead of sitting there until the WSState is destroyed --
+            // see fail_close()'s comment.
+            if (payload_len > kMaxFramePayload) { fail_close(1009); return; }
 
             if (masked) hdr += 4;
 
@@ -240,8 +252,11 @@ struct WSState {
             // payload_len <= kMaxFramePayload (16 MB) and hdr <= 14.
             if (read_buf.size() < hdr + static_cast<size_t>(payload_len)) break;
 
-            // Reject if the receiver queue is already full.
-            if (pending.size() >= kMaxPendingFrames) { closed = true; return; }
+            // Reject if the receiver queue is already full. 1008 (policy
+            // violation): the peer is sending faster than the handler's
+            // recv() loop drains `pending`. Same fail_close() treatment as
+            // every other violation above -- see its comment.
+            if (pending.size() >= kMaxPendingFrames) { fail_close(1008); return; }
 
             uint8_t mask_key[4] = {};
             if (masked) memcpy(mask_key, p + hdr - 4, 4);
@@ -311,6 +326,17 @@ struct WSState {
     // Http2Connection::on_data_chunk_recv_cb (HTTP/2).  The transport layer is
     // responsible for decrypting / demuxing; we just receive plaintext bytes.
     void feed(const uint8_t* data, size_t len) {
+        // Once closed (a completed Close handshake, or this parser giving up
+        // on a protocol violation / oversized frame / full receive queue)
+        // nothing arriving after this will ever be parsed. Before this
+        // check, a peer that kept writing past that point grew read_buf
+        // without bound for as long as the handler's coroutine stayed
+        // suspended elsewhere (a slow DB query, a long sleep) and never got
+        // a chance to observe `closed` and unwind — the transport layer
+        // (HttpConnection::do_read()) keeps calling feed() with whatever
+        // arrives regardless, since it has no visibility into WS-level
+        // state.
+        if (closed) return;
         read_buf.append(reinterpret_cast<const char*>(data), len);
         try_parse();
         resume_waiter_if_ready();

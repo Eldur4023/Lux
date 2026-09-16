@@ -1,9 +1,10 @@
 #include <lux_script/crypto.hpp>
 
 #include <array>
+#include <cerrno>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <sys/random.h>
 
 namespace lux_script::crypto {
 
@@ -222,11 +223,24 @@ bool constant_time_equal(std::string_view a, std::string_view b) {
 
 std::string random_bytes(size_t n) {
     std::string out(n, '\0');
-    std::FILE* f = std::fopen("/dev/urandom", "rb");
-    if (!f) return {};
-    size_t got = std::fread(out.data(), 1, n, f);
-    std::fclose(f);
-    if (got != n) return {};
+    size_t got = 0;
+    while (got < n) {
+        // getrandom(2) over /dev/urandom: it draws from the same CSPRNG but
+        // needs no file descriptor, so it cannot fail merely because the
+        // process is out of them (a real failure mode under load -- see
+        // SECURITY-AUDIT.md #13) and it blocks instead of returning
+        // low-quality output before the kernel's entropy pool is
+        // initialised at boot (irrelevant days into a server's uptime, but
+        // free correctness). Available unconditionally: this project only
+        // targets Linux, and getrandom() has existed since Linux 3.17
+        // (2014)/glibc 2.25.
+        ssize_t r = ::getrandom(out.data() + got, n - got, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return {};   // caller must treat empty as failure, never a fallback value
+        }
+        got += static_cast<size_t>(r);
+    }
     return out;
 }
 
