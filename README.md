@@ -411,6 +411,21 @@ which is the one case that still needs a few lines of `CMakeLists.txt` by hand �
 
 ---
 
+## Lux Desktop
+
+An Electron/Tauri equivalent, built as a separate project on top of Lux:
+[**Lux Desktop**](https://github.com/Eldur4023/Lux-Local). A native GTK3 +
+WebKitGTK window instead of a bundled Chromium, LuxScript instead of Node,
+and a build that produces one native binary — compile it, run it, the
+window opens. Window title/size/icon, native menus (nested submenus,
+checkboxes, keyboard accelerators), a system tray icon, file dialogs,
+clipboard access and desktop notifications are all plain LuxScript, via a
+drop-in `window` native module — no changes to Lux's own grammar or
+compiler. Lux itself is vendored there as plain source and used purely as
+a library.
+
+---
+
 ## Benchmark
 
 I didn't just want to say Lux is fast, I wanted to actually put it against the frameworks
