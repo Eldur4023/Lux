@@ -1,9 +1,9 @@
-// Verificacion de Emitter::check_stmt/check_block (fase 1, COMPILACION-
-// NATIVA.md, paso 3 de la seccion 1.1): compara, sentencia a sentencia, la
-// salida de check_route/check_function/check_method/check_ctor contra la
-// compilacion real (emit_route/emit_function/emit_method/emit_ctor) sobre
-// funciones completas de verdad -- no expresiones sueltas, que es lo que ya
-// verifico tests/check_expr_shadow.cpp.
+// Verification of Emitter::check_stmt/check_block (phase 1, NATIVE-
+// COMPILATION.md, step 3 of section 1.1): compares, statement by statement,
+// the output of check_route/check_function/check_method/check_ctor against
+// the real compilation (emit_route/emit_function/emit_method/emit_ctor) over
+// full real functions -- not standalone expressions, which is already
+// verified by tests/check_expr_shadow.cpp.
 #include <lux_script/diagnostic.hpp>
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
@@ -16,11 +16,11 @@
 
 using namespace lux_script;
 
-static int fallos = 0;
+static int failures = 0;
 
 static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBag& diags,
                           Program& out) {
-    file.path = "<prueba>";
+    file.path = "<test>";
     file.text = src;
     Lexer  lexer(file, diags);
     Parser parser(lexer.tokenize(), diags);
@@ -34,20 +34,20 @@ static std::vector<std::string> texts(const DiagnosticBag& d) {
     return v;
 }
 
-// Compila la primera `fn` de `src` como funcion de usuario, una vez con la
-// via real y otra con el checker en paralelo, y compara ambas listas.
-// `inspeccionar`, si se da, recibe el IrBlock construido (solo si el camino
-// feliz aplico, i.e. `esperado_substr` vacio) para comprobar su forma.
-static void caso_fn(const char* nombre, const std::string& src,
-                    const std::string& esperado_substr,
-                    const std::function<bool(const IrBlock&, std::string&)>& inspeccionar = {}) {
+// Compiles the first `fn` of `src` as a user function, once through the real
+// path and once through the parallel checker, and compares both lists.
+// `inspect`, if given, receives the built IrBlock (only if the happy path
+// applied, i.e. `expected_substr` empty) to check its shape.
+static void case_fn(const char* name, const std::string& src,
+                    const std::string& expected_substr,
+                    const std::function<bool(const IrBlock&, std::string&)>& inspect = {}) {
     SourceFile    file;
     DiagnosticBag diag_parse;
     Program       prog;
     if (!parse_program(src, file, diag_parse, prog) || prog.functions.empty()) {
-        ++fallos;
-        std::printf("  FALLA %s (no parsea: %s)\n", nombre,
-                    diag_parse.items().empty() ? "sin fn" : diag_parse.items().front().message.c_str());
+        ++failures;
+        std::printf("  FAIL %s (did not parse: %s)\n", name,
+                    diag_parse.items().empty() ? "no fn" : diag_parse.items().front().message.c_str());
         return;
     }
 
@@ -60,29 +60,29 @@ static void caso_fn(const char* nombre, const std::string& src,
 
     std::vector<std::string> real = texts(diags_real), shadow = texts(diags_shadow);
 
-    if (esperado_substr.empty()) {
+    if (expected_substr.empty()) {
         if (!real.empty()) {
-            ++fallos;
-            std::printf("  FALLA %s (se esperaba que compilara limpio, dio %zu error(es))\n",
-                        nombre, real.size());
+            ++failures;
+            std::printf("  FAIL %s (expected a clean compile, got %zu error(s))\n",
+                        name, real.size());
             for (const auto& m : real) std::printf("           real: %s\n", m.c_str());
             return;
         }
     } else {
         bool ok = false;
-        for (const auto& m : real) if (m.find(esperado_substr) != std::string::npos) ok = true;
+        for (const auto& m : real) if (m.find(expected_substr) != std::string::npos) ok = true;
         if (!ok) {
-            ++fallos;
-            std::printf("  FALLA %s (la compilacion real no dio \"%s\"; dio %zu error(es))\n",
-                        nombre, esperado_substr.c_str(), real.size());
+            ++failures;
+            std::printf("  FAIL %s (the real compilation did not give \"%s\"; gave %zu error(s))\n",
+                        name, expected_substr.c_str(), real.size());
             for (const auto& m : real) std::printf("           real: %s\n", m.c_str());
             return;
         }
     }
 
     if (real != shadow) {
-        ++fallos;
-        std::printf("  FALLA %s (check_stmt no reproduce lo mismo)\n", nombre);
+        ++failures;
+        std::printf("  FAIL %s (check_stmt does not reproduce the same thing)\n", name);
         std::printf("           real   (%zu): ", real.size());
         for (const auto& m : real) std::printf("[%s] ", m.c_str());
         std::printf("\n           shadow (%zu): ", shadow.size());
@@ -91,38 +91,39 @@ static void caso_fn(const char* nombre, const std::string& src,
         return;
     }
 
-    if (esperado_substr.empty() && inspeccionar) {
-        std::string motivo;
-        if (!inspeccionar(body, motivo)) {
-            ++fallos;
-            std::printf("  FALLA %s (shape del IrBlock: %s)\n", nombre, motivo.c_str());
+    if (expected_substr.empty() && inspect) {
+        std::string reason;
+        if (!inspect(body, reason)) {
+            ++failures;
+            std::printf("  FAIL %s (IrBlock shape: %s)\n", name, reason.c_str());
             return;
         }
     }
 
-    std::printf("  ok    %s\n", nombre);
+    std::printf("  ok    %s\n", name);
 }
 
-// Igual que caso_fn, pero para una clase completa: compila el primer metodo
-// y el primer constructor (si los hay) de la primera clase.
-static void caso_clase(const char* nombre, const std::string& src,
-                       const std::string& esperado_substr,
-                       const std::function<bool(const IrBlock&, std::string&)>& inspeccionar = {}) {
+// Same as case_fn, but for a whole class: compiles the first method and the
+// first constructor (if any) of the first class.
+static void case_class(const char* name, const std::string& src,
+                       const std::string& expected_substr,
+                       const std::function<bool(const IrBlock&, std::string&)>& inspect = {}) {
     SourceFile    file;
     DiagnosticBag diag_parse;
     Program       prog;
     if (!parse_program(src, file, diag_parse, prog) || prog.classes.empty()) {
-        ++fallos;
-        std::printf("  FALLA %s (no parsea: %s)\n", nombre,
-                    diag_parse.items().empty() ? "sin class" : diag_parse.items().front().message.c_str());
+        ++failures;
+        std::printf("  FAIL %s (did not parse: %s)\n", name,
+                    diag_parse.items().empty() ? "no class" : diag_parse.items().front().message.c_str());
         return;
     }
     const ClassDecl& cls = prog.classes[0];
     std::vector<std::string> fields;
     for (const auto& f : cls.fields) fields.push_back(f.name);
 
-    // comprobar_campo/check_field solo miran classes_ si viene con la clase
-    // ya registrada: sin esto, "P" no tiene tabla y el campo se da por bueno.
+    // check_field only looks at classes_ if it comes with the class already
+    // registered: without this, "P" has no table and the field is assumed
+    // valid.
     ClassSigs classes;
     classes[cls.name].fields = fields;
     for (const auto& m : cls.methods) classes[cls.name].methods[m.name] = {};
@@ -144,29 +145,29 @@ static void caso_clase(const char* nombre, const std::string& src,
 
     std::vector<std::string> real = texts(diags_real), shadow = texts(diags_shadow);
 
-    if (esperado_substr.empty()) {
+    if (expected_substr.empty()) {
         if (!real.empty()) {
-            ++fallos;
-            std::printf("  FALLA %s (se esperaba que compilara limpio, dio %zu error(es))\n",
-                        nombre, real.size());
+            ++failures;
+            std::printf("  FAIL %s (expected a clean compile, got %zu error(s))\n",
+                        name, real.size());
             for (const auto& m : real) std::printf("           real: %s\n", m.c_str());
             return;
         }
     } else {
         bool ok = false;
-        for (const auto& m : real) if (m.find(esperado_substr) != std::string::npos) ok = true;
+        for (const auto& m : real) if (m.find(expected_substr) != std::string::npos) ok = true;
         if (!ok) {
-            ++fallos;
-            std::printf("  FALLA %s (la compilacion real no dio \"%s\")\n", nombre,
-                        esperado_substr.c_str());
+            ++failures;
+            std::printf("  FAIL %s (the real compilation did not give \"%s\")\n", name,
+                        expected_substr.c_str());
             for (const auto& m : real) std::printf("           real: %s\n", m.c_str());
             return;
         }
     }
 
     if (real != shadow) {
-        ++fallos;
-        std::printf("  FALLA %s (check_stmt no reproduce lo mismo)\n", nombre);
+        ++failures;
+        std::printf("  FAIL %s (check_stmt does not reproduce the same thing)\n", name);
         std::printf("           real   (%zu): ", real.size());
         for (const auto& m : real) std::printf("[%s] ", m.c_str());
         std::printf("\n           shadow (%zu): ", shadow.size());
@@ -175,22 +176,22 @@ static void caso_clase(const char* nombre, const std::string& src,
         return;
     }
 
-    if (esperado_substr.empty() && inspeccionar) {
-        std::string motivo;
-        if (!inspeccionar(body, motivo)) {
-            ++fallos;
-            std::printf("  FALLA %s (shape del IrBlock: %s)\n", nombre, motivo.c_str());
+    if (expected_substr.empty() && inspect) {
+        std::string reason;
+        if (!inspect(body, reason)) {
+            ++failures;
+            std::printf("  FAIL %s (IrBlock shape: %s)\n", name, reason.c_str());
             return;
         }
     }
 
-    std::printf("  ok    %s\n", nombre);
+    std::printf("  ok    %s\n", name);
 }
 
 int main() {
-    // ── Camino feliz: VarDecl, if/else, while, for con break/continue,
-    //    try/catch, indices, ++/--, asignaciones compuestas ya desazucaradas.
-    caso_fn("aritmetica y control de flujo basico",
+    // ── Happy path: VarDecl, if/else, while, for with break/continue,
+    //    try/catch, indices, ++/--, already-desugared compound assignments.
+    case_fn("basic arithmetic and control flow",
         "fn int suma(int a, int b):\n"
         "    int c = a + b\n"
         "    if c > 10:\n"
@@ -199,23 +200,23 @@ int main() {
         "        return 0\n",
         "",
         [](const IrBlock& body, std::string& why) {
-            // a: ranura 0, b: ranura 1 (parametros) -> c: ranura 2 (VarDecl).
-            if (body.size() != 2) { why = "no son 2 sentencias (VarDecl + If)"; return false; }
+            // a: slot 0, b: slot 1 (parameters) -> c: slot 2 (VarDecl).
+            if (body.size() != 2) { why = "not 2 statements (VarDecl + If)"; return false; }
             const IrStmt& decl = *body[0];
-            if (decl.kind != IrStmtKind::VarDecl) { why = "la 1a no es VarDecl"; return false; }
-            if (decl.name != "c" || decl.slot != 2) { why = "'c' no quedo en la ranura 2"; return false; }
+            if (decl.kind != IrStmtKind::VarDecl) { why = "the 1st is not a VarDecl"; return false; }
+            if (decl.name != "c" || decl.slot != 2) { why = "'c' did not end up in slot 2"; return false; }
             if (decl.decl_type != Type::primitive(Type::Kind::Int)) {
-                why = "decl_type de 'c' no es int"; return false;
+                why = "'c's decl_type is not int"; return false;
             }
             const IrStmt& si = *body[1];
-            if (si.kind != IrStmtKind::If) { why = "la 2a no es If"; return false; }
+            if (si.kind != IrStmtKind::If) { why = "the 2nd is not an If"; return false; }
             if (si.body.size() != 1 || si.orelse.size() != 1) {
-                why = "If no lleva un Return en cada rama"; return false;
+                why = "If does not carry a Return in each branch"; return false;
             }
             return true;
         });
 
-    caso_fn("while con asignacion",
+    case_fn("while with assignment",
         "fn int cuenta(int n):\n"
         "    int i = 0\n"
         "    int total = 0\n"
@@ -225,19 +226,19 @@ int main() {
         "    return total\n",
         "",
         [](const IrBlock& body, std::string& why) {
-            // n: ranura 0, i: ranura 1, total: ranura 2.
-            const IrStmt& bucle = *body[2];
-            if (bucle.kind != IrStmtKind::While) { why = "la 3a no es While"; return false; }
-            const IrStmt& asigna_total = *bucle.body[0];
-            if (asigna_total.kind != IrStmtKind::Assign ||
-                asigna_total.assign_target != IrAssignTarget::Local ||
-                asigna_total.assign_slot != 2) {
-                why = "'total = ...' no quedo como Assign Local a la ranura 2"; return false;
+            // n: slot 0, i: slot 1, total: slot 2.
+            const IrStmt& loop = *body[2];
+            if (loop.kind != IrStmtKind::While) { why = "the 3rd is not a While"; return false; }
+            const IrStmt& assign_total = *loop.body[0];
+            if (assign_total.kind != IrStmtKind::Assign ||
+                assign_total.assign_target != IrAssignTarget::Local ||
+                assign_total.assign_slot != 2) {
+                why = "'total = ...' did not end up as an Assign Local to slot 2"; return false;
             }
             return true;
         });
 
-    caso_fn("for con break y continue",
+    case_fn("for with break and continue",
         "fn int recorre(List<int> xs):\n"
         "    int total = 0\n"
         "    for int x in xs:\n"
@@ -249,24 +250,24 @@ int main() {
         "    return total\n",
         "",
         [](const IrBlock& body, std::string& why) {
-            // xs: ranura 0, total: ranura 1; dentro del For: items/count/index
-            // (2, 3, 4) y x en la ranura 5.
-            const IrStmt& bucle = *body[1];
-            if (bucle.kind != IrStmtKind::For) { why = "la 2a no es For"; return false; }
-            if (bucle.name != "x" || bucle.slot != 5) {
-                why = "'x' no quedo en la ranura 5 tras los 3 auxiliares"; return false;
+            // xs: slot 0, total: slot 1; inside the For: items/count/index
+            // (2, 3, 4) and x in slot 5.
+            const IrStmt& loop = *body[1];
+            if (loop.kind != IrStmtKind::For) { why = "the 2nd is not a For"; return false; }
+            if (loop.name != "x" || loop.slot != 5) {
+                why = "'x' did not end up in slot 5 after the 3 helper slots"; return false;
             }
-            if (bucle.decl_type != Type::primitive(Type::Kind::Int)) {
-                why = "decl_type de 'x' no es int"; return false;
+            if (loop.decl_type != Type::primitive(Type::Kind::Int)) {
+                why = "'x's decl_type is not int"; return false;
             }
-            if (!bucle.target || bucle.target->kind != IrExprKind::Ident ||
-                bucle.target->slot != 0) {
-                why = "el iterable no es el Ident 'xs' con su ranura resuelta"; return false;
+            if (!loop.target || loop.target->kind != IrExprKind::Ident ||
+                loop.target->slot != 0) {
+                why = "the iterable is not the Ident 'xs' with its resolved slot"; return false;
             }
             return true;
         });
 
-    caso_fn("try/catch",
+    case_fn("try/catch",
         "fn int intenta():\n"
         "    try:\n"
         "        return 1\n"
@@ -274,18 +275,18 @@ int main() {
         "        return 0\n",
         "",
         [](const IrBlock& body, std::string& why) {
-            const IrStmt& intento = *body[0];
-            if (intento.kind != IrStmtKind::Try) { why = "no es Try"; return false; }
-            if (intento.name != "e" || intento.slot != 0) {
-                why = "'e' no quedo con nombre/ranura resueltos"; return false;
+            const IrStmt& attempt = *body[0];
+            if (attempt.kind != IrStmtKind::Try) { why = "not a Try"; return false; }
+            if (attempt.name != "e" || attempt.slot != 0) {
+                why = "'e' did not end up with resolved name/slot"; return false;
             }
-            if (intento.body.size() != 1 || intento.orelse.size() != 1) {
-                why = "Try no lleva un Return en el cuerpo y en el catch"; return false;
+            if (attempt.body.size() != 1 || attempt.orelse.size() != 1) {
+                why = "Try does not carry a Return in the body and in the catch"; return false;
             }
             return true;
         });
 
-    caso_fn("indices y ++/--",
+    case_fn("indices and ++/--",
         "fn int mezcla():\n"
         "    List<int> l = [1, 2, 3]\n"
         "    l[0] = 9\n"
@@ -294,45 +295,45 @@ int main() {
         "    return l[0] + i\n",
         "",
         [](const IrBlock& body, std::string& why) {
-            const IrStmt& asigna = *body[1];
-            if (asigna.kind != IrStmtKind::Assign ||
-                asigna.assign_target != IrAssignTarget::Index) {
-                why = "'l[0] = 9' no quedo como Assign Index"; return false;
+            const IrStmt& assign = *body[1];
+            if (assign.kind != IrStmtKind::Assign ||
+                assign.assign_target != IrAssignTarget::Index) {
+                why = "'l[0] = 9' did not end up as an Assign Index"; return false;
             }
-            if (!asigna.assign_object || asigna.assign_object->slot != 0) {
-                why = "el objeto indexado no es 'l' con su ranura resuelta"; return false;
+            if (!assign.assign_object || assign.assign_object->slot != 0) {
+                why = "the indexed object is not 'l' with its resolved slot"; return false;
             }
             return true;
         });
 
-    // ── Errores: uno por cada rama nueva que toca check_stmt ─────────────
-    caso_fn("asignar a variable no declarada",
+    // ── Errors: one per new branch touched by check_stmt ──────────────────
+    case_fn("assigning to an undeclared variable",
         "fn int malo():\n"
         "    equis = 1\n"
         "    return equis\n",
         "is not declared");
 
-    caso_fn("break fuera de un bucle",
+    case_fn("break outside a loop",
         "fn int malo2():\n"
         "    break\n"
         "    return 0\n",
         "'break' outside a loop");
 
-    caso_fn("continue fuera de un bucle",
+    case_fn("continue outside a loop",
         "fn int malo3():\n"
         "    continue\n"
         "    return 0\n",
         "'continue' outside a loop");
 
-    caso_fn("require con condicion que usa una variable no declarada",
+    case_fn("require with a condition using an undeclared variable",
         "fn int malo4():\n"
         "    require equis else 0\n"
         "    return 1\n",
         "is not declared");
 
-    // ── Clases: campo valido/invalido en Assign a un Member, y constructor
-    //    sin cuerpo con un parametro que no es campo ───────────────────────
-    caso_clase("asignacion a campo valido en un metodo",
+    // ── Classes: valid/invalid field in an Assign to a Member, and a
+    //    bodyless constructor with a parameter that is not a field ─────────
+    case_class("assignment to a valid field in a method",
         "class P:\n"
         "    int x\n"
         "\n"
@@ -340,22 +341,22 @@ int main() {
         "        this.x = v\n",
         "",
         [](const IrBlock& body, std::string& why) {
-            if (body.empty()) { why = "cuerpo vacio"; return false; }
-            const IrStmt& asigna = *body[0];
-            if (asigna.kind != IrStmtKind::Assign ||
-                asigna.assign_target != IrAssignTarget::Member) {
-                why = "'this.x = v' no quedo como Assign Member"; return false;
+            if (body.empty()) { why = "empty body"; return false; }
+            const IrStmt& assign = *body[0];
+            if (assign.kind != IrStmtKind::Assign ||
+                assign.assign_target != IrAssignTarget::Member) {
+                why = "'this.x = v' did not end up as an Assign Member"; return false;
             }
-            if (asigna.assign_field != "x") { why = "assign_field no es 'x'"; return false; }
-            // this: ranura 0.
-            if (!asigna.assign_object || asigna.assign_object->kind != IrExprKind::This ||
-                asigna.assign_object->slot != 0) {
-                why = "el receptor no es el 'this' con su ranura resuelta"; return false;
+            if (assign.assign_field != "x") { why = "assign_field is not 'x'"; return false; }
+            // this: slot 0.
+            if (!assign.assign_object || assign.assign_object->kind != IrExprKind::This ||
+                assign.assign_object->slot != 0) {
+                why = "the receiver is not the 'this' with its resolved slot"; return false;
             }
             return true;
         });
 
-    caso_clase("asignacion a campo inexistente en un metodo",
+    case_class("assignment to a nonexistent field in a method",
         "class P:\n"
         "    int x\n"
         "\n"
@@ -363,17 +364,17 @@ int main() {
         "        this.noexiste = v\n",
         "has no field");
 
-    caso_clase("constructor implicito con parametro que no es campo",
+    case_class("implicit constructor with a parameter that is not a field",
         "class P:\n"
         "    int x\n"
         "\n"
         "    P(int x, int sobra)\n",
         "is not a field");
 
-    if (fallos == 0) {
-        std::printf("check_stmt_shadow: todo reproducido, %d fallos\n", fallos);
+    if (failures == 0) {
+        std::printf("check_stmt_shadow: everything reproduced, %d failures\n", failures);
         return 0;
     }
-    std::printf("check_stmt_shadow: %d fallo(s)\n", fallos);
+    std::printf("check_stmt_shadow: %d failure(s)\n", failures);
     return 1;
 }

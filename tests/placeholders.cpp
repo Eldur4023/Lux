@@ -45,47 +45,47 @@ static void bad(const char* name, const std::string& sql, size_t nargs,
 }
 
 int main() {
-    std::printf("== traduccion basica ==\n");
-    good("un marcador", "select * from t where id = ?", 1,
+    std::printf("== basic translation ==\n");
+    good("one placeholder", "select * from t where id = ?", 1,
          "select * from t where id = $1");
-    good("tres marcadores", "select ? , ? where a = ?", 3,
+    good("three placeholders", "select ? , ? where a = ?", 3,
          "select $1 , $2 where a = $3");
     good("no placeholders", "select 1", 0, "select 1");
 
     std::printf("== compatibility with the postgres style ==\n");
     good("already came with $1", "select * from t where id = $1", 1,
          "select * from t where id = $1");
-    good("$1 y $2", "insert into t values ($1, $2)", 2,
+    good("$1 and $2", "insert into t values ($1, $2)", 2,
          "insert into t values ($1, $2)");
 
     std::printf("== what is NOT a placeholder ==\n");
     good("inside a string", "select * from t where s = 'what?' and id = ?", 1,
          "select * from t where s = 'what?' and id = $1");
-    good("comilla escapada dentro", "select * from t where s = 'a''b?' and id = ?", 1,
+    good("escaped quote inside", "select * from t where s = 'a''b?' and id = ?", 1,
          "select * from t where s = 'a''b?' and id = $1");
     good("string with E and a backslash", "select * from t where s = E'a\\'?' and id = ?", 1,
          "select * from t where s = E'a\\'?' and id = $1");
-    good("identificador entrecomillado", "select \"col?\" from t where id = ?", 1,
+    good("quoted identifier", "select \"col?\" from t where id = ?", 1,
          "select \"col?\" from t where id = $1");
     good("line comment", "-- what?\nselect ?", 1, "-- what?\nselect $1");
-    good("comentario de bloque", "/* ? */ select ?", 1, "/* ? */ select $1");
-    good("comentario anidado", "/* a /* ? */ ? */ select ?", 1,
+    good("block comment", "/* ? */ select ?", 1, "/* ? */ select $1");
+    good("nested comment", "/* a /* ? */ ? */ select ?", 1,
          "/* a /* ? */ ? */ select $1");
     good("block with $$", "select $$ ? $$ , ?", 1, "select $$ ? $$ , $1");
     good("tagged block", "select $x$ ? $x$ , ?", 1, "select $x$ ? $x$ , $1");
 
     std::printf("== the JSONB operator ==\n");
     // With no arguments nothing is translated: the `?` is the JSONB operator.
-    good("with no arguments, it is left alone", "select * from t where data ? 'clave'", 0,
-         "select * from t where data ? 'clave'");
+    good("with no arguments, it is left alone", "select * from t where data ? 'key'", 0,
+         "select * from t where data ? 'key'");
     // With arguments, `??` is the escape hatch for that operator.
-    good("?? es un ? literal", "select * from t where data ?? 'k' and id = ?", 1,
+    good("?? is a literal ?", "select * from t where data ?? 'k' and id = ?", 1,
          "select * from t where data ? 'k' and id = $1");
 
-    std::printf("== errores ==\n");
+    std::printf("== errors ==\n");
     bad("mixing the two styles", "select * from t where a = $1 and b = ?", 2, "mixes");
-    bad("sobran argumentos", "select * from t where id = ?", 2, "1 marcador");
-    bad("faltan argumentos", "select * from t where a = ? and b = ?", 1, "2 marcador");
+    bad("too many arguments", "select * from t where id = ?", 2, "1 marcador");
+    bad("too few arguments", "select * from t where a = ? and b = ?", 1, "2 marcador");
 
     std::printf("\n%s\n", failures ? "THERE ARE FAILURES" : "all passing");
     return failures ? 1 : 0;

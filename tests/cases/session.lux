@@ -2,17 +2,17 @@ app:
     port 8790
 
     session:
-        secret "secreto-de-tests-suficientemente-length"
+        secret "test-session-secret-long-enough-for-hmac256"
         secure false
 
     jwt:
-        secret "secreto-jwt-de-tests"
+        secret "test-jwt-secret-long-enough-for-hmac-signing"
         issuer "tests"
 
 get endpoint("/__ping__"):
     return { "ok": true }
 
-get endpoint("/quien"):
+get endpoint("/whoami"):
     return { "user": session.user, "role": session.role }
 
 group("/admin"):
@@ -24,5 +24,5 @@ group("/admin"):
 group("/api"):
     require jwt.valid else status(401)
 
-    get endpoint("/yo"):
+    get endpoint("/me"):
         return { "sub": jwt.claims["sub"] }

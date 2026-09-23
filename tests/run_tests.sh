@@ -303,11 +303,11 @@ check "class field: POST body rejects the list itself being the wrong shape" POS
 
 echo "== session and jwt =="
 start_server "$HERE/cases/session.lux" || exit 1
-check "no session"          GET /quien            200 '"user":null'
+check "no session"          GET /whoami           200 '"user":null'
 check "protected area"      GET /admin/panel      403
-check "forged cookie"  GET /quien            200 '"user":null'
-check "jwt missing"         GET /api/yo           401
-check "invalid jwt"        GET /api/yo           401
+check "forged cookie"  GET /whoami           200 '"user":null'
+check "jwt missing"         GET /api/me           401
+check "invalid jwt"        GET /api/me           401
 
 echo "== database =="
 rm -f "$TMP/tests.db"
