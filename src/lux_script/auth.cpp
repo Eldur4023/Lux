@@ -4,10 +4,12 @@
 #include <lux_script/natives.hpp>
 
 #include <lux/cookies.hpp>
+#include <lux/logger.hpp>
 #include <lux/request.hpp>
 #include <lux/response.hpp>
 
 #include <ctime>
+#include <string_view>
 
 namespace lux_script {
 
@@ -149,7 +151,35 @@ void end_auth(const AuthConfig& cfg, const SessionState& session,
     }
     opts.max_age = cfg.session_max_age;
     const long long exp = static_cast<long long>(std::time(nullptr)) + cfg.session_max_age;
-    res.cookie(kSessionCookie, sign_session(session.data, cfg.session_secret, exp), opts);
+    std::string token = sign_session(session.data, cfg.session_secret, exp);
+
+    // RFC 6265 only asks a user agent to support 4096 bytes for a whole
+    // cookie (name=value, no attributes) and real browsers enforce close
+    // to exactly that -- past it, the ENTIRE Set-Cookie is dropped
+    // silently, no error anywhere the app can see: `session.x = ...` looks
+    // like it worked (the handler ran, `dirty` got set, this function
+    // sent a Set-Cookie), and the very next request comes back with an
+    // empty session, as if session.clear() had been called. A stateless,
+    // client-side session (this file's own architecture, see auth.hpp)
+    // has no OTHER limit to warn about -- unlike a server-side session
+    // store, everything the app puts in `session` really does have to fit
+    // in the cookie -- so this is the one place that can catch it, and a
+    // log line (still sending the cookie, browsers vary on the exact
+    // cutoff and this may still fit) is the earliest a developer growing
+    // one item at a time (a shopping cart, most often) can find out before
+    // a real user hits the cliff in production.
+    constexpr size_t kBrowserCookieLimit = 4096;
+    const size_t cookie_bytes = std::string_view(kSessionCookie).size() + 1 + token.size();
+    if (cookie_bytes > kBrowserCookieLimit) {
+        lux::log().warn("session cookie is " +
+                        std::to_string(cookie_bytes) +
+                        " bytes, over the " + std::to_string(kBrowserCookieLimit) +
+                        "-byte limit browsers apply to a whole cookie -- it will likely "
+                        "be dropped silently by the client. Store less in `session` "
+                        "(an id looked up server-side, not the data itself) if it keeps "
+                        "growing with use, e.g. a shopping cart.");
+    }
+    res.cookie(kSessionCookie, std::move(token), opts);
 }
 
 } // namespace lux_script

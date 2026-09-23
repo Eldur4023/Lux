@@ -46,7 +46,7 @@ get endpoint("/length"):
     List<Json> rows = await postgres.query("select body from articles where title = ?", "length")
     if len(rows) == 0:
         return status(404)
-    return { "recibido": len(rows[0]["body"]), "esperado": 4000 }
+    return { "received": len(rows[0]["body"]), "expected": 4000 }
 
 # ── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,7 +67,7 @@ get endpoint("/unicode"):
 
 get endpoint("/injection", string q = "x"):
     List<Json> rows = await postgres.query("select id from articles where title = ?", q)
-    return { "encontrados": len(rows) }
+    return { "found": len(rows) }
 
 # ── Escritura ────────────────────────────────────────────────────────────────
 

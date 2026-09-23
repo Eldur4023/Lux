@@ -29,7 +29,7 @@ struct FnSig {
     // synthetic FnSig-less path (see build_class_signatures(): ctors are
     // looked up by arity, never through this struct at all, so there is
     // nothing to fill in here for them).
-    Type devuelve = Type::unknown();
+    Type return_type = Type::unknown();
 };
 using FunctionSigs = std::map<std::string, FnSig>;
 
@@ -117,82 +117,82 @@ public:
     // Body of an `on error`: no parameters, with the `error` object available.
     bool emit_error_handler(const ErrorDecl& decl, Chunk& out);
 
-    // ── Fase 1 de --native: checker en paralelo ──────────────────────────────
+    // ── Phase 1 of --native: parallel checker ─────────────────────────────────
     //
-    // Reproduce TODAS las comprobaciones que hace emit_expr/emit_call (mismo
-    // texto de error, mismo orden), pero sin tocar chunk_ ni locals_: no emite
-    // bytecode y no declara ninguna ranura (las unicas declare_local() de hoy
-    // son temporales de codegen -- PreStep/PostStep sobre un campo o un
-    // indice -- que un paso de solo comprobacion no necesita).  Por eso puede
-    // correr sobre el `this` REAL de una compilacion en curso, en cualquier
-    // orden respecto a emit_expr/emit_call, sin corromper la numeracion de
-    // ranuras: es un lector de locals_, nunca un escritor.
+    // Reproduces ALL the checks that emit_expr/emit_call perform (same error
+    // text, same order), but without touching chunk_ or locals_: it emits no
+    // bytecode and declares no slot (the only declare_local() calls today
+    // are codegen temporaries -- PreStep/PostStep over a field or an index
+    // -- that a check-only pass doesn't need). That's why it can run over
+    // the REAL `this` of an in-progress compilation, in any order relative
+    // to emit_expr/emit_call, without corrupting the slot numbering: it's a
+    // reader of locals_, never a writer.
     //
-    // Los errores van a `shadow`, NUNCA a diags_: todavia no es la fuente de
-    // diagnosticos (eso llega cuando el corte real conecte esto a Emitter),
-    // asi que un error de aqui no debe duplicar el que ya produce
-    // emit_expr/emit_call por su cuenta.
+    // Errors go to `shadow`, NEVER to diags_: it isn't yet the source of
+    // diagnostics (that comes when the real cutover connects this to
+    // Emitter), so an error from here must not duplicate the one
+    // emit_expr/emit_call already produces on its own.
     //
-    // Ademas de comprobar, CONSTRUYE y devuelve el IrExpr correspondiente
-    // (nulo si algo no compilo -- ya se llamo a shadow.error en el sitio
-    // exacto). El tipo de cada nodo es type_of(e), sin excepcion: nunca un
-    // tipo mas preciso inventado aqui, porque eso seria funcionalidad nueva
-    // y no una reproduccion de lo que ya hace el compilador. Publico porque
-    // la verificacion (comparar shadow contra diags_ real, y el shape del
-    // IrExpr devuelto, sobre el corpus de tests/casos) vive en un binario de
-    // pruebas aparte; nada en el compilador real llama a esto todavia.
+    // Besides checking, it BUILDS and returns the corresponding IrExpr (null
+    // if something failed to compile -- shadow.error was already called at
+    // the exact spot). The type of each node is type_of(e), with no
+    // exception: never a more precise type invented here, because that
+    // would be new functionality and not a reproduction of what the
+    // compiler already does. Public because the verification (comparing
+    // shadow against the real diags_, and the shape of the returned IrExpr,
+    // over the tests/cases corpus) lives in a separate test binary; nothing
+    // in the real compiler calls this yet.
     IrExprPtr check_expr(const Expr& e, DiagnosticBag& shadow) const;
     IrExprPtr check_call(const Expr& e, bool awaited, DiagnosticBag& shadow) const;
 
-    // Contrapartida de check_expr para emit_condition: mismo reinicio de
-    // locals_/route_method_/scope_depth_, mismas declaraciones de `names`,
-    // pero llamando a check_expr en vez de a emit_expr.
+    // Counterpart of check_expr for emit_condition: same reset of
+    // locals_/route_method_/scope_depth_, same declarations of `names`, but
+    // calling check_expr instead of emit_expr.
     //
-    // Lleva su propio `Chunk& out` -- igual que emit_condition -- aunque no
-    // emita ni un opcode: declare_local() escribe chunk_->num_locals segun
-    // avanza (la misma contabilidad que necesita el VM para dimensionar la
-    // pila, la real, no una copia), asi que necesita un chunk_ valido desde
-    // el primer momento y no puede depender de que alguien haya llamado antes
-    // a emit_condition sobre el mismo Emitter para dejarlo puesto. Pasar el
-    // MISMO chunk que ya se le paso a emit_condition (que es lo que hace hoy
-    // el canario de project.cpp) es valido: declare_local() vuelve a anotar
-    // los mismos nombres, pero num_locals ya no puede subir mas de lo que ya
-    // subio, asi que no cambia nada observable.
+    // It takes its own `Chunk& out` -- just like emit_condition -- even
+    // though it doesn't emit a single opcode: declare_local() writes
+    // chunk_->num_locals as it goes (the same accounting the VM needs to
+    // size the stack, the real one, not a copy), so it needs a valid chunk_
+    // from the very first moment and can't depend on someone having already
+    // called emit_condition on the same Emitter to have set it up. Passing
+    // the SAME chunk that was already passed to emit_condition (which is
+    // what project.cpp's canary does today) is valid: declare_local()
+    // re-registers the same names, but num_locals can no longer rise beyond
+    // what it already rose to, so nothing observable changes.
     IrExprPtr check_condition(const Expr& e, const std::vector<TypedName>& names,
                               Chunk& out, DiagnosticBag& shadow);
 
-    // check_stmt/check_block: la misma idea que check_expr, pero para
-    // sentencias -- reproducen emit_stmt/emit_block rama a rama y construyen
-    // el IrStmt/IrBlock correspondiente (nulo/vacio en caso de error, mismo
-    // criterio que check_expr). A diferencia de check_expr, SI declaran
-    // ranuras (VarDecl, el `for` desazucarado, el nombre de un `catch`):
-    // esas SI son contabilidad de nombres real, no un temporal de codegen, y
-    // hace falta que el checker la lleve para que el Ident de una sentencia
-    // posterior resuelva bien. Por construccion no puede correr sobre el
-    // `this` de una emision real en curso (pisaria sus ranuras) -- de ahi
-    // check_route/check_function/etc. como puntos de entrada propios, cada
-    // uno reiniciando el estado exactamente como su contrapartida emit_*,
-    // para poder llamarse en secuencia sobre el mismo Emitter (primero la
-    // via real, luego la sombra) sin interferir.
+    // check_stmt/check_block: the same idea as check_expr, but for
+    // statements -- they reproduce emit_stmt/emit_block branch by branch and
+    // build the corresponding IrStmt/IrBlock (null/empty on error, same
+    // criterion as check_expr). Unlike check_expr, they DO declare slots
+    // (VarDecl, the desugared `for`, a `catch`'s name): those ARE real name
+    // accounting, not a codegen temporary, and the checker needs to carry it
+    // so that a later statement's Ident resolves correctly. By construction
+    // it cannot run over the `this` of a real emission in progress (it
+    // would stomp on its slots) -- hence check_route/check_function/etc. as
+    // their own entry points, each resetting state exactly like its emit_*
+    // counterpart, so they can be called in sequence on the same Emitter
+    // (first the real path, then the shadow) without interfering.
     IrStmtPtr check_stmt(const Stmt& s, DiagnosticBag& shadow);
-    // Vacio si algun sentencia del bloque fallo (ya se reporto en su sitio);
-    // igual que hoy con `failed_`, un bloque a medio construir no se usa.
+    // Empty if some statement in the block failed (already reported at its
+    // spot); same as today with `failed_`, a half-built block isn't used.
     IrBlock   check_block(const Block& body, DiagnosticBag& shadow);
 
-    // Emisor puro que consume el IrBlock que devuelve check_block/check_route/
-    // etc.: no comprueba nada, confia en que el IR ya paso por el checker.
-    // Publico (a diferencia de emit_stmt/emit_expr/emit_call sobre IrExpr/
-    // IrStmt, que son privados e internos a este) porque tests/
-    // emit_ir_shadow.cpp lo llama directamente para probar que el bytecode
-    // que produce se COMPORTA igual que el del emisor viejo, ejecutado de
-    // verdad en el VM -- es exactamente lo que hara emit_function una vez
-    // conectado, asi que la prueba lo replica desde fuera.
+    // Pure emitter that consumes the IrBlock returned by
+    // check_block/check_route/etc.: it checks nothing, it trusts that the IR
+    // already went through the checker. Public (unlike emit_stmt/emit_expr/
+    // emit_call over IrExpr/IrStmt, which are private and internal to this
+    // one) because tests/emit_ir_shadow.cpp calls it directly to test that
+    // the bytecode it produces BEHAVES the same as the old emitter's,
+    // actually run on the VM -- it's exactly what emit_function will do once
+    // connected, so the test replicates it from outside.
     void emit_block(const IrBlock& body);
 
-    // `out`: mismo motivo que en check_condition (declare_local necesita un
-    // chunk_ valido). `out_body`, si no es nulo, recibe el IrBlock construido
-    // (el mismo que ya se descarta hoy en project.cpp: check_route/etc. lo
-    // usan solo para saber si `shadow` crecio).
+    // `out`: same reason as in check_condition (declare_local needs a valid
+    // chunk_). `out_body`, if not null, receives the built IrBlock (the same
+    // one that project.cpp already discards today: check_route/etc. use it
+    // only to know whether `shadow` grew).
     bool check_route(const RouteDecl& route, Chunk& out, DiagnosticBag& shadow,
                      IrBlock* out_body = nullptr);
     bool check_function(const FnDecl& fn, Chunk& out, DiagnosticBag& shadow,

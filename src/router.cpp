@@ -90,15 +90,25 @@ static std::vector<std::string> split_path(const std::string& s) {
 // decode — did not have the same problem.  No '+' -> ' ' folding here: that
 // convention belongs to application/x-www-form-urlencoded bodies and query
 // strings, not path segments.
+// Strict hex-nibble check — see the identical helper's comment in
+// http_connection.cpp's url_decode() for why std::strtoul() is wrong here:
+// it accepts a leading sign/whitespace, so "%+2e" or "%-1" decoded as a
+// real byte instead of staying the literal text RFC 3986 says it is.
+static inline int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static std::string url_decode_segment(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '%' && i + 2 < s.size()) {
-            char buf[3] = {s[i + 1], s[i + 2], '\0'};
-            char* end = nullptr;
-            unsigned long v = std::strtoul(buf, &end, 16);
-            if (end == buf + 2) {
+            int hi = hex_nibble(s[i + 1]), lo = hex_nibble(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                int v = hi * 16 + lo;
                 // Drop %00: a NUL bound into a param could desync a later
                 // C-string-based use of it from what the router matched on.
                 if (v != 0) out += static_cast<char>(v);
@@ -111,7 +121,8 @@ static std::string url_decode_segment(const std::string& s) {
     return out;
 }
 
-void Router::add_internal(std::string method, std::string pattern, Handler handler) {
+void Router::add_internal(std::string method, std::string pattern, Handler handler,
+                          bool head_alias) {
     std::transform(method.begin(), method.end(), method.begin(), ::toupper);
     std::string norm = normalize_pattern(pattern);
     auto segments = split_path(norm);
@@ -143,6 +154,7 @@ void Router::add_internal(std::string method, std::string pattern, Handler handl
         curr = next;
     }
     curr->handlers[method] = std::move(handler);
+    if (method == "GET" && !head_alias) curr->no_head_alias = true;
 }
 
 RouteMatch Router::match(const std::string& method, const std::string& path) const {
@@ -152,11 +164,12 @@ RouteMatch Router::match(const std::string& method, const std::string& path) con
     auto segments = split_path(clean_path);
     std::unordered_map<std::string, std::string> params;
     Handler handler = nullptr;
+    bool    via_wildcard = false;
 
-    if (match_recursive(root_.get(), segments, 0, method, params, handler)) {
-        return {true, handler, std::move(params)};
+    if (match_recursive(root_.get(), segments, 0, method, params, handler, via_wildcard)) {
+        return {true, handler, std::move(params), via_wildcard};
     }
-    return {false, nullptr, {}};
+    return {false, nullptr, {}, false};
 }
 
 bool Router::match_recursive(
@@ -165,7 +178,8 @@ bool Router::match_recursive(
     size_t index,
     const std::string& method,
     std::unordered_map<std::string, std::string>& params,
-    Handler& out_handler) const 
+    Handler& out_handler,
+    bool& out_via_wildcard) const
 {
     // Terminal case
     if (index == segments.size()) {
@@ -174,10 +188,41 @@ bool Router::match_recursive(
             out_handler = it->second;
             return true;
         }
+        // RFC 9110 §9.3.2: HEAD is defined identically to GET, minus the
+        // response body. A route registered with `get endpoint(...)`
+        // should answer HEAD for free, the way every other web server
+        // handles it, instead of 404ing until the app also declares a
+        // separate HEAD route that does the exact same thing. The body
+        // itself is stripped afterward, in HttpConnection::finish_dispatch —
+        // this only has to find the right handler to run.
+        if (method == "HEAD" && !node->no_head_alias) {
+            auto git = node->handlers.find("GET");
+            if (git != node->handlers.end()) {
+                out_handler = git->second;
+                return true;
+            }
+        }
         // Check wildcard handle anyway (*)
         it = node->handlers.find("*");
         if (it != node->handlers.end()) {
             out_handler = it->second;
+            // This is an ANY-METHOD fallback (app.any(path, ...)), not a
+            // match against the method the caller actually asked for --
+            // the same "this claims the path only because nothing more
+            // specific does" situation a wildcard PATH SEGMENT is in, and
+            // App's static-mount gate (handle_request(), app.cpp) needs to
+            // treat it identically: main.cpp registers exactly this shape
+            // at the exact path "/" (app.any("/", dispatch), the Lux
+            // Script engine's root-path catch-all -- "/*" alone cannot
+            // reach a zero-segment path, see find_wildcard_child()'s
+            // comment on the non-terminal branch below, hence a second,
+            // separate any() just for "/"). Without this, `via_wildcard`
+            // caught the "/*" catch-all but not this one, and a root SPA
+            // mount's own real `get endpoint("/")` route was reported as
+            // "found" here anyway, permanently shadowed by the SAME static
+            // mount finding #3 fixed for every OTHER path — confirmed
+            // against the real test suite the moment this fix landed.
+            out_via_wildcard = true;
             return true;
         }
         return false;
@@ -187,7 +232,7 @@ bool Router::match_recursive(
 
     // 1. Try static
     Node* next = node->find_static_child(seg);
-    if (next && match_recursive(next, segments, index + 1, method, params, out_handler)) {
+    if (next && match_recursive(next, segments, index + 1, method, params, out_handler, out_via_wildcard)) {
         return true;
     }
 
@@ -195,7 +240,7 @@ bool Router::match_recursive(
     next = node->find_param_child();
     if (next) {
         params[next->segment] = url_decode_segment(seg);
-        if (match_recursive(next, segments, index + 1, method, params, out_handler)) {
+        if (match_recursive(next, segments, index + 1, method, params, out_handler, out_via_wildcard)) {
             return true;
         }
         params.erase(next->segment); // backtrack
@@ -207,9 +252,10 @@ bool Router::match_recursive(
         // Wildcard matches EVERYTHING remaining
         auto it = next->handlers.find(method);
         if (it == next->handlers.end()) it = next->handlers.find("*");
-        
+
         if (it != next->handlers.end()) {
             out_handler = it->second;
+            out_via_wildcard = true;
             // Build the rest of the path for the wildcard if needed?
             // Usually wildcard just captures the rest.
             return true;

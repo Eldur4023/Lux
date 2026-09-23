@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -165,43 +166,61 @@ struct DbAwaitable {
     void await_resume() const noexcept {}
 };
 
-// ─── Puente compartido bytecode/--native ─────────────────────────────────────
+// ─── Bridge shared between bytecode and --native ─────────────────────────────
 //
-// Fase 5.5 de --native: la logica de una suspension
-// de base de datos vivia solo dentro de run_db() (project.cpp), atada a
-// VM::Result/NativeCtx. Extraida aqui, parametrizada por DbOp en vez del
-// native_id de turno, para que el codigo generado por una ruta nativa
-// pueda invocar EXACTAMENTE el mismo camino que ya usa bytecode -- no una
-// reimplementacion "casi igual" (la misma clase de divergencia silenciosa
-// que ya motivo dos correcciones criticas en esta fase). run_db() ahora es
-// un adaptador delgado sobre esto.
+// --native phase 5.5: the logic of a database suspension used to live only
+// inside run_db() (project.cpp), tied to VM::Result/NativeCtx. Extracted
+// here, parameterized by DbOp instead of whichever native_id, so the code
+// generated for a native route can invoke EXACTLY the same path bytecode
+// already uses -- not an "almost the same" reimplementation (the same class
+// of silent divergence that already caused two critical fixes in this
+// phase). run_db() is now a thin adapter over this.
 enum class DbOp { Query, Exec, LastId, Begin, Commit, Rollback };
 
-// `pinned_workers`/`last_exec_workers`: mismo mapa (module -> worker) que
-// NativeCtx lleva hoy para una peticion bytecode -- el llamante (run_db(),
-// o el codigo nativo de una ruta) es dueño de estos mapas y los pasa por
-// referencia, vivos mientras dure la peticion completa. `sql`/`params` se
-// ignoran para LastId/Begin/Commit/Rollback (no los necesitan).
+// `pinned_workers`/`last_exec_workers`: the same map (module -> worker)
+// NativeCtx already carries for a bytecode request today -- the caller
+// (run_db(), or a route's generated native code) owns these maps and
+// passes them by reference, alive for the whole duration of the request.
+// `sql`/`params` are ignored for LastId/Begin/Commit/Rollback (they do not
+// need them).
 //
-// Nunca lanza ni marca un error mas alla de esta funcion: un fallo del
-// motor (modulo no configurado, SQL invalida, fallo del driver) da un
-// Value::Dict {"error": mensaje} como resultado normal, exactamente igual
-// que antes -- el `.lux` (o el codigo nativo generado) decide que hacer con
-// el, la funcion nunca revienta el handler.
+// `poisoned`: modules whose in-progress transaction has already seen a
+// statement fail. A real SQL engine aborts the ENTIRE transaction the
+// moment a statement inside it fails -- everything that comes after,
+// including a final commit(), is rejected until a rollback() -- but the
+// drivers at this layer (sqlite3/libpq/libmysqlclient) do not expose that
+// state uniformly, and an engine error here is always a plain Value, never
+// an exception (see the paragraph below): without this tracking, a `.lux`
+// that does not check the result of EVERY exec()/query() (90% of the ones
+// people write, GUIDE.md included: its own transactions example does not)
+// keeps chaining statements over a connection whose first INSERT already
+// failed, and the final commit() confirms all of them -- the ones that DID
+// work AND the gap left by the one that did not. With this, any statement
+// inside an already-marked transaction returns an immediate error without
+// touching the driver, and commit() on it does a ROLLBACK instead and
+// reports it as an error rather than a success. Lives in the same NativeCtx
+// as pinned_workers/last_exec_workers, same lifetime.
+//
+// Never throws or raises an error beyond this function: an engine failure
+// (module not configured, invalid SQL, driver failure) produces a
+// Value::Dict {"error": message} as a normal result, exactly as before --
+// the `.lux` (or the generated native code) decides what to do with it,
+// the function never blows up the handler.
 lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLoop* loop,
                             const std::string& sql, std::vector<Value> params,
                             std::map<std::string, int>& pinned_workers,
-                            std::map<std::string, int>& last_exec_workers);
+                            std::map<std::string, int>& last_exec_workers,
+                            std::set<std::string>& poisoned);
 
-// Cierra, con ROLLBACK, cualquier transaccion que el handler haya dejado
-// abierta (begin() sin commit() ni rollback() al llegar al final de la
-// ruta). Sin esto, la conexion que la abrio quedaria pinned dentro de una
-// transaccion para siempre y el siguiente que la reutilizara heredaria ese
-// estado a medias. Se llama una vez, justo antes de construir la respuesta
-// -- ver el punto de llamada en project.cpp (bytecode) y en el codigo que
-// genera una ruta nativa asincrona (native_gen.cpp). Vacia `pinned_workers`
-// al terminar.
-lux::Task<void> rollback_pendientes_db(std::map<std::string, int>& pinned_workers,
+// Closes, with ROLLBACK, any transaction the handler left open (begin()
+// with no commit() or rollback() by the time the route ends). Without
+// this, the connection that opened it would stay pinned inside a
+// transaction forever, and the next request to reuse it would inherit that
+// half-finished state. Called once, right before building the response --
+// see the call site in project.cpp (bytecode) and in the code that
+// generates an async native route (native_gen.cpp). Empties
+// `pinned_workers` when done.
+lux::Task<void> rollback_pending_db(std::map<std::string, int>& pinned_workers,
                                          lux::core::EventLoop* loop);
 
 } // namespace lux_script

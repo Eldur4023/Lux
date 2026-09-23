@@ -64,7 +64,7 @@ void Parser::synchronize() {
             case Tok::Indent: ++depth; break;
             case Tok::Dedent: if (depth > 0) --depth; break;
             case Tok::KwGet: case Tok::KwPost: case Tok::KwPut:
-            case Tok::KwPatch: case Tok::KwDelete: case Tok::KwAny:
+            case Tok::KwPatch: case Tok::KwDelete: case Tok::KwOptions: case Tok::KwAny:
             case Tok::KwSse: case Tok::KwWs: case Tok::KwApp:
             case Tok::KwClass: case Tok::KwFn: case Tok::KwGroup:
             case Tok::KwImport: case Tok::KwOn:
@@ -108,7 +108,7 @@ void Parser::parse_into(Program& out) {
 void Parser::parse_declaration(Program& out) {
     switch (peek().kind) {
         case Tok::KwGet: case Tok::KwPost: case Tok::KwPut:
-        case Tok::KwPatch: case Tok::KwDelete: case Tok::KwAny:
+        case Tok::KwPatch: case Tok::KwDelete: case Tok::KwOptions: case Tok::KwAny:
         case Tok::KwSse: case Tok::KwWs: {
             const Token& m = advance();
             parse_route(out, m, "", {});
@@ -169,6 +169,7 @@ void Parser::parse_route(Program& out, const Token& method_tok,
         case Tok::KwPut:    r.method = "PUT";    break;
         case Tok::KwPatch:  r.method = "PATCH";  break;
         case Tok::KwDelete: r.method = "DELETE"; break;
+        case Tok::KwOptions: r.method = "OPTIONS"; break;
         case Tok::KwAny:    r.method = "*";      break;
         case Tok::KwSse:    r.method = "SSE";    break;
         case Tok::KwWs:     r.method = "WS";     break;
@@ -349,7 +350,7 @@ void Parser::parse_group(Program& out, const std::string& prefix,
         else {
             switch (peek().kind) {
                 case Tok::KwGet: case Tok::KwPost: case Tok::KwPut:
-                case Tok::KwPatch: case Tok::KwDelete: case Tok::KwAny:
+                case Tok::KwPatch: case Tok::KwDelete: case Tok::KwOptions: case Tok::KwAny:
                 case Tok::KwSse: case Tok::KwWs: {
                     seen_route = true;
                     const Token& m = advance();
@@ -533,7 +534,9 @@ void Parser::parse_enum(Program& out) {
 // kind: 0 string, 1 number, 2 boolean.  env("VAR") is resolved right here and
 // counts as a string; if the variable does not exist it stays empty and the
 // caller decides whether that is an error.
-bool Parser::config_value(std::string& text, long long& number, bool& flag, int& kind) {
+bool Parser::config_value(std::string& text, long long& number, bool& flag, int& kind,
+                          bool* from_env) {
+    if (from_env) *from_env = false;
     if (check(Tok::String)) { text = advance().text; kind = 0; return true; }
     if (check(Tok::Int))    { number = std::strtoll(advance().text.c_str(), nullptr, 10); kind = 1; return true; }
     if (check(Tok::KwTrue) || check(Tok::KwFalse)) {
@@ -542,6 +545,7 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
         return true;
     }
     if (check(Tok::Ident) && peek().text == "env" && peek(1).is(Tok::LParen)) {
+        if (from_env) *from_env = true;
         advance(); advance();
         if (!check(Tok::String)) { error_here("env() expects the name in quotes"); return false; }
         Token name_tok = advance();
@@ -608,12 +612,34 @@ void Parser::parse_app(Program& out) {
                     else                       out.app.templates_dir = v;
                 }
             } else if (k == "port") {
-                if (!check(Tok::Int)) error_here("expected a port number");
-                else {
-                    long v = std::strtol(advance().text.c_str(), nullptr, 10);
-                    if (v < 1 || v > 65535)
-                        diags_.error(prev().loc, "port out of range (1-65535)");
+                // `env("PORT")` alongside a literal number: most cloud
+                // platforms (Railway, Render, Fly.io, Heroku...) assign the
+                // listen port at deploy time through exactly this
+                // environment variable and give an app no say in the
+                // number -- a `.lux` that could only ever write a literal
+                // int here had no way to deploy on any of them at all.
+                // Reuses config_value() (string/int/bool/env(), used
+                // identically for session/jwt secrets above) so this
+                // accepts the exact same env()/literal shapes the rest of
+                // `app:` already does, rather than a second, narrower
+                // parser just for this one key.
+                SourceLoc   port_loc = peek().loc;
+                std::string text; long long number = 0; bool flag = false; int kind = -1;
+                if (!config_value(text, number, flag, kind)) {
+                    error_here("expected a port number");
+                } else if (kind == 1) {
+                    if (number < 1 || number > 65535)
+                        diags_.error(port_loc, "port out of range (1-65535)");
+                    else out.app.port = static_cast<int>(number);
+                } else if (kind == 0) {
+                    size_t pos = 0;
+                    long long v = -1;
+                    try { v = std::stoll(text, &pos); } catch (...) {}
+                    if (pos != text.size() || v < 1 || v > 65535)
+                        diags_.error(port_loc, "port out of range (1-65535)");
                     else out.app.port = static_cast<int>(v);
+                } else {
+                    diags_.error(port_loc, "expected a port number");
                 }
             } else if (k == "docs")    { out.app.docs    = true; }
             else if   (k == "health")  { out.app.health  = true; }
@@ -662,7 +688,8 @@ void Parser::parse_app(Program& out) {
                     const Token& sub = peek();
                     std::string  sk  = advance().text;
                     std::string  text; long long number = 0; bool flag = false; int kind = -1;
-                    if (!config_value(text, number, flag, kind)) {
+                    bool         from_env = false;
+                    if (!config_value(text, number, flag, kind, &from_env)) {
                         error_here("invalid value: expected a string, a number, "
                                    "true/false o env(\"VAR\")");
                         while (!check(Tok::Newline) && !check(Tok::Dedent) &&
@@ -670,14 +697,47 @@ void Parser::parse_app(Program& out) {
                         continue;
                     }
 
+                    // Both secrets sign an HMAC-SHA256 (crypto::hmac_sha256,
+                    // auth.cpp): RFC 2104 §3 recommends a key at least as
+                    // long as the hash's own output (32 bytes for SHA-256),
+                    // since a shorter one narrows what an attacker has to
+                    // brute-force to recover it from a handful of observed
+                    // signed cookies/tokens -- offline, with no rate limit
+                    // this framework (or any other) can apply. Compiling a
+                    // project with `secret "abc"` produced a perfectly
+                    // valid, perfectly forgeable session/JWT signer with no
+                    // warning at all; this rejects it the same way an
+                    // unterminated pattern or a missing ws origins() already
+                    // fails to compile rather than shipping something
+                    // quietly unsafe.
+                    //
+                    // Skipped entirely for env("VAR"): what that resolves to
+                    // is a deployment-environment decision, not something
+                    // this source file controls -- the SAME reasoning
+                    // config_value() already applies to an unset env var
+                    // (warn, do not fail compilation) applies to its length
+                    // too. A short literal string right here in the .lux,
+                    // on the other hand, is exactly the "changeme"/"abc"
+                    // placeholder case this exists to catch.
+                    static constexpr size_t kMinSecretLen = 32;
+                    auto check_secret_len = [&](const std::string& label) {
+                        if (sk == "secret" && kind == 0 && !from_env && text.size() < kMinSecretLen)
+                            diags_.error(sub.loc, label + " secret is only " +
+                                std::to_string(text.size()) + " character(s) long; "
+                                "use at least " + std::to_string(kMinSecretLen) +
+                                " (it signs the cookie/token's HMAC -- a short "
+                                "one can be brute-forced offline from a handful "
+                                "of observed values)");
+                    };
+
                     if (is_session) {
-                        if      (sk == "secret"  && kind == 0) out.app.session_secret  = text;
+                        if      (sk == "secret"  && kind == 0) { check_secret_len("session:"); out.app.session_secret  = text; }
                         else if (sk == "max_age" && kind == 1) out.app.session_max_age = (int)number;
                         else if (sk == "secure"  && kind == 2) out.app.session_secure  = flag;
                         else diags_.error(sub.loc, "unknown key or wrong type "
                                                    "in session: '" + sk + "'");
                     } else {
-                        if      (sk == "secret" && kind == 0) out.app.jwt_secret = text;
+                        if      (sk == "secret" && kind == 0) { check_secret_len("jwt:"); out.app.jwt_secret = text; }
                         else if (sk == "issuer" && kind == 0) out.app.jwt_issuer = text;
                         else diags_.error(sub.loc, "unknown key or wrong type "
                                                    "in jwt: '" + sk + "'");
@@ -1249,8 +1309,20 @@ ExprPtr Parser::parse_postfix() {
             while (!check(Tok::RParen) && !check(Tok::EndOfFile)) {
                 Arg a;
                 a.loc = peek().loc;
-                // Named argument: IDENT '=' expr
-                if (check(Tok::Ident) && peek(1).is(Tok::Assign)) {
+                // Named argument: NAME '=' expr. `NAME` accepts a reserved
+                // word too (same convention already used a few lines up
+                // for a member name after '.': `!peek().text.empty()`,
+                // true for Ident/keywords/literals and false for every
+                // operator/punctuation token, which never carry source
+                // text) -- without it, `render("x.html", error="oops")`
+                // could not name a template variable `error`, `ws`, `sse`,
+                // `this` or `fn` at all: the parser saw the keyword, gave
+                // up on treating it as a name, and tried to parse `error`
+                // itself as the start of a new expression, surfacing as an
+                // unrelated "expected ')' closing the call, but there is
+                // '='" instead of a message about the name actually being
+                // reserved.
+                if ((check(Tok::Ident) || !peek().text.empty()) && peek(1).is(Tok::Assign)) {
                     a.name = advance().text;
                     advance();
                     seen_named = true;
@@ -1313,8 +1385,18 @@ ExprPtr Parser::parse_primary() {
         }
 
         // Words that are both a keyword and a reserved object inside a handler:
-        // `sse.send(...)`, `ws.recv()`, `error.message`.
-        case Tok::KwSse: case Tok::KwWs: case Tok::KwError: {
+        // `sse.send(...)`, `ws.recv()`, `error.message`. `fn` joins them for
+        // a narrower reason: it is ONLY ever a declaration keyword
+        // (`fn add(...)`) — nothing anywhere treats the bare word `fn`
+        // itself as a value — so accepting it here as a plain identifier
+        // reference is purely additive. It specifically unblocks a
+        // render() keyword argument named `fn` (or `error`/`ws`/`sse`)
+        // actually being usable inside the template it renders
+        // (`{{ error }}`): the parser accepting it as a named ARGUMENT at
+        // the call site (see parse_call's own comment) is not enough on
+        // its own if the template body's `{{ }}` expression, parsed
+        // through this same grammar, still has no way to read it back.
+        case Tok::KwSse: case Tok::KwWs: case Tok::KwError: case Tok::KwFn: {
             auto e = make(ExprKind::Ident, advance().loc);
             e->text = prev().text;
             return e;

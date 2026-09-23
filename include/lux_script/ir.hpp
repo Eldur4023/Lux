@@ -8,27 +8,28 @@
 
 namespace lux_script {
 
-// IR tipado de expresiones (--native, fase 1).
+// Typed IR for expressions (--native, phase 1).
 //
-// TODAVIA NO ESTA CONECTADO a Emitter: este fichero es puramente aditivo, el
-// mismo tipo de paso seguro que fue type.hpp antes de conectarse. Nada en
-// Emitter construye ni consume IrExpr todavia.
+// NOT YET CONNECTED to Emitter: this file is purely additive, the same kind
+// of safe step that type.hpp was before it got connected. Nothing in
+// Emitter constructs or consumes IrExpr yet.
 //
-// El objetivo de este IR es que `check_expr` (por escribir) y `emit_expr` (ya
-// existente) dejen de tener que estar de acuerdo por las buenas sobre nombres
-// resueltos: el checker recorre el Expr del AST UNA vez, hace exactamente las
-// mismas comprobaciones y llamadas a declare_local/resolve_local que hace hoy
-// emit_expr, y el resultado es un IrExpr que ya lleva el tipo y la ranura
-// resueltos. Un emisor que solo consuma IrExpr no vuelve a resolver un nombre
-// ni a llamar a error() -- eso es justo lo que evita la duplicacion de
-// diagnosticos descrita en la fase 1.
+// The goal of this IR is for `check_expr` (still to be written) and
+// `emit_expr` (already existing) to stop having to agree on resolved names
+// by convention: the checker walks the AST's Expr ONCE, performs exactly
+// the same checks and declare_local/resolve_local calls that emit_expr
+// performs today, and the result is an IrExpr that already carries the
+// resolved type and slot. An emitter that only consumes IrExpr never
+// resolves a name again nor calls error() -- that is exactly what avoids
+// the diagnostic duplication described in phase 1.
 //
-// La forma de este struct calca a proposito la de Expr (ast.hpp): mismos
-// campos de literal, mismo uso de `object`/`lhs`/`rhs` segun el kind (ver
-// emit_expr para el porque de cada reuso: Ternary usa object como condicion y
-// lhs/rhs como las dos ramas; Index usa object como receptor y lhs como el
-// indice). Calcar la forma es intencional -- construir el IrExpr a partir del
-// Expr es una traduccion nodo a nodo, no un rediseno.
+// The shape of this struct deliberately mirrors that of Expr (ast.hpp): the
+// same literal fields, the same use of `object`/`lhs`/`rhs` depending on the
+// kind (see emit_expr for the reasoning behind each reuse: Ternary uses
+// object as the condition and lhs/rhs as the two branches; Index uses
+// object as the receiver and lhs as the index). Mirroring the shape is
+// intentional -- building the IrExpr from the Expr is a node-by-node
+// translation, not a redesign.
 
 struct IrExpr;
 using IrExprPtr = std::unique_ptr<IrExpr>;
@@ -47,34 +48,35 @@ enum class IrExprKind {
     FuncRef,
 };
 
-// Las 9 formas de llamada que distingue emit_call hoy. No es "una llamada
-// generica con argumentos": cada forma tiene su
-// propia regla de aridad/nombrados, su propia necesidad de await, y su propio
-// opcode/backend de destino, asi que el checker tiene que decidir CUAL es
-// antes de que el emisor (de bytecode o nativo) pueda actuar.
+// The 9 call shapes that emit_call distinguishes today. This is not "one
+// generic call with arguments": each shape has its own arity/keyword-arg
+// rule, its own need for await, and its own destination opcode/backend, so
+// the checker has to decide WHICH one it is before the emitter (bytecode or
+// native) can act.
 enum class IrCallShape {
     DbModuleCall,        // 1. sqlite.query(...)                    -> CallAsync
     ReservedMemberCall,  // 2. sse.send(...) / ws.send(...) / error.foo(...)
-    UserFunctionCall,    // 3. fn de usuario, resuelta contra FunctionSigs
-    ConstructorCall,     // 4. Clase(...), resuelta por aridad contra ctors
-    ClassMethodCall,     // 5. metodo con receptor de tipo estatico conocido
+    UserFunctionCall,    // 3. user-defined fn, resolved against FunctionSigs
+    ConstructorCall,     // 4. Class(...), resolved by arity against ctors
+    ClassMethodCall,     // 5. method with a receiver of known static type
     BuiltinGlobalCall,   // 6. len(...)/sleep(...)/render(...)
-    BuiltinMethodCall,   // 7. s.upper()/xs.add(v)... estatico o dinamico
+    BuiltinMethodCall,   // 7. s.upper()/xs.add(v)... static or dynamic
     BuiltinModuleCall,    // 8. hash.sha256(...) (NATIVE-MODULES.md) -> CallBuiltinModule.
-                          //    Sincrona a proposito -- ver el porque en ese documento --
-                          //    y por eso NO comparte forma con DbModuleCall aunque las dos
-                          //    vengan de un `import`: cada una necesita su propio opcode.
-    Invalid,             // 9. ninguna de las anteriores: error de compilacion
+                          //    Deliberately synchronous -- see the why in that document --
+                          //    and that's why it does NOT share a shape with DbModuleCall even
+                          //    though both come from an `import`: each needs its own opcode.
+    Invalid,             // 9. none of the above: a compile error
 };
 
-// Argumento ya resuelto: el checker ya comprobo que los nombrados son
-// validos donde aparecen (solo render(), forma 6, los admite hoy) y ya
-// relleno los que faltan con su valor por defecto (FnSig::defaults) en las
-// formas que los tienen. `name` viaja vacio para un argumento posicional o
-// para un valor por defecto rellenado por el checker; solo lleva contenido
-// en un nombrado de verdad (`render(x, k=v)`), que es la unica informacion
-// de un IrArg que no esta ya en su `value` -- hace falta para que quien
-// consuma el IR pueda reconstruir el Dict de variables (ver emit_call).
+// An already-resolved argument: the checker has already verified that named
+// arguments are valid wherever they appear (only render(), shape 6, accepts
+// them today) and has already filled in the missing ones with their default
+// value (FnSig::defaults) in the shapes that have them. `name` travels empty
+// for a positional argument or for a default value filled in by the
+// checker; it only carries content for a genuine named argument
+// (`render(x, k=v)`), which is the only piece of information in an IrArg
+// that isn't already in its `value` -- it's needed so that whoever consumes
+// the IR can reconstruct the variables Dict (see emit_call).
 struct IrArg {
     std::string name;
     IrExprPtr   value;
@@ -90,77 +92,79 @@ struct IrExpr {
     IrExprKind kind;
     SourceLoc  loc;
 
-    // Tipo ya resuelto por el checker. Type::unknown() es un resultado
-    // legitimo (lo mismo que hoy devuelve type_of() para lo que no se puede
-    // saber en compilacion), no una marca de "todavia sin rellenar".
+    // Type already resolved by the checker. Type::unknown() is a legitimate
+    // result (the same thing type_of() returns today for what can't be
+    // known at compile time), not a marker for "not yet filled in".
     Type type = Type::unknown();
 
-    // Literales -- mismos campos que Expr, mismo significado.
+    // Literals -- same fields as Expr, same meaning.
     std::string text;
     long long   int_value   = 0;
     double      float_value = 0;
     bool        bool_value  = false;
 
-    // Ident: la ranura ya resuelta por resolve_local/declare_local. Un Ident
-    // que el checker no pudo resolver ya disparo error() y no llega a
-    // construir un IrExpr -- por eso no hace falta aqui un estado de "no
-    // resuelto", solo el indice real.
+    // Ident: the slot already resolved by resolve_local/declare_local. An
+    // Ident that the checker couldn't resolve has already triggered error()
+    // and never reaches building an IrExpr -- that's why there's no need
+    // here for an "unresolved" state, just the real index.
     int slot = -1;
 
-    // Estructura general. Calca el reuso real de Expr (ast.hpp), verificado
-    // contra emit_expr caso a caso -- no es simetrico a proposito, porque
-    // Expr tampoco lo es:
-    //   Member/Index/Call -> object es el receptor
-    //   Binary            -> lhs, rhs son los operandos
-    //   Ternary           -> object es la condicion, lhs/rhs son las ramas
-    //   Unary             -> lhs es el operando
-    //   Await             -> lhs es la llamada (siempre kind == Call)
-    //   PreStep/PostStep  -> lhs es el objetivo, reconstruido como un IrExpr
-    //                        Ident/Member/Index sintetico (ver check_expr):
-    //                        Member/Index ahi NO comprueban el campo/objeto
-    //                        con el mismo rigor que un Member/Index suelto,
-    //                        porque emit_expr tampoco lo hace hoy -- ver el
-    //                        comentario de check_expr sobre ese hueco.
+    // General structure. Mirrors the actual reuse in Expr (ast.hpp),
+    // verified against emit_expr case by case -- it's not symmetric on
+    // purpose, because Expr isn't either:
+    //   Member/Index/Call -> object is the receiver
+    //   Binary            -> lhs, rhs are the operands
+    //   Ternary           -> object is the condition, lhs/rhs are the branches
+    //   Unary             -> lhs is the operand
+    //   Await             -> lhs is the call (always kind == Call)
+    //   PreStep/PostStep  -> lhs is the target, rebuilt as a synthetic
+    //                        Ident/Member/Index IrExpr (see check_expr):
+    //                        Member/Index there do NOT check the
+    //                        field/object with the same rigor as a
+    //                        standalone Member/Index, because emit_expr
+    //                        doesn't either today -- see check_expr's
+    //                        comment about that gap.
     IrExprPtr object;
     IrExprPtr lhs, rhs;
 
     // Call
     IrCallShape        call_shape = IrCallShape::Invalid;
     std::vector<IrArg> args;
-    // Segun call_shape: el indice ya resuelto en la tabla que corresponda
-    // (FunctionSigs::index en UserFunctionCall/ClassMethodCall, el numero de
-    // parametros ya usado para indexar ClassSig::ctors en ConstructorCall).
-    // -1 si esa forma no resuelve por indice (BuiltinMethodCall resuelve por
-    // nombre; ReservedMemberCall y BuiltinGlobalCall SI llevan call_index --
-    // las dos terminan resolviendo al mismo native_id de hoy, solo cambia
-    // call_shape segun de donde vino la llamada).
+    // Depending on call_shape: the index already resolved in the
+    // corresponding table (FunctionSigs::index in
+    // UserFunctionCall/ClassMethodCall, the parameter count already used to
+    // index ClassSig::ctors in ConstructorCall). -1 if that shape doesn't
+    // resolve by index (BuiltinMethodCall resolves by name;
+    // ReservedMemberCall and BuiltinGlobalCall DO carry call_index -- both
+    // end up resolving to today's same native_id, only call_shape changes
+    // depending on where the call came from).
     int call_index = -1;
-    // Nombre ya resuelto que necesita el opcode final: el modulo inyectado en
-    // DbModuleCall, el nombre del metodo builtin en BuiltinMethodCall, o el
-    // nombre completo ya formado ("obj.miembro" / el builtin) en
-    // ReservedMemberCall/BuiltinGlobalCall. Vacio si call_shape no lo
-    // necesita (UserFunctionCall/ClassMethodCall/ConstructorCall resuelven
-    // por call_index, no por nombre).
+    // Name already resolved that the final opcode needs: the module
+    // injected in DbModuleCall, the builtin method name in
+    // BuiltinMethodCall, or the already-formed full name ("obj.member" /
+    // the builtin) in ReservedMemberCall/BuiltinGlobalCall. Empty if
+    // call_shape doesn't need it (UserFunctionCall/ClassMethodCall/
+    // ConstructorCall resolve by call_index, not by name).
     std::string call_name;
     bool        awaited = false;
 
-    // Kind == Member representando un miembro de 0 argumentos de un objeto
-    // reservado (`sse.open`, sin parentesis: emit_expr lo resuelve con
-    // CallNative igual que una llamada, ver check_expr) reusa call_name (el
-    // objeto reservado, ej. "sse") y call_index (el native_id ya resuelto)
-    // en vez de anadir campos nuevos solo para este caso -- `text` sigue
-    // llevando el nombre del miembro, como en cualquier otro Member.
+    // Kind == Member representing a 0-argument member of a reserved object
+    // (`sse.open`, without parentheses: emit_expr resolves it with
+    // CallNative just like a call, see check_expr) reuses call_name (the
+    // reserved object, e.g. "sse") and call_index (the already-resolved
+    // native_id) instead of adding new fields just for this case -- `text`
+    // still carries the member's name, as in any other Member.
 
     // ListLit / DictLit
     std::vector<IrExprPtr>   items;
     std::vector<IrDictEntry> entries;
 };
 
-// IR de sentencias (--native, fase 1: check_stmt
-// ya existe y esta verificado -- ver Emitter::check_stmt -- este es el IR que
-// deberia producir en vez de escribir a un DiagnosticBag). Aditivo, sin
-// conectar: como con IrExpr, la forma calca a Stmt (ast.hpp) a proposito, y
-// construirlo a partir de un Stmt real es traduccion nodo a nodo.
+// Statement IR (--native, phase 1: check_stmt already exists and is
+// verified -- see Emitter::check_stmt -- this is the IR it should produce
+// instead of writing to a DiagnosticBag). Additive, not yet connected: as
+// with IrExpr, the shape deliberately mirrors Stmt (ast.hpp), and building
+// it from a real Stmt is a node-by-node translation.
 
 struct IrStmt;
 using IrStmtPtr = std::unique_ptr<IrStmt>;
@@ -171,44 +175,45 @@ enum class IrStmtKind {
     If, While, For, Require, Try, Break, Continue,
 };
 
-// Las 4 formas de destino que distingue emit_stmt/check_stmt hoy en el caso
-// StmtKind::Assign (mirando Stmt::target->kind): cada una es una operacion de
-// runtime distinta, igual de bien diferenciada que las 8 formas de IrCall.
+// The 4 target shapes that emit_stmt/check_stmt distinguish today in the
+// StmtKind::Assign case (looking at Stmt::target->kind): each is a distinct
+// runtime operation, just as well differentiated as the 8 shapes of IrCall.
 enum class IrAssignTarget {
     Session,  // session.x = v -> __session_set("x", v)
     Index,    // xs[i] = v     -> SetIndex
-    Member,   // o.f = v       -> SetMember, tras comprobar que el campo existe
-    Local,    // x = v         -> StoreLocal en la ranura ya resuelta
+    Member,   // o.f = v       -> SetMember, after checking that the field exists
+    Local,    // x = v         -> StoreLocal in the already-resolved slot
 };
 
 struct IrStmt {
     IrStmtKind kind;
     SourceLoc  loc;
 
-    // Return / ExprStmt / VarDecl.init: la expresion (nulo en un Return sin
-    // valor). If / While / Require: la condicion. Assign: el valor a asignar,
-    // en las 4 formas.
+    // Return / ExprStmt / VarDecl.init: the expression (null in a Return
+    // with no value). If / While / Require: the condition. Assign: the
+    // value being assigned, in all 4 shapes.
     IrExprPtr value;
 
-    // VarDecl / For: el tipo declarado y el nombre de la variable, y la
-    // ranura que le asigno declare_local -- el consumidor de este IR no
-    // vuelve a llamar a declare_local, solo StoreLocal en `slot`. Try: `name`
-    // es el nombre del `catch` (vacio si no captura nada) y `slot` su ranura.
+    // VarDecl / For: the declared type and the variable's name, and the
+    // slot that declare_local assigned to it -- the consumer of this IR
+    // doesn't call declare_local again, just StoreLocal into `slot`. Try:
+    // `name` is the `catch` clause's name (empty if it doesn't capture
+    // anything) and `slot` its slot.
     Type        decl_type = Type::unknown();
     std::string name;
     int         slot = -1;
 
-    // For: el iterable (`Stmt::target` original). Require: la expresion del
-    // `else` (lo que se devuelve si la condicion es falsa).
+    // For: the iterable (the original `Stmt::target`). Require: the `else`
+    // expression (what's returned if the condition is false).
     IrExprPtr target;
 
-    // Assign: que forma de destino es, y las piezas que necesita cada una.
-    // Nunca se rellena mas de lo que corresponde a `assign_target`.
+    // Assign: which target shape this is, and the pieces each one needs.
+    // Never filled in beyond what corresponds to `assign_target`.
     IrAssignTarget assign_target = IrAssignTarget::Local;
-    IrExprPtr      assign_object;    // Index/Member: el receptor
-    IrExprPtr      assign_index;     // Index: la expresion del indice
-    std::string    assign_field;     // Session/Member: el nombre del campo
-    int            assign_slot = -1; // Local: la ranura ya resuelta
+    IrExprPtr      assign_object;    // Index/Member: the receiver
+    IrExprPtr      assign_index;     // Index: the index expression
+    std::string    assign_field;     // Session/Member: the field's name
+    int            assign_slot = -1; // Local: the already-resolved slot
 
     IrBlock body;    // If-then / While / For / Try
     IrBlock orelse;  // If-else / Try-catch

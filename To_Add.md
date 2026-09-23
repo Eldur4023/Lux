@@ -1,43 +1,43 @@
 # To add
 
-Limitaciones reales del compilador/lenguaje encontradas de pasada mientras se trabajaba
-en otra cosa — no bloquean lo que se estaba haciendo en el momento (siempre hay un
-workaround razonable), pero merece la pena arreglarlas más adelante. Cada entrada dice
-qué falla, por qué, el workaround actual, y dónde mirar para arreglarlo de verdad.
+Real compiler/language limitations found in passing while working on something
+else — they don't block whatever was being done at the time (there's always a
+reasonable workaround), but they're worth fixing later. Each entry says what
+fails, why, the current workaround, and where to look to fix it properly.
 
 ---
 
-## `type_of()` no conoce el tipo de retorno de una llamada a función de usuario — ARREGLADO
+## `type_of()` doesn't know the return type of a call to a user function — FIXED
 
-**Encontrado:** 2026-09-16, mientras se arreglaba que un `fn` suelto no podía usar
-constructores de clase (ver el commit "Standalone functions can now use classes").
+**Found:** 2026-09-16, while fixing the fact that a standalone `fn` couldn't use
+class constructors (see the commit "Standalone functions can now use classes").
 
-**Arreglado:** mismo día, commit "Resolve chained method calls on function/constructor
-results". `FnSig` ganó un campo `devuelve` (el tipo de retorno declarado), rellenado por
-`make_sig()`, y `type_of()`/`check_call` lo consultan en el caso `ExprKind::Call` (tanto
-para una función suelta como para un método de clase) en vez de devolver `Type::unknown()`.
-`check_call`'s propia resolución del receptor de un `.método()` (antes un chequeo a mano
-solo para `Ident`/`this`) pasó a usar `type_of()` también, que es lo que de verdad
-resuelve el ejemplo de abajo. Verificado con 60 peticiones seguidas contra un proceso
-limpio (sin nada más escuchando en el puerto) — ver la nota al final sobre el
-falso-positivo de no-determinismo que salió al verificarlo.
+**Fixed:** same day, commit "Resolve chained method calls on function/constructor
+results". `FnSig` gained a `devuelve` field (the declared return type), populated by
+`make_sig()`, and `type_of()`/`check_call` consult it in the `ExprKind::Call` case
+(both for a standalone function and for a class method) instead of returning
+`Type::unknown()`. `check_call`'s own resolution of a `.method()` receiver (previously
+a hand-written check only for `Ident`/`this`) now also goes through `type_of()`, which
+is what actually resolves the example below. Verified with 60 consecutive requests
+against a clean process (nothing else listening on the port) — see the note at the
+end about the false-positive non-determinism that showed up while verifying it.
 
-**Nota sobre un no-determinismo que resultó ser falso:** durante la verificación, el mismo
-repro daba 204 en vez de `{"r":25}" en una fracción de las peticiones, de forma
-aparentemente aleatoria, incluso con concurrencia y con ThreadSanitizer sin quejarse.
-Resultó ser un artefacto del entorno de pruebas, no un bug: `SO_REUSEPORT` permite que
-más de un proceso escuche el mismo puerto a la vez, y un proceso de la extensión de
-VSCode de otro repo (`.../Github/Lux/build/lux .`) llevaba un rato escuchando por
-casualidad en el mismo puerto (8098) usado para este repro de prueba en `/tmp`. El
-kernel repartía las conexiones nuevas entre los dos procesos (pegajoso por conexión,
-de ahí que pareciera "a veces sí, a veces no" pero siempre igual dentro de la misma
-conexión) — el proceso ajeno no tiene esa ruta y devolvía 204 sin más. Confirmado
-matando ambos procesos y repitiendo la prueba en un puerto verificado como libre:
-60/60 peticiones correctas. Moraleja para la próxima vez que algo parezca no
-determinista en un puerto reusado entre pruebas: `ss -tlnp | grep <puerto>` primero,
-no asumir que solo el proceso propio está escuchando ahí.
+**Note on a non-determinism that turned out to be false:** during verification, the
+same repro returned 204 instead of `{"r":25}` on a fraction of requests, seemingly at
+random, even under concurrency and with ThreadSanitizer staying quiet. It turned out
+to be an artifact of the test environment, not a bug: `SO_REUSEPORT` lets more than
+one process listen on the same port at once, and a VSCode extension process from
+another repo (`.../Github/Lux/build/lux .`) happened to have been listening for a
+while on the same port (8098) used for this test repro in `/tmp`. The kernel spread
+new connections between the two processes (sticky per connection, hence it looked
+"sometimes yes, sometimes no" but always consistent within the same connection) — the
+unrelated process doesn't have that route and just returned 204. Confirmed by killing
+both processes and repeating the test on a port verified to be free: 60/60 correct
+requests. Lesson for next time something looks non-deterministic on a port shared
+between tests: run `ss -tlnp | grep <port>` first, don't assume only your own process
+is listening there.
 
-**Qué falla:**
+**What fails:**
 
 ```lux
 class Punto:
@@ -54,28 +54,28 @@ get endpoint("/x"):
     return { "r": hacer_punto(3, 4).cuadrado() }
 ```
 
-Compila (`lux --check` no se queja), pero falla en tiempo de ejecución:
+Compiles (`lux --check` doesn't complain), but fails at runtime:
 
 ```
 {"error":"Dicts have no method 'cuadrado'"}
 ```
 
-**Por qué:** `Emitter::type_of()` (`src/lux_script/emitter.cpp`) solo sabe el tipo de una
-expresión `Call` cuando es una llamada a MÉTODO sobre un receptor de tipo ya conocido
+**Why:** `Emitter::type_of()` (`src/lux_script/emitter.cpp`) only knows the type of a
+`Call` expression when it's a METHOD call on a receiver whose type is already known
 (`case ExprKind::Call: { if (!e.object || e.object->kind != ExprKind::Member) return
-Type::unknown(); ... }`). Para una llamada a una función de usuario suelta
-(`hacer_punto(3, 4)`), no hay ninguna rama que consulte `FunctionSigs`/el tipo de retorno
-declarado de la función — cae directo a `Type::unknown()`. Sin saber que el resultado es
-un `Punto`, el checker no puede resolver `.cuadrado()` sobre él, y en tiempo de
-ejecución el valor (un `Value::Dict` normal y corriente) se despacha por la vía dinámica
-genérica, que solo conoce los métodos de `Dict` (`has`/`keys`), de ahí el mensaje.
+Type::unknown(); ... }`). For a call to a standalone user function
+(`hacer_punto(3, 4)`), there's no branch that consults `FunctionSigs`/the function's
+declared return type — it falls straight through to `Type::unknown()`. Without
+knowing the result is a `Punto`, the checker can't resolve `.cuadrado()` on it, and
+at runtime the value (a plain `Value::Dict`) is dispatched through the generic
+dynamic path, which only knows `Dict`'s methods (`has`/`keys`), hence the error message.
 
-Confirmado que es **independiente** de si la llamada ocurre dentro de una ruta o dentro
-de otro `fn` — falla igual en los dos sitios, así que no tiene relación con el fix de
-`build_function_signatures()`/`emit_function_bodies()` que sí se hizo.
+Confirmed to be **independent** of whether the call happens inside a route or inside
+another `fn` — it fails the same way in both places, so it's unrelated to the
+`build_function_signatures()`/`emit_function_bodies()` fix that was actually made.
 
-**Workaround actual (funciona perfectamente):** asignar el resultado a una variable
-local con el tipo declarado antes de encadenar el método:
+**Current workaround (works perfectly):** assign the result to a local variable with
+the declared type before chaining the method:
 
 ```lux
 fn Punto hacer_punto(int x, int y):
@@ -86,98 +86,102 @@ get endpoint("/x"):
     return { "r": p.cuadrado() }
 ```
 
-Esto funciona porque `type_of(Ident)` sí devuelve el tipo declarado de la variable
-(`local_type(e.text)`), a diferencia de `type_of(Call)`.
+This works because `type_of(Ident)` does return the variable's declared type
+(`local_type(e.text)`), unlike `type_of(Call)`.
 
-**Dónde mirar para arreglarlo:** `Emitter::type_of()`, caso `ExprKind::Call`
-(`src/lux_script/emitter.cpp`, cerca de la línea 538 en el commit donde se encontró esto).
-Necesitaría una rama nueva: si `e.object->kind == ExprKind::Ident` y ese nombre resuelve
-en `functions_` (la `FunctionSigs` que el `Emitter` ya recibe), devolver el tipo de
-retorno declarado de esa función — análogo a como ya se resuelve el retorno de un
-método (`m.devuelve ? Type::from_legacy_name(m.devuelve) : recv`), pero mirando
-`FnSig`/lo que sea que guarde el tipo de retorno de una función suelta en vez de un
-método. Comprobar también si `check_call`/`emit_call` tienen el mismo tipo de hueco
-para otras formas encadenadas (`fn_que_devuelve_list()[0].campo`, etc.) una vez se
-toque esto, no solo el caso de un método.
+**Where to look to fix it:** `Emitter::type_of()`, `ExprKind::Call` case
+(`src/lux_script/emitter.cpp`, near line 538 in the commit where this was found).
+It would need a new branch: if `e.object->kind == ExprKind::Ident` and that name
+resolves in `functions_` (the `FunctionSigs` the `Emitter` already receives), return
+that function's declared return type — analogous to how a method's return is already
+resolved (`m.devuelve ? Type::from_legacy_name(m.devuelve) : recv`), but looking at
+`FnSig`/whatever holds the return type of a standalone function instead of a method.
+Also check whether `check_call`/`emit_call` have the same kind of gap for other
+chained forms (`fn_returning_list()[0].field`, etc.) once this is touched, not just
+the method case.
 
 ---
 
-## `:param.ext` en un patrón de ruta no liga el parámetro — y `{param}.ext` "compila" pero liga el valor equivocado
+## `:param.ext` in a route pattern doesn't bind the parameter — and `{param}.ext` "compiles" but binds the wrong value
 
-**Encontrado:** 2026-09-17, reportado desde Homeflix al intentar `get endpoint("/hls/:n.ts", int n)`
-para servir segmentos HLS con la extensión incrustada en la URL.
+**Found:** 2026-09-17, reported from Homeflix while trying `get endpoint("/hls/:n.ts", int n)`
+to serve HLS segments with the extension embedded in the URL.
 
-**Qué falla — dos capas, no solo una:**
+**What fails — two layers, not just one:**
 
-1. `:n.ts` da un error de compilación confuso:
+1. `:n.ts` gives a confusing compile error:
    ```
    error: the pattern declares ':n.ts' but no parameter binds it
    ```
-   Esto viene de `pattern_params()` (`src/lux_script/project.cpp`), que para la sintaxis `:nombre`
-   busca el siguiente `/` como delimitador de cierre (`char close = (pattern[i] == '{') ? '}' : '/';`)
-   — para `:n.ts`, el "nombre" que extrae es literalmente `n.ts` (todo hasta la barra o el final),
-   no `n`. El checker exige entonces un parámetro llamado `n.ts`, que nadie declara nunca.
+   This comes from `pattern_params()` (`src/lux_script/project.cpp`), which for the
+   `:name` syntax looks for the next `/` as the closing delimiter (`char close = (pattern[i] == '{') ? '}' : '/';`)
+   — for `:n.ts`, the "name" it extracts is literally `n.ts` (everything up to the slash
+   or the end), not `n`. The checker then requires a parameter named `n.ts`, which no
+   one ever declares.
 
-2. Cambiar a `{n}.ts` (delimitador `}`, distinto en `pattern_params()`) hace que el checker SÍ
-   extraiga `n` correctamente y compile limpio — pero **el valor que llega en tiempo de
-   ejecución es el equivocado**, no un error: `GET /segment/42.ts` contra `get
-   endpoint("/segment/{n}.ts", int n)` devuelve `{"n":0}`, no `{"n":42}`. Esto es un bug
-   **distinto y más profundo**, en el router de C++ (`src/router.cpp`), no en el checker de
-   Lux Script:
-   - `Router::normalize_pattern()` convierte `{n}.ts` a `:n.ts` ANTES de registrar la ruta
-     (sustituye `{` por `:` y quita el `}`, dejando todo lo demás igual) — así que en tiempo de
-     ejecución `{n}.ts` y `:n.ts` son exactamente el mismo patrón interno.
-   - `Router::add_internal()` (línea `name = seg.substr(1);`) trata el segmento entero
-     `n.ts` (todo lo que sigue a `:`) como el NOMBRE del parámetro — liga
-     `params["n.ts"] = "42.ts"` (el valor CRUDO del segmento completo), nunca `params["n"]`.
-   - El binding de Lux Script busca `req.params["n"]` (porque el checker, vía la sintaxis
-     `{n}`, cree que el parámetro se llama `n`) — no lo encuentra, y el `int n` cae a su valor
-     por defecto (`0`), sin error ni aviso.
+2. Switching to `{n}.ts` (delimiter `}`, different in `pattern_params()`) does make the
+   checker correctly extract `n` and compile clean — but **the value that arrives at
+   runtime is wrong**, not an error: `GET /segment/42.ts` against `get
+   endpoint("/segment/{n}.ts", int n)` returns `{"n":0}`, not `{"n":42}`. This is a
+   **different and deeper** bug, in the C++ router (`src/router.cpp`), not in the Lux
+   Script checker:
+   - `Router::normalize_pattern()` converts `{n}.ts` to `:n.ts` BEFORE registering the
+     route (replaces `{` with `:` and drops the `}`, leaving everything else as-is) — so
+     at runtime `{n}.ts` and `:n.ts` are exactly the same internal pattern.
+   - `Router::add_internal()` (line `name = seg.substr(1);`) treats the whole segment
+     `n.ts` (everything after `:`) as the parameter's NAME — it binds
+     `params["n.ts"] = "42.ts"` (the RAW value of the full segment), never `params["n"]`.
+   - Lux Script's binding looks up `req.params["n"]` (because the checker, via the
+     `{n}` syntax, believes the parameter is named `n`) — doesn't find it, and `int n`
+     falls back to its default value (`0`), with no error or warning.
 
-   Conclusión: **el router no soporta en absoluto un parámetro combinado con texto literal
-   dentro del mismo segmento** (`:id.json`, `file-:id`, `{id}.ts`, lo que sea) — no es un hueco
-   del checker nada más, es una limitación real de emparejamiento de segmentos. Un segmento de
-   patrón solo puede ser enteramente estático, enteramente un parámetro, o `*`.
+   Conclusion: **the router doesn't support a parameter combined with literal text in
+   the same segment at all** (`:id.json`, `file-:id`, `{id}.ts`, whatever) — it's not
+   just a checker gap, it's a real limitation in segment matching. A pattern segment
+   can only be entirely static, entirely a parameter, or `*`.
 
-**Workaround actual (funciona perfectamente):** usar un segmento de ruta limpio para el
-parámetro, sin incrustar la extensión (`/segment/:n` en vez de `/segment/:n.ts`) — HLS no exige
-que la URL termine literalmente en `.ts`, basta con el `Content-Type` de la respuesta.
+**Current workaround (works perfectly):** use a clean route segment for the
+parameter, without embedding the extension (`/segment/:n` instead of `/segment/:n.ts`)
+— HLS doesn't require the URL to literally end in `.ts`, the response's `Content-Type`
+is enough.
 
-**Dónde mirar para arreglarlo:**
-- `pattern_params()` (`src/lux_script/project.cpp`, cerca de la línea 373): tendría que saber
-  parsear un segmento MIXTO (`:nombre` seguido de texto literal antes del `/`), no solo
-  `:nombre-hasta-la-barra` o `{nombre}`.
+**Where to look to fix it:**
+- `pattern_params()` (`src/lux_script/project.cpp`, near line 373): it would need to
+  know how to parse a MIXED segment (`:name` followed by literal text before the `/`),
+  not just `:name-up-to-the-slash` or `{name}`.
 - `Router::normalize_pattern()`/`Router::add_internal()`/`Router::match_recursive()`
-  (`src/router.cpp`): el `Node` de tipo `PARAM` tendría que poder llevar un sufijo/prefijo
-  literal, y `match_recursive()` tendría que comprobar ese sufijo contra el segmento real
-  ANTES de aceptar el match y extraer solo la parte variable como valor — hoy asume que un
-  segmento `PARAM` consume el segmento completo, sin más.
-- Los dos ficheros tienen que quedar consistentes entre sí (el nombre que el checker de Lux
-  Script cree que tiene el parámetro tiene que ser EXACTAMENTE la clave que el router real usa
-  al ligar `params[...]`) — el bug de `{n}.ts` de arriba es precisamente esa inconsistencia.
+  (`src/router.cpp`): the `PARAM`-type `Node` would need to be able to carry a
+  literal suffix/prefix, and `match_recursive()` would need to check that suffix
+  against the actual segment BEFORE accepting the match and extracting only the
+  variable part as the value — today it assumes a `PARAM` segment consumes the whole
+  segment, no more.
+- The two files need to stay consistent with each other (the name the Lux Script
+  checker believes the parameter has must be EXACTLY the key the real router uses
+  when binding `params[...]`) — the `{n}.ts` bug above is precisely that inconsistency.
 
 ---
 
-## `/*` no cubre la ruta raíz vacía `/`
+## `/*` doesn't cover the empty root route `/`
 
-**Encontrado:** 2026-09-17, reportado desde Homeflix al montar un fallback SPA con
+**Found:** 2026-09-17, reported from Homeflix while setting up an SPA fallback with
 `any endpoint("/*")`.
 
-**Qué pasa:** `get endpoint("/*")` (o `any`) coincide con `/algo`, `/a/b/c`, etc., pero NO con
-`/` a secas — hace falta al menos un carácter después de la barra. No está confirmado si es
-intencional (un wildcard normalmente implica "uno o más segmentos", no "cero o más"), pero
-sorprende si no se dice en ningún sitio, así que hay que documentarlo bien visible aunque se
-decida no cambiar el comportamiento.
+**What happens:** `get endpoint("/*")` (or `any`) matches `/something`, `/a/b/c`, etc.,
+but NOT `/` on its own — at least one character after the slash is required. It's not
+confirmed whether this is intentional (a wildcard normally implies "one or more
+segments," not "zero or more"), but it's surprising if it's not documented anywhere,
+so it needs to be clearly written down even if the behavior is kept as-is.
 
-**Workaround actual (funciona perfectamente):** declarar también un `get endpoint("/")`
-explícito junto al comodín `/*`.
+**Current workaround (works perfectly):** also declare an explicit `get endpoint("/")`
+alongside the `/*` wildcard.
 
-**Dónde mirar:** `Router::match_recursive()`/`split_path()` (`src/router.cpp`) — `/` produce
-una lista de segmentos VACÍA (`split_path` descarta segmentos vacíos), así que el nodo
-`WILDCARD` nunca llega a probarse para ella (el bucle `for (const auto& seg : segments)` en
-`match_recursive` no itera nada, y el caso terminal en `index == segments.size()` solo mira
-`node->handlers`, no los hijos wildcard del nodo raíz). Si se decide soportarlo, sería en ese
-caso terminal: comprobar también `node->find_wildcard_child()` cuando `index == segments.size()`
-antes de darse por vencido. Si se decide NO soportarlo (razonable: es coherente con que un
-wildcard siempre capture "el resto de la ruta", nunca "nada"), basta con una nota en GUIDE.md
-junto a la sección de rutas.
+**Where to look:** `Router::match_recursive()`/`split_path()` (`src/router.cpp`) —
+`/` produces an EMPTY list of segments (`split_path` discards empty segments), so the
+`WILDCARD` node never gets tried for it (the `for (const auto& seg : segments)` loop
+in `match_recursive` doesn't iterate at all, and the terminal case at
+`index == segments.size()` only looks at `node->handlers`, not the root node's
+wildcard children). If support is added, it would go in that terminal case: also
+check `node->find_wildcard_child()` when `index == segments.size()` before giving up.
+If it's decided NOT to support it (reasonable: it's consistent with a wildcard always
+capturing "the rest of the path," never "nothing"), a note in GUIDE.md next to the
+routes section is enough.

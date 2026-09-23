@@ -281,6 +281,18 @@ int main(int argc, char** argv) {
     app.any("/",  dispatch);
     app.any("/*", dispatch);
 
+    // See App::set_route_probe's comment: router_ only ever holds the two
+    // catch-all entries just above, so App::handle_request()'s own default
+    // "is there a declared route here?" check (router_.match(...).found)
+    // is always true for this engine and would permanently shadow every
+    // static mount. Ask the module's REAL router instead — the same one
+    // `dispatch` above queries to answer the request itself, so a static
+    // mount and a live route can never disagree about which of them wins.
+    app.set_route_probe([](const std::string& method, const std::string& path) {
+        auto mod = current_module();
+        return mod && mod->router.match(method, path).found;
+    });
+
     // `on error` handlers: a single one is registered in the engine and the
     // dispatch by code is done by the live module, just as with the routes, so
     // that a hot reload reaches them too.
@@ -294,7 +306,30 @@ int main(int argc, char** argv) {
 
         lux_script::NativeCtx ctx{req, res};
         ctx.error_code     = code;
-        ctx.error_message  = res.status_code() >= 500 ? "internal error" : "invalid request";
+        // The real runtime-error text (division by zero, an out-of-range
+        // index, ...) that project.cpp/native_gen.cpp already put in
+        // last_internal_error() right before writing their own 500 body --
+        // gated by is_production_mode() HERE, the one place `error.message`
+        // actually reaches the client, the same way the raw 500 body
+        // already is. Before this, `error.message` was hardcoded to the
+        // string "internal error" unconditionally (not gated by production
+        // mode at all), so GUIDE.md's own `log.error(error.message)`
+        // example never logged anything useful, even in development.
+        // "invalid request" is unrelated to this and unchanged: a 4xx has
+        // no VM error behind it to report -- it is the client's request
+        // that was wrong, not a bug to surface detail about.
+        if (res.status_code() >= 500) {
+            ctx.error_message = lux_script::is_production_mode()
+                ? "internal error" : lux_script::last_internal_error();
+            // Cleared right after reading, not just after setting: a 500 a
+            // handler returns directly (`return status(500)`, no VM crash
+            // behind it) never touches last_internal_error() at all, and
+            // without this it would otherwise inherit whatever an EARLIER,
+            // unrelated request on this same thread last crashed with.
+            lux_script::last_internal_error().clear();
+        } else {
+            ctx.error_message = "invalid request";
+        }
         ctx.error_messages = &lux_script::last_validation_messages();
 
         lux_script::VM  vm;

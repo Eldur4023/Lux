@@ -34,15 +34,22 @@ namespace lux {
 class SSEWriter {
 public:
     // Writes through req._raw_write, bypassing the buffered response pipeline
-    // so each event goes out as soon as it is produced.
+    // so each event goes out as soon as it is produced. force_close lets a
+    // partial write (see raw_write()'s comment) actually tear the
+    // connection down instead of merely reporting failure to a caller that,
+    // per GUIDE.md's own example, is never shown checking send()'s return
+    // value.
     SSEWriter(std::function<ssize_t(const char*, size_t)> writer,
-              std::shared_ptr<CancellationToken> token)
-        : writer_(std::move(writer)), token_(std::move(token)) {}
+              std::shared_ptr<CancellationToken> token,
+              std::function<void()> force_close = nullptr)
+        : writer_(std::move(writer)), token_(std::move(token))
+        , force_close_(std::move(force_close)) {}
 
     SSEWriter(const SSEWriter&)            = delete;
     SSEWriter& operator=(const SSEWriter&) = delete;
     SSEWriter(SSEWriter&& o) noexcept
         : writer_(std::move(o.writer_)), token_(std::move(o.token_))
+        , force_close_(std::move(o.force_close_)), desynced_(o.desynced_)
     {}
     SSEWriter& operator=(SSEWriter&&) = delete;
 
@@ -67,12 +74,17 @@ public:
         return raw_write(frame);
     }
 
-    // True while the underlying connection is alive.
-    bool is_open() const { return token_ && !token_->is_cancelled(); }
+    // True while the underlying connection is alive. Also false once a
+    // partial write has left the byte stream desynced (see raw_write()) —
+    // from the app's perspective this is indistinguishable from the
+    // connection being gone, since nothing more can be safely sent on it.
+    bool is_open() const { return token_ && !token_->is_cancelled() && !desynced_; }
 
 private:
     std::function<ssize_t(const char*, size_t)> writer_;
     std::shared_ptr<CancellationToken>          token_;
+    std::function<void()>                       force_close_;
+    bool                                         desynced_ = false;
 
     // Strip CR/LF from a string_view to prevent SSE field injection.
     static std::string sanitize_field(std::string_view s) {
@@ -88,43 +100,81 @@ private:
         frame.reserve(data.size() + 48);
         if (!id.empty())    { frame += "id: ";    frame += sanitize_field(id);    frame += "\n"; }
         if (!event.empty()) { frame += "event: "; frame += sanitize_field(event); frame += "\n"; }
-        // RFC 8895 §3.2: each line of multiline data needs its own "data:" prefix.
+        // RFC 8895 §3.2: each line of multiline data needs its own "data:"
+        // prefix. The EventSource line-parsing algorithm (WHATWG HTML
+        // §9.2.6) treats CR, LF, AND CRLF each as one line-ending token --
+        // splitting on '\n' alone left a bare '\r' inside `data` untouched,
+        // and the browser's own parser still read it as a line break. That
+        // let a caller who only sanitized against '\n' (or a value with an
+        // embedded '\r' from anywhere upstream) inject a fake "event:" or a
+        // second "data:" field into what this code emitted as a single
+        // line: `send("hello\revent: admin\rdata: forged")` produced one
+        // "data: hello" line to this function, but three separate SSE
+        // fields to the browser. Scanning for whichever of \r, \n or \r\n
+        // comes first — and consuming both bytes of a \r\n pair as ONE
+        // boundary — matches that parser exactly, so every line break this
+        // function does not itself insert ends up inside a "data: " line,
+        // never at the start of a new field.
         std::string_view rem = data;
         while (true) {
-            auto nl = rem.find('\n');
+            size_t cut = rem.size(), skip = 0;
+            for (size_t i = 0; i < rem.size(); ++i) {
+                if (rem[i] == '\n') { cut = i; skip = 1; break; }
+                if (rem[i] == '\r') {
+                    cut  = i;
+                    skip = (i + 1 < rem.size() && rem[i + 1] == '\n') ? 2 : 1;
+                    break;
+                }
+            }
             frame += "data: ";
-            frame += rem.substr(0, nl);
+            frame += rem.substr(0, cut);
             frame += "\n";
-            if (nl == std::string_view::npos) break;
-            rem = rem.substr(nl + 1);
+            if (cut == rem.size()) break;
+            rem = rem.substr(cut + skip);
         }
         frame += "\n";  // blank line ends the event
         return raw_write(frame);
     }
 
-    // Best-effort write.  EAGAIN = socket buffer full → drops this event (lossy
-    // but non-fatal: the client will receive the next one).  Any other error
-    // means the connection is gone; the epoll EPOLLHUP will fire shortly and
-    // cancel the token — is_open() will return false on the next loop check.
+    // Best-effort write.  EAGAIN with NOTHING sent yet → drop this event
+    // (lossy but non-fatal: the stream is still byte-aligned, the client
+    // will receive the next one normally).  Anything else that stops the
+    // write partway through — EAGAIN after some bytes already went out, a
+    // real errno, or a 0-byte write — is fatal: the client is left with an
+    // incomplete frame and no way to tell where it ends, so the write
+    // AFTER this one would land right on its tail and get parsed as part
+    // of it. Previously this just returned false and left the actual
+    // teardown to whenever epoll next noticed the socket was gone — which,
+    // for a write path outside the normal EPOLLOUT-driven buffer (this one
+    // bypasses write_buf_ entirely, see the class comment), could be a long
+    // time, during which every subsequent sse.send() kept writing more
+    // bytes onto an already-desynced stream instead of the corrupted
+    // connection being closed. force_close_ (wired to the real
+    // HttpConnection::close() via Request::_force_close) ends it outright
+    // the moment this happens, and desynced_ makes is_open() reflect that
+    // immediately rather than waiting for the token to catch up.
     bool raw_write(const std::string& frame) {
         if (!is_open()) return false;
-
-        // EAGAIN on the first byte → drop this event (no bytes sent yet, stream intact).
-        // EAGAIN after a partial write → stream is corrupted; treat as fatal.
         if (!writer_) return false;
+
         size_t written = 0;
         while (written < frame.size()) {
             ssize_t n = writer_(frame.data() + written, frame.size() - written);
             if (n < 0) {
                 if (errno == EINTR) continue;
-                if (errno == EAGAIN || errno == EWOULDBLOCK)
-                    return written == 0;  // true=clean drop; false=partial write, close
-                return false;
+                if ((errno == EAGAIN || errno == EWOULDBLOCK) && written == 0)
+                    return false;  // clean drop: buffer full, stream still intact
+                break;             // partial write or real error: fatal, see above
             }
-            if (n == 0) return false;
+            if (n == 0) break;
             written += static_cast<size_t>(n);
         }
-        return true;
+
+        if (written == frame.size()) return true;
+
+        desynced_ = true;
+        if (force_close_) force_close_();
+        return false;
     }
 };
 
@@ -164,7 +214,15 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
     // Tell finish_dispatch that headers are already out
     res.mark_sse_started();
 
-    return SSEWriter(req._raw_write, req.cancel_token);
+    // From here on this is an open-ended stream, not a bounded
+    // request/response: the connection's kRequestTimeoutMs budget (meant to
+    // catch a handler or a slow client stalling a NORMAL reply) does not
+    // apply to it, and leaving it armed would 408 a healthy stream out from
+    // under itself 30s after it opened, mid-event, with no way for the
+    // handler to see it coming.
+    if (req._cancel_request_timeout) req._cancel_request_timeout();
+
+    return SSEWriter(req._raw_write, req.cancel_token, req._force_close);
 }
 
 } // namespace lux

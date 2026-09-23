@@ -164,32 +164,54 @@ Value db_error(const std::string& msg) {
 lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLoop* loop,
                             const std::string& sql, std::vector<Value> params,
                             std::map<std::string, int>& pinned_workers,
-                            std::map<std::string, int>& last_exec_workers) {
+                            std::map<std::string, int>& last_exec_workers,
+                            std::set<std::string>& poisoned) {
     auto& reg    = DbRegistry::instance();
     auto* driver = reg.active(module);
     auto* pool   = reg.pool(module);
     if (!driver || !pool)
-        co_return db_error("el modulo '" + module + "' no esta configurado: "
-                           "falta su bloque en app:");
+        co_return db_error("module '" + module + "' is not configured: "
+                           "its block is missing under app:");
 
-    // Dentro de una transaccion, todo va por la conexion que la abrio.
+    // Inside a transaction, everything goes through the connection that opened it.
     int  pin   = -1;
     auto pinit = pinned_workers.find(module);
-    if (pinit != pinned_workers.end()) pin = pinit->second;
+    bool in_tx = pinit != pinned_workers.end();
+    if (in_tx) pin = pinit->second;
 
-    // last_id() se encamina a la conexion del ultimo exec: el identificador
-    // generado no existe en las demas.
+    // last_id() is routed to the connection of the last exec: the generated
+    // identifier does not exist on the others.
     if (pin < 0 && op == DbOp::LastId) {
         auto le = last_exec_workers.find(module);
         if (le != last_exec_workers.end()) pin = le->second;
     }
+
+    // An earlier statement of THIS transaction already failed: anything
+    // other than commit()/rollback() is rejected without touching the
+    // driver, the same way a real SQL engine would reject a command inside
+    // an already-aborted transaction. See the `poisoned` comment in db.hpp.
+    if (in_tx && op != DbOp::Commit && op != DbOp::Rollback && poisoned.count(module)) {
+        co_return db_error("transaction aborted by an earlier failed statement "
+                           "(call rollback(), or commit() will roll it back and "
+                           "report the abort)");
+    }
+
+    // A commit() on a poisoned transaction is rewritten as ROLLBACK before
+    // touching the driver: confirming what DID work and papering over the
+    // gap left by what failed is exactly the bug this mechanism exists to
+    // close. The result is replaced with an error further below, AFTER the
+    // common cleanup block -- for that it is enough to run the right
+    // statement here and let the rest of the code (which already treats
+    // Commit and Rollback the same for pinned_workers) stay unchanged.
+    const bool aborting_commit = (op == DbOp::Commit) && in_tx && poisoned.count(module);
+    const DbOp stmt_op         = aborting_commit ? DbOp::Rollback : op;
 
     auto result = std::make_shared<Value>(Value::null());
     auto errmsg = std::make_shared<std::string>();
     auto used   = std::make_shared<int>(-1);
 
     co_await DbAwaitable{pool, loop,
-        [driver, sql, params, op, result, errmsg, used](size_t worker) {
+        [driver, sql, params, op = stmt_op, result, errmsg, used](size_t worker) {
             *used = static_cast<int>(worker);
             std::string err;
             if (!driver->open(worker, err)) { *errmsg = err; return; }
@@ -214,30 +236,49 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         },
         pin};
 
-    if (!errmsg->empty()) co_return db_error(*errmsg);
+    if (!errmsg->empty()) {
+        // A driver failure INSIDE a transaction poisons it for everything
+        // that comes after -- see the `poisoned` comment in db.hpp.
+        // begin()/commit()/rollback() failing (uncommon, but possible: the
+        // connection dropped) does not count: there is no live transaction
+        // to poison.
+        if (in_tx && op != DbOp::Begin && op != DbOp::Commit && op != DbOp::Rollback)
+            poisoned.insert(module);
+        co_return db_error(*errmsg);
+    }
 
     if (op == DbOp::Exec) last_exec_workers[module] = *used;
 
-    // La transaccion fija su conexion al abrirse y la suelta al cerrarse.
-    if (op == DbOp::Begin) pinned_workers[module] = *used;
-    else if (op == DbOp::Commit || op == DbOp::Rollback) pinned_workers.erase(module);
+    // A transaction pins its connection when it opens and releases it when
+    // it closes.
+    if (op == DbOp::Begin) {
+        pinned_workers[module] = *used;
+        poisoned.erase(module);   // new transaction, clean
+    } else if (op == DbOp::Commit || op == DbOp::Rollback) {
+        pinned_workers.erase(module);
+        poisoned.erase(module);
+    }
+
+    if (aborting_commit)
+        co_return db_error("transaction aborted by an earlier failed statement: "
+                           "rolled back instead of committing");
 
     co_return std::move(*result);
 }
 
-lux::Task<void> rollback_pendientes_db(std::map<std::string, int>& pinned_workers,
+lux::Task<void> rollback_pending_db(std::map<std::string, int>& pinned_workers,
                                          lux::core::EventLoop* loop) {
     if (pinned_workers.empty()) co_return;
 
-    auto pendientes = pinned_workers;
-    for (const auto& [mod, worker] : pendientes) {
+    auto pending = pinned_workers;
+    for (const auto& [mod, worker] : pending) {
         auto& reg    = DbRegistry::instance();
         auto* driver = reg.active(mod);
         auto* pool   = reg.pool(mod);
         if (!driver || !pool) continue;
 
-        lux::log().warn("transaccion de '" + mod + "' sin commit ni rollback: "
-                           "se deshace");
+        lux::log().warn("transaction on '" + mod + "' left without commit or "
+                           "rollback: rolling it back");
         co_await DbAwaitable{pool, loop,
             [driver](size_t w) {
                 long long n = 0;

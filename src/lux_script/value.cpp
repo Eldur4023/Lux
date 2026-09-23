@@ -54,8 +54,17 @@ inline bool block_needs_escape(uint64_t w) {
     const uint64_t below_20 = (w - ONES * 0x20) & ~w & HIGH_BITS;
     const uint64_t c1 = w ^ (ONES * 0x22);            // quote
     const uint64_t c2 = w ^ (ONES * 0x5C);            // backslash
+    // '<', '>', '&' also get escaped -- see escape_json()'s comment on why
+    // a byte-for-byte valid JSON document is not the only thing this has to
+    // stay safe as.
+    const uint64_t c3 = w ^ (ONES * 0x3C);            // '<'
+    const uint64_t c4 = w ^ (ONES * 0x3E);            // '>'
+    const uint64_t c5 = w ^ (ONES * 0x26);            // '&'
     return (below_20 | ((c1 - ONES) & ~c1 & HIGH_BITS)
-                     | ((c2 - ONES) & ~c2 & HIGH_BITS)) != 0;
+                     | ((c2 - ONES) & ~c2 & HIGH_BITS)
+                     | ((c3 - ONES) & ~c3 & HIGH_BITS)
+                     | ((c4 - ONES) & ~c4 & HIGH_BITS)
+                     | ((c5 - ONES) & ~c5 & HIGH_BITS)) != 0;
 }
 
 // ─── UTF-8 ───────────────────────────────────────────────────────────────────
@@ -141,7 +150,8 @@ void escape_body(const std::string& in, std::string& out) {
         bool present = false;
         for (; i < n; ++i) {
             c = static_cast<unsigned char>(p[i]);
-            if (c < 0x20 || c == '"' || c == '\\') { present = true; break; }
+            if (c < 0x20 || c == '"' || c == '\\' ||
+                c == '<' || c == '>' || c == '&') { present = true; break; }
         }
         if (!present) break;
 
@@ -180,6 +190,22 @@ void escape_body(const std::string& in, std::string& out) {
 // system writes goes through this — bytecode and --native both share it, and
 // neither benefits from --native compiling it (it is not user .lux code) —
 // so this is the one place a change here helps both backends equally.
+//
+// '<', '>' and '&' are also escaped here, on top of what RFC 8259 itself
+// requires -- a valid-JSON document is not the only thing this output has
+// to be safe as. render()'s `{{ x|safe }}` (template.cpp) writes a Dict's
+// JSON straight into the page with no HTML escaping at all -- it is the
+// ONLY way to embed a value inside `<script>...</script>` at all, since a
+// normal (escaped) `{{ x }}` turns every `"` into `&quot;`, which is not
+// valid JavaScript string syntax. Without this, `{{ data|safe }}` where
+// `data` holds a string with a literal "</script>" in it (attacker input:
+// a query param echoed back, a stored value from a previous request) closes
+// the real <script> block early and starts a new one — full DOM-based XSS,
+// e.g. `?q=</script><script>alert(1)</script>`. Go's encoding/json escapes
+// the same three characters by default for exactly this reason (its own
+// doc comment: "so that the JSON will be safe to embed inside HTML"), and a
+// JSON parser reads < and a literal '<' as the identical byte -- this
+// changes nothing about what the JSON decodes to on the other end.
 void escape_json(const std::string& in, std::string& out) {
     out.push_back('"');
     const auto* u = reinterpret_cast<const unsigned char*>(in.data());
@@ -202,7 +228,8 @@ void escape_json(const std::string& in, std::string& out) {
         bool present = false;
         for (; i < n; ++i) {
             c = u[i];
-            if (c < 0x20 || c == '"' || c == '\\' || c >= 0x80) { present = true; break; }
+            if (c < 0x20 || c == '"' || c == '\\' || c >= 0x80 ||
+                c == '<' || c == '>' || c == '&') { present = true; break; }
         }
         if (!present) break;
 

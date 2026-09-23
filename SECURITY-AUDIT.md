@@ -1,98 +1,98 @@
-# Auditoría de seguridad — Lux
+# Security audit — Lux
 
-Revisión manual del framework (núcleo C++20 + LuxScript) centrada en las superficies
-expuestas a entrada no confiable: parser HTTP, capa de conexión, ficheros estáticos,
-plantillas, sesiones/JWT, capa SQL, VM, y los módulos nativos (`regex`, `http`, `os`,
+Manual review of the framework (C++20 core + LuxScript) focused on the surfaces
+exposed to untrusted input: the HTTP parser, the connection layer, static files,
+templates, sessions/JWT, the SQL layer, the VM, and the native modules (`regex`, `http`, `os`,
 `csv`, multipart, WebSocket).
 
-**Commit auditado:** `d10f274`
-**Fecha:** 2026-09-16
-**Fecha de remediación:** 2026-09-16 (rama `security-fixes`)
+**Commit audited:** `d10f274`
+**Date:** 2026-09-16
+**Remediation date:** 2026-09-16 (branch `security-fixes`)
 
-Los hallazgos marcados **[verificado]** se reprodujeron con un programa de prueba
-compilado aparte; el resto son resultado de lectura de código.
+Findings marked **[verified]** were reproduced with a separately compiled test
+program; the rest are the result of reading the code.
 
-Los hallazgos 1-8, 11-13 y 17 quedaron corregidos y verificados (recompilación limpia,
-suite de tests existente sin regresiones nuevas, y prueba manual contra el binario real
-para los tres primeros). El detalle de cada corrección está al final del documento, en
-«Estado de la remediación». Los hallazgos 9, 10, 14, 15 y 16 son decisiones de diseño o
-producto que requieren una elección del mantenedor, no un bug con una corrección
-mecánica; se explica en cada uno por qué no se tocaron.
+Findings 1-8, 11-13 and 17 were fixed and verified (clean rebuild, the existing
+test suite with no new regressions, and manual testing against the real binary
+for the first three). The detail of each fix is at the end of the document, under
+"Remediation status." Findings 9, 10, 14, 15 and 16 are design or product
+decisions that require a maintainer's choice, not a bug with a mechanical
+fix; each one explains why it was left untouched.
 
 ---
 
-## Resumen
+## Summary
 
-| # | Hallazgo | Severidad | Estado |
+| # | Finding | Severity | Status |
 |---|---|---|---|
-| 1 | `regex.*` desborda la pila y mata el proceso entero con ~30 KB de entrada | **Crítica** | ✅ Corregido |
-| 2 | Divergencia `--native` vs bytecode en la coerción de params `int` | **Alta** | ✅ Corregido |
-| 3 | `std::mismatch` sobre `fs::path` lee fuera de rango → SEGV en ficheros estáticos | **Alta** | ✅ Corregido |
-| 4 | `verify_jwt` no rechaza un token sin `iss` cuando hay issuer configurado | Media | ✅ Corregido |
-| 5 | Sin límite de tamaño en respuestas del cliente `http.*` (OOM) | Media | ✅ Corregido |
-| 6 | Cabeceras salientes de `http.*` sin saneado CRLF | Media | ✅ Corregido |
-| 7 | `read_buf` de WebSocket crece sin límite tras un fallo de parseo | Media | ✅ Corregido |
-| 8 | Params `float` aceptan `nan`, `inf`, `0x10` | Media | ✅ Corregido |
-| 9 | SSRF: `http.*` sin allowlist ni bloqueo de redes internas | Media | ⚠️ Parcial — ver nota |
-| 10 | Los montajes estáticos saltan toda la cadena de middleware | Media | ⏭ No tocado — diseño |
-| 11 | `Content-Length` duplicable por el handler | Baja | ✅ Corregido |
-| 12 | Inyección de fórmulas en `csv.*` | Baja | ✅ Corregido |
-| 13 | `random_bytes` devuelve vacío en silencio si falla | Baja | ✅ Corregido |
-| 14 | Sin rate limiting ni protección de fuerza bruta | Baja (diseño) | ⏭ No tocado — feature nueva |
-| 15 | `/metrics` y health sin autenticación por defecto | Informativa | ⏭ No tocado — decisión de despliegue |
-| 16 | La VM no comprueba límites de pila ni de locals | Informativa | ⏭ No tocado — no explotable por red |
-| 17 | Comentario falso sobre `fd_ = -1` tras `close()` | Informativa | ✅ Corregido |
+| 1 | `regex.*` overflows the stack and kills the entire process with ~30 KB of input | **Critical** | ✅ Fixed |
+| 2 | `--native` vs bytecode divergence in `int` param coercion | **High** | ✅ Fixed |
+| 3 | `std::mismatch` over `fs::path` reads out of range → SEGV in static files | **High** | ✅ Fixed |
+| 4 | `verify_jwt` does not reject a token without `iss` when an issuer is configured | Medium | ✅ Fixed |
+| 5 | No size limit on `http.*` client responses (OOM) | Medium | ✅ Fixed |
+| 6 | `http.*` outgoing headers without CRLF sanitization | Medium | ✅ Fixed |
+| 7 | WebSocket `read_buf` grows without limit after a parse failure | Medium | ✅ Fixed |
+| 8 | `float` params accept `nan`, `inf`, `0x10` | Medium | ✅ Fixed |
+| 9 | SSRF: `http.*` with no allowlist or internal-network blocking | Medium | ⚠️ Partial — see note |
+| 10 | Static mounts skip the entire middleware chain | Medium | ⏭ Not touched — design choice |
+| 11 | `Content-Length` overridable by the handler | Low | ✅ Fixed |
+| 12 | Formula injection in `csv.*` | Low | ✅ Fixed |
+| 13 | `random_bytes` silently returns empty on failure | Low | ✅ Fixed |
+| 14 | No rate limiting or brute-force protection | Low (design) | ⏭ Not touched — new feature |
+| 15 | `/metrics` and health with no authentication by default | Informational | ⏭ Not touched — deployment decision |
+| 16 | The VM does not check stack or locals bounds | Informational | ⏭ Not touched — not remotely exploitable |
+| 17 | False comment about `fd_ = -1` after `close()` | Informational | ✅ Fixed |
 
 ---
 
-## 1. `regex.*` desborda la pila y mata el proceso entero — **Crítica** [verificado]
+## 1. `regex.*` overflows the stack and kills the entire process — **Critical** [verified]
 
-**Dónde:** [module_regex.cpp:34](src/lux_script/module_regex.cpp#L34) y las seis
-funciones registradas en [module_regex.cpp:124-129](src/lux_script/module_regex.cpp#L124-L129).
+**Where:** [module_regex.cpp:34](src/lux_script/module_regex.cpp#L34) and the six
+functions registered at [module_regex.cpp:124-129](src/lux_script/module_regex.cpp#L124-L129).
 
-`std::regex` de libstdc++ ejecuta la búsqueda de forma recursiva, un nivel de pila por
-carácter del sujeto. No es un problema de patrones patológicos: se reproduce con el
-patrón más trivial posible.
+libstdc++'s `std::regex` executes the search recursively, one stack level per
+character of the subject. This is not a pathological-pattern problem: it reproduces
+with the most trivial possible pattern.
 
-Medido en esta máquina (pila de 8 MB, `ulimit -s 8192`), con `std::regex_search`:
+Measured on this machine (8 MB stack, `ulimit -s 8192`), with `std::regex_search`:
 
-| Patrón | Long. sujeto | Resultado |
+| Pattern | Subject length | Result |
 |---|---|---|
 | `[a-z]+` | 25 000 | ok |
 | `[a-z]+` | 30 000 | **SIGSEGV** |
-| `^[\w.+-]+@[\w-]+\.[\w.]+$` (validación de email de manual) | 50 000 | **SIGSEGV** |
+| `^[\w.+-]+@[\w-]+\.[\w.]+$` (textbook email validation) | 50 000 | **SIGSEGV** |
 | `(\s*\w+)*` | 50 000 | **SIGSEGV** |
-| `^(a\|aa)+$` | 1 000 | cuelgue >15 s (backtracking) |
+| `^(a\|aa)+$` | 1 000 | hang >15 s (backtracking) |
 
-El umbral está en ~30 KB. El límite de cuerpo del framework es 16 MB
-([http_parser.hpp:30](src/http/http_parser.hpp#L30)), así que un solo `POST` con un
-campo de 30 KB lo alcanza sobradamente.
+The threshold sits around ~30 KB. The framework's body limit is 16 MB
+([http_parser.hpp:30](src/http/http_parser.hpp#L30)), so a single `POST` with a
+30 KB field reaches it comfortably.
 
-Dos consecuencias, y la segunda es la grave:
+Two consequences, and the second is the serious one:
 
-- **Cuelgue:** ninguna función de `regex` está marcada `is_async`, así que todas corren
-  en el hilo del event loop. Un backtracking catastrófico no bloquea una petición: bloquea
-  el núcleo entero y todas las conexiones que ese hilo estaba sirviendo.
-- **Caída total:** Lux es *un proceso* con N hilos repartiéndose conexiones vía
-  `SO_REUSEPORT`, y sólo instala manejadores para `SIGINT`/`SIGTERM`/`SIGPIPE`
-  ([app.cpp:369,485-486](src/app.cpp#L369)). Un SIGSEGV en cualquier hilo tumba el
-  proceso completo: todos los núcleos, todas las conexiones, sin reinicio.
+- **Hang:** no `regex` function is marked `is_async`, so all of them run
+  on the event-loop thread. Catastrophic backtracking doesn't block one request: it
+  blocks the entire core and every connection that thread was serving.
+- **Full crash:** Lux is *a single process* with N threads sharing connections via
+  `SO_REUSEPORT`, and it only installs handlers for `SIGINT`/`SIGTERM`/`SIGPIPE`
+  ([app.cpp:369,485-486](src/app.cpp#L369)). A SIGSEGV on any thread brings down the
+  whole process: every core, every connection, with no restart.
 
-Es decir: **cualquier app que pase datos de la petición a `regex.*` —que es exactamente
-para lo que existe el módulo— tiene un DoS remoto, no autenticado, de una sola petición,
-que provoca una caída total del servicio.**
+In other words: **any app that passes request data to `regex.*` — which is exactly
+what the module exists for — has an unauthenticated, single-request, remote DoS
+that causes a total service outage.**
 
-El comentario de cabecera del módulo documenta el coste de recompilar el patrón en cada
-llamada como la limitación conocida; el problema real es otro y no está mencionado.
+The module's header comment documents the cost of recompiling the pattern on every
+call as the known limitation; the real problem is a different one and isn't mentioned.
 
 ---
 
-## 2. Divergencia `--native` vs bytecode en la coerción de params `int` — **Alta** [verificado]
+## 2. `--native` vs bytecode divergence in `int` param coercion — **High** [verified]
 
-**Dónde:** [project.cpp:641-651](src/lux_script/project.cpp#L641-L651) (bytecode) contra
-[native_gen.cpp:2890-2900](src/lux_script/native_gen.cpp#L2890-L2900) (nativo).
+**Where:** [project.cpp:641-651](src/lux_script/project.cpp#L641-L651) (bytecode) versus
+[native_gen.cpp:2890-2900](src/lux_script/native_gen.cpp#L2890-L2900) (native).
 
-El intérprete exige que `std::stoll` consuma el texto entero:
+The interpreter requires `std::stoll` to consume the entire text:
 
 ```cpp
 size_t pos = 0;
@@ -100,7 +100,7 @@ long long v = std::stoll(text, &pos);
 if (pos != text.size()) return false;
 ```
 
-El código generado para `--native` no:
+The code generated for `--native` does not:
 
 ```cpp
 inline bool lux_route_coerce_int(const std::string& t, int64_t& out) {
@@ -108,14 +108,14 @@ inline bool lux_route_coerce_int(const std::string& t, int64_t& out) {
 }
 ```
 
-El comentario que precede a esa función afirma que la omisión es deliberada, «replicar el
-mismo comportamiento del intérprete bit a bit, para que `--native` nunca acepte (o rechace)
-un valor que bytecode habría tratado distinto». Esa afirmación ya no es cierta: el
-intérprete se endureció y el backend nativo no se actualizó. Ambos sitios entraron en el
-árbol en el mismo commit (`052f7cd`, el rename Lumen→Lux), así que la divergencia viene de
-antes de esa reescritura.
+The comment preceding that function claims the omission is deliberate, "replicate
+the interpreter's exact behavior bit for bit, so `--native` never accepts (or rejects)
+a value that bytecode would have treated differently." That claim is no longer true: the
+interpreter was hardened and the native backend wasn't updated. Both sites entered the
+tree in the same commit (`052f7cd`, the Lumen→Lux rename), so the divergence predates
+that rewrite.
 
-Comportamiento medido para `get endpoint("/users/:id", int id)`:
+Measured behavior for `get endpoint("/users/:id", int id)`:
 
 | URL | bytecode | `--native` |
 |---|---|---|
@@ -124,33 +124,33 @@ Comportamiento medido para `get endpoint("/users/:id", int id)`:
 | `/users/0x1p4` | 400 | **`id = 0`** |
 | `/users/0x10` | 400 | **`id = 0`** |
 
-Impacto:
+Impact:
 
-- La misma app cambia de comportamiento al compilar con `--native`, que es justo lo que el
-  comentario promete que no puede pasar. Una suite de tests en modo bytecode no detecta nada.
-- **Parser differential:** cualquier cosa que actúe sobre la ruta cruda —un middleware de
-  autorización, una clave de caché, un WAF por delante, los logs de auditoría— ve `12abc`
-  mientras el handler opera sobre el registro `12`. `/users/12abc`, `/users/12%20`,
-  `/users/12x` y `/users/12` son todas el mismo recurso para el handler y cuatro cadenas
-  distintas para todo lo demás.
+- The same app changes behavior when compiled with `--native`, which is exactly what the
+  comment promises can't happen. A test suite run in bytecode mode catches nothing.
+- **Parser differential:** anything that acts on the raw path — an authorization
+  middleware, a cache key, a WAF in front, audit logs — sees `12abc`
+  while the handler operates on record `12`. `/users/12abc`, `/users/12%20`,
+  `/users/12x` and `/users/12` are all the same resource for the handler and four
+  distinct strings for everything else.
 
 ---
 
-## 3. `std::mismatch` sobre `fs::path` lee fuera de rango — **Alta** [verificado]
+## 3. `std::mismatch` over `fs::path` reads out of range — **High** [verified]
 
-**Dónde:** [app.cpp:140-141](src/app.cpp#L140-L141), y de nuevo en
-[app.cpp:164-166](src/app.cpp#L164-L166) y [app.cpp:184-185](src/app.cpp#L184-L185).
+**Where:** [app.cpp:140-141](src/app.cpp#L140-L141), and again at
+[app.cpp:164-166](src/app.cpp#L164-L166) and [app.cpp:184-185](src/app.cpp#L184-L185).
 
 ```cpp
 auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
                               preliminary.begin());
 ```
 
-La sobrecarga de tres iteradores recorre el rango completo de `canonical_root` sin saber
-dónde acaba `preliminary`. Si la ruta resuelta tiene **menos componentes** que la raíz,
-`mismatch` desreferencia el iterador `end()` de `preliminary`.
+The three-iterator overload walks the entire range of `canonical_root` without knowing
+where `preliminary` ends. If the resolved path has **fewer components** than the root,
+`mismatch` dereferences `preliminary`'s `end()` iterator.
 
-Comprobado con `-fsanitize=address` sobre root `/srv/www/public` y resuelto `/srv`:
+Verified with `-fsanitize=address` against root `/srv/www/public` and resolved `/srv`:
 
 ```
 AddressSanitizer: SEGV on unknown address 0x000000000028
@@ -158,23 +158,23 @@ AddressSanitizer: SEGV on unknown address 0x000000000028
   #5 std::mismatch<path::iterator, path::iterator>(...)
 ```
 
-No es UB teórico: es un SEGV duro, y por el mismo motivo del hallazgo 1 se lleva el proceso
-entero por delante.
+This isn't theoretical UB: it's a hard SEGV, and for the same reason as finding 1 it
+takes down the entire process.
 
-El guardia de dotfiles de [app.cpp:114-120](src/app.cpp#L114-L120) rechaza cualquier `/.`
-antes de llegar aquí, así que `..` no es la vía. La vía es un **symlink dentro de la raíz
-servida que apunte a un directorio menos profundo** — `public/assets -> /opt/assets` con
-la raíz en `/home/user/app/public`, por ejemplo. `weakly_canonical` lo resuelve a algo más
-corto que la raíz y la comprobación revienta.
+The dotfile guard at [app.cpp:114-120](src/app.cpp#L114-L120) rejects any `/.`
+before reaching here, so `..` isn't the path in. The path in is a **symlink inside
+the served root that points to a shallower directory** — `public/assets -> /opt/assets`
+with the root at `/home/user/app/public`, for example. `weakly_canonical` resolves it
+to something shorter than the root and the check blows up.
 
-Lo irónico es que esta es precisamente la rama que existe para *devolver 403* ante un
-symlink que se escapa de la raíz: en el caso que más importa, en vez de bloquear, cae.
+The irony is that this is precisely the branch that exists to *return 403* on a
+symlink escaping the root: in the case that matters most, instead of blocking, it crashes.
 
 ---
 
-## 4. `verify_jwt` acepta tokens sin `iss` — Media
+## 4. `verify_jwt` accepts tokens without `iss` — Medium
 
-**Dónde:** [auth.cpp:100-105](src/lux_script/auth.cpp#L100-L105).
+**Where:** [auth.cpp:100-105](src/lux_script/auth.cpp#L100-L105).
 
 ```cpp
 if (!issuer.empty()) {
@@ -185,28 +185,28 @@ if (!issuer.empty()) {
 }
 ```
 
-La validación sólo se aplica **si el claim está presente**. Un token sin `iss` pasa la
-comprobación aunque haya un issuer configurado. Lo correcto es que la ausencia sea un
-rechazo cuando el issuer es obligatorio.
+The validation only applies **if the claim is present**. A token without `iss` passes
+the check even when an issuer is configured. The correct behavior is for the claim's
+absence to be a rejection when the issuer is mandatory.
 
-Explotable cuando el mismo secreto HMAC se comparte entre servicios (patrón habitual): un
-token emitido por otro servicio del mismo dominio de confianza, o uno acuñado sin `iss`,
-es aceptado por esta ruta.
+Exploitable when the same HMAC secret is shared across services (a common pattern): a
+token issued by another service in the same trust domain, or one minted without `iss`,
+is accepted by this route.
 
-En la misma función, `exp` sólo se comprueba si existe y es numérico
-([auth.cpp:95-99](src/lux_script/auth.cpp#L95-L99)) — un token sin `exp` no caduca nunca —
-y `nbf` no se comprueba en absoluto.
+In the same function, `exp` is only checked if it exists and is numeric
+([auth.cpp:95-99](src/lux_script/auth.cpp#L95-L99)) — a token without `exp` never
+expires — and `nbf` isn't checked at all.
 
-Nota aparte, de diseño: la cookie de sesión va **firmada pero no cifrada**
-([auth.cpp:14-22](src/lux_script/auth.cpp#L14-L22) — base64url de JSON en claro). Es el
-modelo de Flask y es defendible, pero conviene que la documentación lo diga explícitamente
-para que nadie meta datos sensibles en `session`.
+A separate design note: the session cookie is **signed but not encrypted**
+([auth.cpp:14-22](src/lux_script/auth.cpp#L14-L22) — base64url of plaintext JSON). This is
+Flask's model and is defensible, but the docs should say so explicitly so nobody puts
+sensitive data into `session`.
 
 ---
 
-## 5. Sin límite de tamaño en respuestas de `http.*` — Media
+## 5. No size limit on `http.*` responses — Medium
 
-**Dónde:** [module_http.cpp:52-55](src/lux_script/module_http.cpp#L52-L55).
+**Where:** [module_http.cpp:52-55](src/lux_script/module_http.cpp#L52-L55).
 
 ```cpp
 size_t write_body(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -215,40 +215,40 @@ size_t write_body(char* ptr, size_t size, size_t nmemb, void* userdata) {
 }
 ```
 
-Sin `CURLOPT_MAXFILESIZE` y sin corte en el callback. Un servidor remoto malicioso o
-comprometido devuelve un cuerpo ilimitado y agota la RAM del proceso. `write_header`
-([module_http.cpp:59](src/lux_script/module_http.cpp#L59)) tiene el mismo problema sobre el
-`Dict` de cabeceras.
+No `CURLOPT_MAXFILESIZE` and no cutoff in the callback. A malicious or compromised
+remote server returns an unbounded body and exhausts the process's RAM. `write_header`
+([module_http.cpp:59](src/lux_script/module_http.cpp#L59)) has the same problem on the
+headers `Dict`.
 
-El timeout de 15 s acota el tiempo pero no los bytes: a un ancho de banda normal caben
-varios GB en esa ventana.
+The 15 s timeout bounds time but not bytes: at normal bandwidth several GB fit within
+that window.
 
 ---
 
-## 6. Cabeceras salientes de `http.*` sin saneado CRLF — Media
+## 6. `http.*` outgoing headers without CRLF sanitization — Medium
 
-**Dónde:** [module_http.cpp:100-102](src/lux_script/module_http.cpp#L100-L102).
+**Where:** [module_http.cpp:100-102](src/lux_script/module_http.cpp#L100-L102).
 
 ```cpp
 std::string line = key + ": " + val.as_str();
 header_list = curl_slist_append(header_list, line.c_str());
 ```
 
-Ni la clave ni el valor se filtran. Un `\r\n` en cualquiera de los dos inyecta cabeceras
-arbitrarias en la petición saliente (request splitting contra el servicio de destino), y un
-NUL embebido trunca la cabecera por el `c_str()`.
+Neither the key nor the value is filtered. A `\r\n` in either one injects arbitrary
+headers into the outgoing request (request splitting against the destination
+service), and an embedded NUL truncates the header via `c_str()`.
 
-Es asimétrico respecto al resto del framework: `Response::header`
-([response.hpp:82-91](include/lux/response.hpp#L82-L91)) y `build_set_cookie`
-([cookies.hpp:44-63](include/lux/cookies.hpp#L44-L63)) sí filtran CR/LF con cuidado. La
-ruta saliente se quedó sin ese tratamiento.
+This is asymmetric with the rest of the framework: `Response::header`
+([response.hpp:82-91](include/lux/response.hpp#L82-L91)) and `build_set_cookie`
+([cookies.hpp:44-63](include/lux/cookies.hpp#L44-L63)) do carefully filter CR/LF. The
+outgoing path was left without that treatment.
 
 ---
 
-## 7. `read_buf` de WebSocket crece sin límite tras un fallo de parseo — Media
+## 7. WebSocket `read_buf` grows without limit after a parse failure — Medium
 
-**Dónde:** [websocket.hpp:314](include/lux/websocket.hpp#L314) junto con
-[websocket.hpp:235](include/lux/websocket.hpp#L235) y
+**Where:** [websocket.hpp:314](include/lux/websocket.hpp#L314) together with
+[websocket.hpp:235](include/lux/websocket.hpp#L235) and
 [websocket.hpp:243](include/lux/websocket.hpp#L243).
 
 ```cpp
@@ -259,66 +259,67 @@ void feed(const uint8_t* data, size_t len) {
 }
 ```
 
-`feed()` no mira `closed` antes de acumular. Dos rutas de `try_parse()` hacen
-`closed = true; return;` sin enviar frame de cierre y sin que nadie cierre el socket:
+`feed()` doesn't check `closed` before accumulating. Two paths in `try_parse()` do
+`closed = true; return;` without sending a close frame and without anyone closing the socket:
 
-- frame mayor que `kMaxFramePayload` ([websocket.hpp:235](include/lux/websocket.hpp#L235))
+- a frame larger than `kMaxFramePayload` ([websocket.hpp:235](include/lux/websocket.hpp#L235))
 - `pending.size() >= kMaxPendingFrames` ([websocket.hpp:243](include/lux/websocket.hpp#L243))
 
-`closed` es sólo una bandera. La conexión TCP sigue viva hasta que el *handler* termine su
-corrutina, y `_ws_on_data` sólo se desengancha en `HttpConnection::close()`
-([http_connection.cpp:637-640](src/http/http_connection.cpp#L637-L640)). Si el handler está
-suspendido en un `await` largo —una consulta lenta, un `sleep`—, el cliente puede seguir
-bombeando bytes indefinidamente: cada uno se anexa a `read_buf`, `try_parse()` sale en la
-primera comprobación y nada libera memoria.
+`closed` is just a flag. The TCP connection stays alive until the *handler* finishes its
+coroutine, and `_ws_on_data` is only unhooked in `HttpConnection::close()`
+([http_connection.cpp:637-640](src/http/http_connection.cpp#L637-L640)). If the handler is
+suspended in a long `await` — a slow query, a `sleep` — the client can keep pumping
+bytes indefinitely: each one gets appended to `read_buf`, `try_parse()` bails on the
+first check, and nothing frees memory.
 
-El camino normal está acotado en ~16 MB por conexión; estas dos ramas no tienen cota ninguna.
+The normal path is capped at ~16 MB per connection; these two branches have no cap at all.
 
-Menor, en la misma zona: la longitud no exige codificación mínima (se acepta `len7 == 126`
-con un payload de 3 bytes), lo que permite desacuerdos con intermediarios.
-
----
-
-## 8. Params `float` aceptan `nan`, `inf` y hexadecimal — Media [verificado]
-
-**Dónde:** [project.cpp:653-658](src/lux_script/project.cpp#L653-L658).
-
-`std::stod` consume `"nan"`, `"inf"` y `"-inf"` por completo, así que la comprobación
-`pos != text.size()` los da por válidos. También acepta flotantes hexadecimales
-(`"0x10"` → 16, `"0x1p4"` → 16) y espacios a la izquierda (`"  42"`, alcanzable vía `%20`).
-Afecta a **los dos backends**.
-
-Un `float precio` que reciba `nan` hace que toda comparación de orden sea falsa: un guardia
-del estilo `require precio > 0 else ...` no dispara, y `precio != precio` es cierto. Es un
-bypass de validación silencioso.
-
-La serialización de salida sí está protegida: `write_double`
-([value.cpp:247-256](src/lux_script/value.cpp#L247-L256)) convierte los no finitos a `null`,
-así que el JSON de respuesta no se corrompe. El problema es la lógica, no el formato.
+Minor, in the same area: the length doesn't enforce minimal encoding (a `len7 == 126`
+with a 3-byte payload is accepted), which allows disagreements with intermediaries.
 
 ---
 
-## 9. SSRF: `http.*` sin allowlist ni bloqueo de redes internas — Media
+## 8. `float` params accept `nan`, `inf` and hexadecimal — Medium [verified]
 
-**Dónde:** [module_http.cpp:85-88](src/lux_script/module_http.cpp#L85-L88) y
+**Where:** [project.cpp:653-658](src/lux_script/project.cpp#L653-L658).
+
+`std::stod` consumes `"nan"`, `"inf"` and `"-inf"` in full, so the
+`pos != text.size()` check treats them as valid. It also accepts hexadecimal floats
+(`"0x10"` → 16, `"0x1p4"` → 16) and leading whitespace (`"  42"`, reachable via `%20`).
+Affects **both backends**.
+
+A `float precio` field that receives `nan` makes every ordering comparison false: a guard
+like `require precio > 0 else ...` doesn't fire, and `precio != precio` is true. It's a
+silent validation bypass.
+
+Output serialization is protected: `write_double`
+([value.cpp:247-256](src/lux_script/value.cpp#L247-L256)) converts non-finite values to `null`,
+so the response JSON doesn't get corrupted. The problem is the logic, not the format.
+
+---
+
+## 9. SSRF: `http.*` with no allowlist or internal-network blocking — Medium
+
+**Where:** [module_http.cpp:85-88](src/lux_script/module_http.cpp#L85-L88) and
 [module_http.cpp:134-135](src/lux_script/module_http.cpp#L134-L135).
 
-La única validación de la URL es que empiece por `http://` o `https://`. No hay bloqueo de
-loopback, RFC1918, ni link-local — `http.get("http://169.254.169.254/...")` (metadatos de
-nube) o `http://127.0.0.1:5000/admin` funcionan.
+The only URL validation is that it starts with `http://` or `https://`. There's no
+blocking of loopback, RFC1918, or link-local addresses — `http.get("http://169.254.169.254/...")`
+(cloud metadata) or `http://127.0.0.1:5000/admin` both work.
 
-Además `CURLOPT_FOLLOWLOCATION` está activo con 5 saltos y **sin `CURLOPT_REDIR_PROTOCOLS`
-explícito**. Aunque el destino inicial se valide a nivel de aplicación, un redirect 302
-lleva la petición a donde quiera el remoto. Conviene fijar los protocolos permitidos de
-forma explícita en vez de depender del default de la versión de libcurl enlazada.
+`CURLOPT_FOLLOWLOCATION` is also active, with 5 hops and **no explicit
+`CURLOPT_REDIR_PROTOCOLS`**. Even if the initial destination is validated at the
+application level, a 302 redirect takes the request wherever the remote wants. The
+allowed protocols should be pinned explicitly instead of relying on the default of
+whatever libcurl version is linked.
 
-No hay forma de desactivar el seguimiento de redirects desde LuxScript.
+There's no way to disable redirect-following from LuxScript.
 
 ---
 
-## 10. Los montajes estáticos saltan toda la cadena de middleware — Media
+## 10. Static mounts skip the entire middleware chain — Medium
 
-**Dónde:** [app.cpp:286-290](src/app.cpp#L286-L290).
+**Where:** [app.cpp:286-290](src/app.cpp#L286-L290).
 
 ```cpp
 // Static file mounts bypass the middleware chain.
@@ -327,60 +328,60 @@ if (req.method == "GET" || req.method == "HEAD") {
 }
 ```
 
-Es intencional y está comentado, pero la consecuencia merece quedar escrita: un
-`group("/admin"): require session.role == "admin"` **no protege** un `static` montado bajo
-ese prefijo. El guardia ni se ejecuta.
+It's intentional and commented, but the consequence deserves to be written down: a
+`group("/admin"): require session.role == "admin"` **does not protect** a `static` mount
+under that prefix. The guard never even runs.
 
-Relacionado: el `path` que ven los middlewares es el **crudo**
-([http_connection.cpp:213](src/http/http_connection.cpp#L213) lo asigna sin decodificar),
-mientras que el servidor de ficheros decodifica con `url_decode_path`
-([app.cpp:72-93](src/app.cpp#L72-L93)). Para rutas normales, un middleware que compare
-`req.path` contra un prefijo ve una cadena distinta de la que se resuelve contra el disco.
+Related: the `path` middlewares see is the **raw** one
+([http_connection.cpp:213](src/http/http_connection.cpp#L213) assigns it undecoded),
+while the file server decodes with `url_decode_path`
+([app.cpp:72-93](src/app.cpp#L72-L93)). For normal routes, a middleware that compares
+`req.path` against a prefix sees a different string from the one resolved against disk.
 
-Nota de diseño adyacente: `File.save()` ([natives.cpp:909-974](src/lux_script/natives.cpp#L909-L974))
-no restringe extensiones, y `safe_name` ([natives.cpp:539-544](src/lux_script/natives.cpp#L539-L544))
-sólo quita separadores de directorio y rechaza `.`/`..`. Subir `evil.html` o `evil.svg` a un
-directorio que además esté montado como `static` da XSS almacenado servido con su
-`Content-Type` real. El guardia de dotfiles cubre `.env`, pero no esto.
-
----
-
-## 11. `Content-Length` duplicable por el handler — Baja
-
-**Dónde:** [response.hpp:292-310](include/lux/response.hpp#L292-L310).
-
-`build()` emite `Content-Length` incondicionalmente y *después* `emit_headers()` vuelca el
-mapa de cabeceras tal cual. Un handler que haga `res.header("Content-Length", ...)` o
-`res.header("Transfer-Encoding", "chunked")` produce una respuesta con cabeceras
-duplicadas/contradictorias — la base de un request smuggling si hay un proxy delante que
-resuelva el conflicto de forma distinta a como lo hace el cliente.
-
-El filtrado CR/LF de `header()` evita el response splitting clásico, pero no impide
-sobrescribir cabeceras de framing. Debería haber una lista de cabeceras reservadas que el
-handler no pueda emitir.
-
-Menor: las respuestas 204 y 304 también llevan `Content-Length`.
+Adjacent design note: `File.save()` ([natives.cpp:909-974](src/lux_script/natives.cpp#L909-L974))
+doesn't restrict extensions, and `safe_name` ([natives.cpp:539-544](src/lux_script/natives.cpp#L539-L544))
+only strips directory separators and rejects `.`/`..`. Uploading `evil.html` or `evil.svg` to a
+directory that's also mounted as `static` yields stored XSS served with its real
+`Content-Type`. The dotfile guard covers `.env`, but not this.
 
 ---
 
-## 12. Inyección de fórmulas en `csv.*` — Baja
+## 11. `Content-Length` overridable by the handler — Low
 
-**Dónde:** [module_csv.cpp:107-108](src/lux_script/module_csv.cpp#L107-L108).
+**Where:** [response.hpp:292-310](include/lux/response.hpp#L292-L310).
+
+`build()` emits `Content-Length` unconditionally and *then* `emit_headers()` dumps the
+header map as-is. A handler that does `res.header("Content-Length", ...)` or
+`res.header("Transfer-Encoding", "chunked")` produces a response with
+duplicate/contradictory headers — the basis for request smuggling if there's a proxy
+in front that resolves the conflict differently than the client does.
+
+The CR/LF filtering in `header()` prevents classic response splitting, but doesn't
+prevent overwriting framing headers. There should be a list of reserved headers that
+handlers can't emit.
+
+Minor: 204 and 304 responses also carry `Content-Length`.
+
+---
+
+## 12. Formula injection in `csv.*` — Low
+
+**Where:** [module_csv.cpp:107-108](src/lux_script/module_csv.cpp#L107-L108).
 
 ```cpp
 bool needs_quotes = s.find_first_of(",\"\n\r") != std::string::npos;
 ```
 
-El escapado es correcto para RFC 4180, pero un campo que empiece por `=`, `+`, `-`, `@`,
-TAB o CR se interpreta como fórmula al abrir el fichero en Excel, LibreOffice o Sheets.
-Exportar datos de usuario a CSV es el caso de uso del módulo, así que la mitigación
-(prefijar un `'`) encaja aquí.
+The escaping is correct per RFC 4180, but a field starting with `=`, `+`, `-`, `@`,
+TAB or CR is interpreted as a formula when the file is opened in Excel, LibreOffice or
+Sheets. Exporting user data to CSV is exactly the module's use case, so the mitigation
+(prefixing a `'`) fits here.
 
 ---
 
-## 13. `random_bytes` falla en silencio — Baja
+## 13. `random_bytes` fails silently — Low
 
-**Dónde:** [crypto.cpp:223-232](src/lux_script/crypto.cpp#L223-L232).
+**Where:** [crypto.cpp:223-232](src/lux_script/crypto.cpp#L223-L232).
 
 ```cpp
 std::FILE* f = std::fopen("/dev/urandom", "rb");
@@ -389,231 +390,231 @@ if (!f) return {};
 if (got != n) return {};
 ```
 
-Devuelve una cadena **vacía** en caso de fallo, indistinguible de un resultado válido para
-el llamante. Si `/dev/urandom` no abre —agotamiento de descriptores bajo carga, un chroot
-mal montado— los consumidores reciben cero bytes de entropía sin enterarse.
+Returns an **empty** string on failure, indistinguishable from a valid result to the
+caller. If `/dev/urandom` fails to open — descriptor exhaustion under load, a
+misconfigured chroot — consumers get zero bytes of entropy without knowing it.
 
-Consumidores actuales: `hash.random_bytes` ([module_hash.cpp:47](src/lux_script/module_hash.cpp#L47)),
-expuesto a LuxScript y candidato natural a generar tokens; y el sufijo anticolisión de
-`File.save()` ([natives.cpp:947-949](src/lux_script/natives.cpp#L947-L949)), donde un
-resultado vacío hace que los 5 reintentos generen el mismo nombre.
+Current consumers: `hash.random_bytes` ([module_hash.cpp:47](src/lux_script/module_hash.cpp#L47)),
+exposed to LuxScript and a natural candidate for generating tokens; and the
+anti-collision suffix in `File.save()` ([natives.cpp:947-949](src/lux_script/natives.cpp#L947-L949)),
+where an empty result makes all 5 retries produce the same name.
 
-Debería ser un fallo duro, y conviene migrar a `getrandom(2)`, que no depende de tener un
-descriptor libre.
-
----
-
-## 14. Sin rate limiting — Baja (diseño)
-
-No existe ninguna limitación de tasa en el framework. El único control es
-`max_connections` (10 000 por defecto, [app.hpp:320](include/lux/app.hpp#L320)), que acota
-conexiones simultáneas pero no peticiones por IP ni por unidad de tiempo.
-
-Para un framework que trae sesiones, JWT y hashing de contraseñas de serie, no ofrecer
-nada contra fuerza bruta en un login es una laguna notable. Los timeouts de Slowloris
-([http_connection.cpp:78-90](src/http/http_connection.cpp#L78-L90)) y el límite de pipelining
-están bien resueltos; esto es lo que falta al lado.
+This should be a hard failure, and it's worth migrating to `getrandom(2)`, which
+doesn't depend on having a free descriptor.
 
 ---
 
-## 15. `/metrics` y health sin autenticación — Informativa
+## 14. No rate limiting — Low (design)
 
-**Dónde:** [app.hpp:300-316](include/lux/app.hpp#L300-L316).
+There is no rate limiting anywhere in the framework. The only control is
+`max_connections` (10,000 by default, [app.hpp:320](include/lux/app.hpp#L320)), which caps
+concurrent connections but not requests per IP or per unit of time.
 
-`enable_metrics()` registra el endpoint Prometheus sin ningún guardia. Van por el router, así
-que un middleware global puede protegerlos, pero el default los deja abiertos y exponen
-volumen de tráfico y distribución de códigos de estado.
+For a framework that ships sessions, JWT and password hashing out of the box, offering
+nothing against brute force on a login is a notable gap. The Slowloris timeouts
+([http_connection.cpp:78-90](src/http/http_connection.cpp#L78-L90)) and the pipelining
+limit are well handled; this is what's missing next to them.
 
 ---
 
-## 16. La VM no comprueba límites de pila ni de locals — Informativa
+## 15. `/metrics` and health with no authentication — Informational
 
-**Dónde:** [vm.hpp:92-93](include/lux_script/vm.hpp#L92-L93).
+**Where:** [app.hpp:300-316](include/lux/app.hpp#L300-L316).
+
+`enable_metrics()` registers the Prometheus endpoint with no guard at all. They go
+through the router, so a global middleware can protect them, but the default leaves
+them open and they expose traffic volume and status-code distribution.
+
+---
+
+## 16. The VM does not check stack or locals bounds — Informational
+
+**Where:** [vm.hpp:92-93](include/lux_script/vm.hpp#L92-L93).
 
 ```cpp
 void  push(Value v) { stack_.push_back(std::move(v)); }
 Value pop()         { Value v = std::move(stack_.back()); stack_.pop_back(); return v; }
 ```
 
-`pop()` no comprueba que la pila no esté vacía, y los accesos a
+`pop()` doesn't check that the stack isn't empty, and accesses to
 `locals_[frame.locals_base + in.operand]` ([vm.cpp:221,225](src/lux_script/vm.cpp#L221))
-no verifican rango. La seguridad depende por completo de que el emisor genere bytecode
-balanceado.
+don't verify range. Safety depends entirely on the emitter generating balanced bytecode.
 
-No es explotable desde la red —el bytecode se compila desde el `.lux` del propio autor, no
-llega del atacante—, pero significa que cualquier bug del emisor se convierte en corrupción
-de memoria en vez de en un error de lenguaje. Un `assert` en builds de debug, o un
-verificador de bytecode al cargar, contendría la clase entera de fallos.
+It isn't remotely exploitable — the bytecode is compiled from the author's own `.lux`
+file, it doesn't come from the attacker — but it means any emitter bug turns into
+memory corruption instead of a language error. An `assert` in debug builds, or a
+bytecode verifier at load time, would contain the entire class of bugs.
 
-Relacionado: `kStepLimit` (50 M) se reinicia **en cada suspensión**
-([vm.hpp:65](include/lux_script/vm.hpp#L65)), así que un bucle que haga `await` dentro nunca
-lo agota. Es deliberado (SSE de larga duración), pero deja el corte sin efecto justo en los
-bucles que hacen E/S.
-
----
-
-## 17. Comentario falso sobre `fd_` tras `close()` — Informativa
-
-**Dónde:** [http_connection.cpp:233-236](src/http/http_connection.cpp#L233-L236).
-
-> «After close(), fd_ is -1, so calls degrade to write(-1) which returns EBADF cleanly.»
-
-`fd_` **nunca** se pone a -1: `close()` ([http_connection.cpp:655](src/http/http_connection.cpp#L655))
-hace `::close(fd_)` y deja el valor intacto. Sólo `file_fd_`, `header_tfd_` y `timeout_tfd_`
-se resetean.
-
-Hoy no es explotable porque el lambda `_raw_write` comprueba `closed_` antes de escribir, y
-esa bandera se pone antes del `::close()`. Pero el comentario documenta como red de
-seguridad algo que no existe: si alguien añade una ruta de escritura que confíe en el
-comentario en lugar de comprobar `closed_`, escribirá sobre un descriptor que el kernel ya
-pudo reasignar a otra conexión.
+Related: `kStepLimit` (50 M) resets **on every suspension**
+([vm.hpp:65](include/lux_script/vm.hpp#L65)), so a loop that does `await` inside never
+exhausts it. This is deliberate (long-lived SSE), but it renders the cutoff moot
+precisely in the loops that do I/O.
 
 ---
 
-## Lo que está bien resuelto
+## 17. False comment about `fd_` after `close()` — Informational
 
-Vale la pena dejar constancia de lo que aguantó la revisión, porque es bastante:
+**Where:** [http_connection.cpp:233-236](src/http/http_connection.cpp#L233-L236).
 
-- **SQL.** Los tres drivers parametrizan de verdad: `sqlite3_bind_*` con `SQLITE_TRANSIENT`
-  ([db_sqlite.cpp:214-227](src/lux_script/db_sqlite.cpp#L214-L227)) y `PQexecParams`
-  ([db_postgres.cpp:302](src/lux_script/db_postgres.cpp#L302)). El reescritor de `?`→`$n`
-  de Postgres salta correctamente literales, identificadores entre comillas, comentarios de
-  línea, comentarios de bloque anidados y **dollar-quoting** (`$tag$...$tag$`) — que es el
-  caso que casi todo el mundo olvida. `sqlite3_prepare_v2` con tail `nullptr` además impide
-  stacked queries.
-- **SSTI.** `render()` exige el nombre de plantilla literal en tiempo de compilación
-  ([emitter.cpp:1435-1444](src/lux_script/emitter.cpp#L1435-L1444)), lo que elimina de raíz
-  la clase entera de plantilla dinámica controlada por el atacante.
-- **Parser JSON.** Tope de anidamiento de 200, rechazo de caracteres de control sin escapar,
-  validación completa de pares suplentes y rechazo de basura al final del documento.
-- **WebSocket.** Bits RSV, opcodes reservados, máscara obligatoria cliente→servidor, bit alto
-  de la longitud de 64 bits, fragmentación intercalada y tamaño de frames de control: todas
-  las reglas del RFC 6455 que se suelen saltar están comprobadas. Y `origins(...)` es
-  **obligatorio** en rutas ws con error de compilación si falta
-  ([project.cpp:1371-1373](src/lux_script/project.cpp#L1371-L1373)) — más estricto que la
-  mayoría de frameworks, que lo dejan opcional.
-- **`os.run()`** usa `posix_spawnp` con vector argv, nunca un shell: la inyección de
-  metacaracteres no es posible por construcción.
-- **Traversal en estáticos.** Doble canonicalización (antes y después de resolver symlinks),
-  comparación de prefijo **por componentes** (no por cadena, así `/srv/www-evil` no pasa por
-  `/srv/www`), bloqueo de dotfiles sobre la ruta ya decodificada y rechazo de `%00`.
-  El hallazgo 3 es un fallo de implementación dentro de un diseño correcto.
-- **Pipelining HTTP.** La serialización con pausa/resume del parser y el bracket `in_parser_`
-  están razonados con cuidado y resuelven una reentrada real y sutil.
-- **HMAC/sesión.** RFC 2104 correcto, comparación en tiempo constante, y el comentario sobre
-  por qué se puede ramificar sobre `exp` *después* de verificar el MAC es acertado.
+> "After close(), fd_ is -1, so calls degrade to write(-1) which returns EBADF cleanly."
+
+`fd_` is **never** set to -1: `close()` ([http_connection.cpp:655](src/http/http_connection.cpp#L655))
+does `::close(fd_)` and leaves the value untouched. Only `file_fd_`, `header_tfd_` and
+`timeout_tfd_` are reset.
+
+Today it isn't exploitable because the `_raw_write` lambda checks `closed_` before
+writing, and that flag is set before the `::close()`. But the comment documents a
+safety net that doesn't exist: if someone adds a write path that trusts the comment
+instead of checking `closed_`, they will write to a descriptor the kernel may have
+already reassigned to another connection.
 
 ---
 
-## Orden sugerido
+## What holds up well
 
-1. **Hallazgo 1** — es el único con impacto de caída total remota y no autenticada, y afecta
-   a cualquier app que use el módulo para lo que existe. Las opciones pasan por acotar el
-   tamaño del sujeto antes de llamar a `std::regex`, mover el módulo a `is_async` con
-   presupuesto de tiempo, o cambiar a un motor sin backtracking (RE2).
-2. **Hallazgos 2 y 3** — un differential entre backends y un SEGV alcanzable.
-3. **Hallazgo 4** — corrección pequeña y contenida en la validación de JWT.
-4. El resto, por orden de la tabla.
+It's worth recording what survived the review, because it's substantial:
+
+- **SQL.** All three drivers genuinely parameterize: `sqlite3_bind_*` with `SQLITE_TRANSIENT`
+  ([db_sqlite.cpp:214-227](src/lux_script/db_sqlite.cpp#L214-L227)) and `PQexecParams`
+  ([db_postgres.cpp:302](src/lux_script/db_postgres.cpp#L302)). Postgres's `?`→`$n`
+  rewriter correctly skips string literals, quoted identifiers, line comments, nested
+  block comments and **dollar-quoting** (`$tag$...$tag$`) — the case almost everyone
+  forgets. `sqlite3_prepare_v2` with a `nullptr` tail also prevents stacked queries.
+- **SSTI.** `render()` requires the template name to be a compile-time literal
+  ([emitter.cpp:1435-1444](src/lux_script/emitter.cpp#L1435-L1444)), which eliminates
+  the entire class of attacker-controlled dynamic templates at the root.
+- **JSON parser.** A nesting cap of 200, rejection of unescaped control characters,
+  full validation of surrogate pairs, and rejection of trailing garbage after the document.
+- **WebSocket.** RSV bits, reserved opcodes, mandatory client→server masking, the high
+  bit of the 64-bit length, interleaved fragmentation and control-frame size: all the
+  RFC 6455 rules that tend to get skipped are checked. And `origins(...)` is
+  **mandatory** on ws routes, with a compile error if missing
+  ([project.cpp:1371-1373](src/lux_script/project.cpp#L1371-L1373)) — stricter than
+  most frameworks, which leave it optional.
+- **`os.run()`** uses `posix_spawnp` with an argv vector, never a shell: metacharacter
+  injection is impossible by construction.
+- **Static-file traversal.** Double canonicalization (before and after resolving
+  symlinks), **component-wise** prefix comparison (not string-based, so
+  `/srv/www-evil` doesn't pass for `/srv/www`), dotfile blocking on the already-decoded
+  path, and rejection of `%00`. Finding 3 is an implementation bug within an otherwise
+  correct design.
+- **HTTP pipelining.** The parser's pause/resume serialization and the `in_parser_`
+  bracket are carefully reasoned and resolve a real and subtle reentrancy.
+- **HMAC/session.** RFC 2104 done correctly, constant-time comparison, and the comment
+  explaining why it's fine to branch on `exp` *after* verifying the MAC is accurate.
 
 ---
 
-## Estado de la remediación
+## Suggested order
 
-Todo lo de aquí abajo vive en la rama `security-fixes`, compila limpio con `./compile.sh`
-y pasa la suite existente (`ctest`) sin regresiones nuevas — los dos fallos que quedan
-(`placeholders`/`faltan argumentos` y `http`/`invalid url`+`connection refused`) ya
-fallaban en `d10f274` antes de tocar nada, confirmado recompilando esa misma revisión y
-volviendo a correrlos.
+1. **Finding 1** — the only one with a remote, unauthenticated, full-outage impact, and
+   it affects any app that uses the module for what it exists for. Options include
+   capping the subject size before calling `std::regex`, moving the module to `is_async`
+   with a time budget, or switching to a non-backtracking engine (RE2).
+2. **Findings 2 and 3** — a cross-backend differential and a reachable SEGV.
+3. **Finding 4** — a small, contained fix in JWT validation.
+4. The rest, in table order.
 
-### Corregidos
+---
 
-- **#1 — `regex.*`.** [module_regex.cpp](src/lux_script/module_regex.cpp) gana un tope de
-  4096 bytes sobre el texto SUJETO (nunca el patrón) en las seis funciones, devuelto como
-  un `error` normal en vez de dejar que `std::regex` recurse hasta reventar la pila. El
-  valor sale de medir el punto de caída real con ASan a distintos tamaños de pila (ver el
-  comentario junto a `kMaxSubjectLength`), con margen para pilas de hilo más pequeñas que
-  los 8 MB por defecto de glibc. Verificado end-to-end: un body de 30 KB que antes tumbaba
-  el proceso entero ahora responde 500 con un mensaje claro y el servidor sigue sirviendo
-  el resto de conexiones. **No queda resuelto** el colgado por backtracking catastrófico
-  sobre un patrón ya complejo dentro del límite (`^(a|aa)+$`): eso necesitaría dejar
-  `std::regex` por un motor sin backtracking (RE2), fuera del alcance de este parche.
-- **#2 — divergencia `--native`/bytecode.** [native_gen.cpp](src/lux_script/native_gen.cpp)
-  reescribió `lux_route_coerce_int`/`lux_route_coerce_float` generados para exigir
-  consumir la cadena entera (como ya hacía `project.cpp`) y rechazar formas no decimales.
-  Verificado con una tabla de casos cruzada entre ambas rutas (`12abc`, `0x10`, `nan`,
-  `inf`, `1e999`, …): coinciden en los 13 casos.
-- **#3 — SEGV en estáticos.** [app.cpp](src/app.cpp) reemplaza los tres usos de
-  `std::mismatch(root.begin(), root.end(), candidate.begin())` por `path_is_within()`,
-  que avanza los dos iteradores en paralelo y nunca desreferencia más allá de
-  `candidate.end()`. Verificado con ASan sobre el caso exacto que crasheaba (`root` más
-  profundo que `candidate`) y con el binario real vía un symlink que colapsa a un
-  directorio más corto que la raíz servida: ahora devuelve 403 y el proceso sigue vivo.
-- **#4 — `verify_jwt` sin `iss`.** [auth.cpp](src/lux_script/auth.cpp): con un issuer
-  configurado, un token sin el claim `iss` se rechaza igual que uno con el issuer
-  equivocado, en vez de colarse por omisión.
-- **#5 — `http.*` sin límite de respuesta.** [module_http.cpp](src/lux_script/module_http.cpp)
-  acota cuerpo (16 MB, igual que el límite de entrada) y cabeceras (64 KB) de la
-  respuesta; superarlo aborta la transferencia vía el mecanismo estándar de libcurl
-  (devolver menos bytes de los recibidos en el callback) en vez de acumular sin límite.
-- **#6 — CRLF en cabeceras salientes de `http.*`.** Mismo fichero: clave y valor de cada
-  cabecera pasan por un `strip` de CR/LF/NUL antes de `curl_slist_append`, igual que ya
-  hacían `Response::header()` y `build_set_cookie()` del lado de entrada. De paso,
-  `CURLOPT_PROTOCOLS`/`CURLOPT_REDIR_PROTOCOLS` quedan fijados a `http,https` (forma en
-  bitmask, no la `_STR` de curl 7.85+, para no romper la build con un libcurl-dev más
-  viejo) — un 30x ya no puede llevar la petición a `file://` u otro esquema.
-- **#7 — `read_buf` de WebSocket sin límite.** [websocket.hpp](include/lux/websocket.hpp):
-  `feed()` deja de acumular bytes en cuanto `closed` es `true`, y las dos rutas que lo
-  marcaban sin avisar (frame de más de 16 MB, cola de mensajes llena) ahora mandan un
-  Close real (1009/1008) igual que el resto de violaciones del protocolo, y liberan
-  `read_buf` en el acto en vez de esperar a que el objeto se destruya.
-- **#8 — `float` acepta `nan`/`inf`/hex.** [project.cpp](src/lux_script/project.cpp) y
-  [native_gen.cpp](src/lux_script/native_gen.cpp): antes de `std::stod`, se rechaza
-  cualquier texto que contenga `x`/`X`/`n`/`N`/`i`/`I` — ningún float decimal finito
-  puede llevar esos caracteres, así que el filtro no tiene falsos positivos. Mismo cambio
-  replicado en ambas rutas para no reabrir el hallazgo 2.
-- **#11 — `Content-Length`/`Transfer-Encoding` sobrescribibles.**
-  [response.hpp](include/lux/response.hpp): `Response::header()` ignora (con aviso por
-  stderr) cualquier intento de fijar esas dos cabeceras desde un handler — las calcula el
-  framework y nunca hay un uso legítimo para que un handler las toque, ya que Lux no
-  emite `chunked`.
-- **#12 — inyección de fórmulas en `csv.*`.** [module_csv.cpp](src/lux_script/module_csv.cpp):
-  un campo que empieza por `=`, `+`, `-`, `@`, TAB o CR se antepone con `'` (mitigación
-  estándar de OWASP) antes del escapado RFC 4180.
-- **#13 — `random_bytes` falla en silencio.** [crypto.cpp](src/lux_script/crypto.cpp) pasó
-  de abrir `/dev/urandom` a `getrandom(2)` (no depende de un descriptor libre); sigue
-  devolviendo `""` si falla, pero ahora el único consumidor que no comprobaba ese caso
-  —el sufijo anticolisión de `File.save()`, [natives.cpp](src/lux_script/natives.cpp)—
-  también lo hace, fallando alto en vez de reintentar con un nombre sin entropía real.
-- **#17 — comentario falso sobre `fd_`.** [http_connection.cpp](src/http/http_connection.cpp):
-  el comentario ahora dice lo que de verdad evita escribir tras `close()` (la comprobación
-  de `closed_`, no que `fd_` valga -1, que nunca lo vale).
+## Remediation status
 
-### Parcial
+Everything below lives on the `security-fixes` branch, builds cleanly with `./compile.sh`
+and passes the existing suite (`ctest`) with no new regressions — the two remaining
+failures (`placeholders`/`missing arguments` and `http`/`invalid url`+`connection refused`)
+were already failing on `d10f274` before anything was touched, confirmed by rebuilding
+that same revision and rerunning them.
 
-- **#9 — SSRF.** Se añadió la restricción de protocolo en redirects (ver #6), que cierra
-  la vía más barata de escapar del `http://`/`https://` inicial. **No** se añadió bloqueo
-  de rangos privados/loopback/link-local: hacerlo bien requiere resolver el DNS y
-  comprobar la IP resultante (no solo mirar el string de la URL, que un atacante rodea con
-  un dominio que resuelve a `127.0.0.1`), y decidir si es opt-in u opt-out afecta a
-  cualquier despliegue que llame a un servicio interno legítimo desde una ruta. Es una
-  decisión de producto, no un bug con una corrección obvia — lo dejo para que el
-  mantenedor decida la política antes de imponerla.
+### Fixed
 
-### No tocados (decisión de diseño, no bug)
+- **#1 — `regex.*`.** [module_regex.cpp](src/lux_script/module_regex.cpp) gains a
+  4096-byte cap on the SUBJECT text (never the pattern) across all six functions,
+  returned as a normal `error` instead of letting `std::regex` recurse until it blows
+  the stack. The value comes from measuring the actual crash point with ASan at
+  different stack sizes (see the comment next to `kMaxSubjectLength`), with margin for
+  thread stacks smaller than glibc's default 8 MB. Verified end-to-end: a 30 KB body
+  that used to take down the whole process now gets a 500 with a clear message and the
+  server keeps serving every other connection. **Not resolved**: the catastrophic-backtracking
+  hang on an already-complex pattern within the limit (`^(a|aa)+$`) — that would require
+  replacing `std::regex` with a non-backtracking engine (RE2), out of scope for this patch.
+- **#2 — `--native`/bytecode divergence.** [native_gen.cpp](src/lux_script/native_gen.cpp)
+  rewrote the generated `lux_route_coerce_int`/`lux_route_coerce_float` to require
+  consuming the entire string (as `project.cpp` already did) and reject non-decimal
+  forms. Verified with a cross-checked test table between both paths (`12abc`, `0x10`,
+  `nan`, `inf`, `1e999`, …): they match on all 13 cases.
+- **#3 — SEGV in static files.** [app.cpp](src/app.cpp) replaces the three uses of
+  `std::mismatch(root.begin(), root.end(), candidate.begin())` with `path_is_within()`,
+  which advances both iterators in parallel and never dereferences past
+  `candidate.end()`. Verified with ASan against the exact case that crashed (`root`
+  deeper than `candidate`) and with the real binary via a symlink that collapses to a
+  directory shorter than the served root: it now returns 403 and the process stays alive.
+- **#4 — `verify_jwt` without `iss`.** [auth.cpp](src/lux_script/auth.cpp): with an
+  issuer configured, a token missing the `iss` claim is now rejected the same way as
+  one with the wrong issuer, instead of slipping through by omission.
+- **#5 — `http.*` with no response limit.** [module_http.cpp](src/lux_script/module_http.cpp)
+  caps the response body (16 MB, matching the input limit) and headers (64 KB);
+  exceeding it aborts the transfer through libcurl's standard mechanism (returning
+  fewer bytes than received in the callback) instead of accumulating without bound.
+- **#6 — CRLF in `http.*` outgoing headers.** Same file: each header's key and value
+  go through a CR/LF/NUL strip before `curl_slist_append`, matching what
+  `Response::header()` and `build_set_cookie()` already did on the inbound side. While
+  at it, `CURLOPT_PROTOCOLS`/`CURLOPT_REDIR_PROTOCOLS` are now pinned to `http,https`
+  (bitmask form, not the `_STR` variant from curl 7.85+, to avoid breaking the build
+  with an older libcurl-dev) — a 30x can no longer redirect the request to `file://` or
+  another scheme.
+- **#7 — unbounded WebSocket `read_buf`.** [websocket.hpp](include/lux/websocket.hpp):
+  `feed()` stops accumulating bytes as soon as `closed` is `true`, and the two paths
+  that set it without notifying (frame over 16 MB, full message queue) now send a real
+  Close (1009/1008) just like every other protocol violation, and free `read_buf`
+  immediately instead of waiting for the object to be destroyed.
+- **#8 — `float` accepts `nan`/`inf`/hex.** [project.cpp](src/lux_script/project.cpp) and
+  [native_gen.cpp](src/lux_script/native_gen.cpp): before calling `std::stod`, any text
+  containing `x`/`X`/`n`/`N`/`i`/`I` is rejected — no finite decimal float can contain
+  those characters, so the filter has no false positives. The same change was
+  replicated on both paths to avoid reopening finding 2.
+- **#11 — overridable `Content-Length`/`Transfer-Encoding`.**
+  [response.hpp](include/lux/response.hpp): `Response::header()` ignores (with a stderr
+  warning) any attempt to set those two headers from a handler — the framework computes
+  them and there's never a legitimate reason for a handler to touch them, since Lux
+  never emits `chunked`.
+- **#12 — formula injection in `csv.*`.** [module_csv.cpp](src/lux_script/module_csv.cpp):
+  a field starting with `=`, `+`, `-`, `@`, TAB or CR is prefixed with `'` (the
+  standard OWASP mitigation) before RFC 4180 escaping.
+- **#13 — `random_bytes` fails silently.** [crypto.cpp](src/lux_script/crypto.cpp) was
+  switched from opening `/dev/urandom` to `getrandom(2)` (doesn't depend on a free
+  descriptor); it still returns `""` on failure, but now the one consumer that didn't
+  check for that case — the anti-collision suffix in `File.save()`,
+  [natives.cpp](src/lux_script/natives.cpp) — does too, failing loudly instead of
+  retrying with a name that has no real entropy.
+- **#17 — false comment about `fd_`.** [http_connection.cpp](src/http/http_connection.cpp):
+  the comment now states what actually prevents writes after `close()` (the `closed_`
+  check, not `fd_` being -1, which it never is).
 
-- **#10 — estáticos saltan el middleware.** Es un comportamiento documentado explícitamente
-  en el propio código (`app.cpp`). Cambiarlo altera el contrato del framework para toda
-  app existente que dependa de ese orden; no es algo que deba decidir yo.
-- **#14 — sin rate limiting.** Es una funcionalidad que falta, no un defecto en código
-  existente. Añadir una encaja mejor como una propuesta aparte con su propio diseño
-  (por IP, por sesión, ventana fija vs. token bucket, etc.) que como parte de una tanda de
-  fixes.
-- **#15 — `/metrics` sin autenticación.** Mismo dato expuesto que Prometheus expone por
-  convención en la inmensa mayoría de despliegues (protegido por red o por el propio
-  scraper); forzar auth por defecto rompería cualquier `prometheus.yml` existente sin un
-  flag de opt-out que habría que diseñar primero.
-- **#16 — la VM no comprueba límites de pila/locals.** Solo es alcanzable si el propio
-  emisor de Lux genera bytecode mal formado, no desde una petición HTTP. Añadir
-  comprobaciones (`assert`, que aquí no se usa en ningún otro sitio del código) a costa de
-  la ruta más caliente del intérprete es un cambio que vale la pena medir en `bench/`
-  antes de aplicarlo a ciegas, no algo para colar sin datos de por medio.
+### Partial
+
+- **#9 — SSRF.** Protocol restriction on redirects was added (see #6), which closes
+  the cheapest way to escape the initial `http://`/`https://`. **Not** added: blocking
+  of private/loopback/link-local ranges — doing that properly requires resolving DNS
+  and checking the resulting IP (not just looking at the URL string, which an attacker
+  works around with a domain that resolves to `127.0.0.1`), and deciding whether it
+  should be opt-in or opt-out affects any deployment that legitimately calls an
+  internal service from a route. This is a product decision, not a bug with an obvious
+  fix — left for the maintainer to decide the policy before enforcing it.
+
+### Not touched (design decision, not a bug)
+
+- **#10 — static files skip middleware.** This is behavior explicitly documented in
+  the code itself (`app.cpp`). Changing it alters the framework's contract for every
+  existing app that relies on that ordering; not something for me to decide.
+- **#14 — no rate limiting.** This is missing functionality, not a defect in existing
+  code. Adding one fits better as a separate proposal with its own design (per-IP,
+  per-session, fixed window vs. token bucket, etc.) than as part of a batch of fixes.
+- **#15 — `/metrics` with no authentication.** The same data Prometheus exposes by
+  convention in the vast majority of deployments (protected by network or by the
+  scraper itself); forcing auth by default would break any existing `prometheus.yml`
+  without an opt-out flag that would need to be designed first.
+- **#16 — the VM doesn't check stack/locals bounds.** Only reachable if Lux's own
+  emitter generates malformed bytecode, not from an HTTP request. Adding checks
+  (`assert`, which isn't used anywhere else in the codebase) at the cost of the
+  interpreter's hottest path is a change worth measuring in `bench/` before applying
+  it blindly, not something to slip in without data.

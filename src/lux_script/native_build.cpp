@@ -222,9 +222,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
 
     std::string codigo =
         "#include <cctype>\n#include <cstdint>\n#include <initializer_list>\n#include <map>\n"
-        "#include <string>\n#include <utility>\n#include <vector>\n\n" +
-        abi_prelude() + "\n" + error_runtime_prelude() + "\n" + list_runtime_prelude() + "\n" +
-        dict_runtime_prelude() + "\n" + string_runtime_prelude() + "\n";
+        "#include <string>\n#include <utility>\n#include <vector>\n\n";
     // lux_script::Value hace falta SIEMPRE que algo pueda usar str() --
     // Generador::expr() lo traduce a valor_json(...).to_string(), el mismo
     // puente que usa el valor de retorno de una ruta -- no solo cuando hay
@@ -246,8 +244,20 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // igualmente podria tener esa funcion. La misma clase de descuido que
     // ya corrigio value.hpp mas abajo: no asumir que un caso nuevo hereda
     // las condiciones de guarda de uno anterior sin volver a mirarlas.
+    //
+    // Both moved BEFORE the prelude blocks below (they used to come after):
+    // string_runtime_prelude()'s lux_str_upper/lower now call
+    // lux_script::utf8_upper/lower (value.hpp) directly instead of a second,
+    // ASCII-only reimplementation, so the declaration has to be visible
+    // before that prelude text, not after it -- the same "used before
+    // declared" g++ error a plain function with no route at all (fib(),
+    // count_primes()...) surfaced immediately, since it has no OTHER
+    // dependency that would have pulled value.hpp in first.
     codigo += "#include <lux_script/natives.hpp>\n\n";
     codigo += "#include <lux_script/value.hpp>\nusing lux_script::Value;\n\n";
+    codigo +=
+        abi_prelude() + "\n" + error_runtime_prelude() + "\n" + list_runtime_prelude() + "\n" +
+        dict_runtime_prelude() + "\n" + string_runtime_prelude() + "\n";
     // Cabeceras de lux::Request/Response y el binding de parametros SOLO
     // si hay al menos una ruta: eso si es exclusivo de rutas (ninguna
     // funcion suelta ve jamas un Request/Response).

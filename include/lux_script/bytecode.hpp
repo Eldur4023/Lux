@@ -20,6 +20,24 @@ enum class Op : uint8_t {
     StoreLocal,   // operand = slot
     Pop,
 
+    // Emitted right before StoreLocal for a `VarDecl` whose declared type is
+    // `int`/`float`: makes the declaration a real coercion instead of a
+    // label nobody enforces. Division is the case that actually surfaces
+    // this (vm.cpp: Op::Div gives Int for an exact result, Float
+    // otherwise -- a runtime-dependent choice no static check can rule
+    // out), so `int pages = total / per` used to silently hold a `Float`
+    // (2.5) whenever the division was not exact, only surfacing three
+    // statements later as an unrelated "range() expects int arguments".
+    // Both are no-ops on a value that already has the right type (the
+    // overwhelmingly common case), and neither touches a String/Bool
+    // value at all -- this is specifically about the Int/Float ambiguity
+    // `/` introduces, not a general type-enforcement mechanism (a
+    // *reassignment* like `x = "other type"` over an `int x` still runs
+    // with real dynamic semantics, unchanged; see native_gen.hpp's own
+    // comment on why --native requires that to stay true).
+    CoerceInt,    // pops a Float, truncates toward zero, pushes an Int
+    CoerceFloat,  // pops an Int, pushes the equivalent Float
+
     Add, Sub, Mul, Div, Mod, Neg,
     Eq, Ne, Lt, Le, Gt, Ge,
     Not,
@@ -38,7 +56,6 @@ enum class Op : uint8_t {
     // Variants with both sides declared `int`.  Lux Script is statically
     // typed, so what the generic VM works out on every pass is known here once:
     // they are the same operation without the cascade of type checks.
-    // comprobaciones de type.
     //
     // The declared type is not enforced on assignment, so they carry a guard:
     // if the values are not really integers, they fall to the generic path and
@@ -46,20 +63,20 @@ enum class Op : uint8_t {
     AddInt, SubInt, MulInt,
     LtInt, LeInt, GtInt, GeInt,
 
-    Jump,         // operand = destino absoluto
+    Jump,         // operand = absolute destination
     JumpIfFalse,  // same; consumes the top
     JumpIfFalsePeek,  // same, but leaves the top (and/or short-circuit)
     JumpIfTruePeek,
 
-    MakeList,     // operand = number de elementos
-    MakeDict,     // operand = number de pares
+    MakeList,     // operand = number of elements
+    MakeDict,     // operand = number of pairs
     GetIndex,
     SetIndex,     // pushes container, index and value; leaves the value
     IterList,     // turns the top into the list to walk
     GetMember,    // operand = index of the constant holding the name
     SetMember,    // same; pushes object and value, and leaves the value
 
-    CallFunction, // operand = (indice-de-funcion << 8) | argc
+    CallFunction, // operand = (function-index << 8) | argc
     CallMethod,   // operand = (name-constant-index << 8) | argc
     CallNative,   // operand = (id << 8) | argc
     // A native module function (NATIVE-MODULES.md), e.g. hash.sha256(...).

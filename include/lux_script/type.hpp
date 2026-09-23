@@ -6,51 +6,51 @@ namespace lux_script {
 
 struct TypeRef; // ast.hpp
 
-// Representacion tipada de un tipo de Lux Script, pensada para sustituir a
-// las cadenas ad-hoc que usa hoy Emitter (Local::type, type_of()) y para ser
-// la base del IR tipado que necesita el backend de compilacion nativa
-// (--native, fase 1).
+// Typed representation of a Lux Script type, meant to replace the ad-hoc
+// strings that Emitter uses today (Local::type, type_of()) and to be the
+// basis of the typed IR that the native compilation backend needs
+// (--native, phase 1).
 //
-// TODAVIA NO ESTA CONECTADO a Emitter/VM: este fichero es puramente aditivo,
-// un primer paso seguro de la fase 1. Emitter sigue usando std::string hasta
-// que se haga esa migracion, que es un cambio aparte y revisable por su
-// cuenta -- from_declared()/base_name() son el puente para cuando llegue:
-// reproducen exactamente lo que hoy produce `TypeRef.name` sin necesitar
-// cambiar Local::type todavia.
+// NOT YET CONNECTED to Emitter/VM: this file is purely additive, a first
+// safe step of phase 1. Emitter keeps using std::string until that
+// migration happens, which is a separate change reviewable on its own --
+// from_declared()/base_name() are the bridge for when it does: they
+// reproduce exactly what `TypeRef.name` produces today without needing to
+// change Local::type yet.
 //
-// Decisiones que siguen a la gramatica al pie de la letra (ver
+// Decisions that follow the grammar to the letter (see
 // LUX_SCRIPT-GRAMMAR.md):
-//   - int/long son EL MISMO TIPO (§7): un solo Kind::Int. Pero el checker
-//     actual conserva la ortografia exacta en sus mensajes de error ("los
-//     valores de tipo long no tienen..."), asi que Type tambien la conserva
-//     (campo spelling_) para no cambiar ni un caracter de un diagnostico
-//     existente cuando esto se conecte.
-//   - float/double son EL MISMO TIPO (§7): un solo Kind::Float, misma nota.
-//   - La clave de un Dict siempre es string (§8): Dict solo lleva el tipo del
-//     valor, no un par de tipos.
-//   - Los genericos se borran al compilar (§8), pero aqui SI se conservan:
-//     el checker que consuma esto necesita saber que hay dentro de un
-//     List<T>/Dict<string,V> para decidir la representacion nativa,
-//     aunque el VM de bytecode los borre luego.
+//   - int/long are THE SAME TYPE (§7): a single Kind::Int. But the current
+//     checker preserves the exact spelling in its error messages ("values
+//     of type long don't have..."), so Type also preserves it (spelling_
+//     field) so as not to change a single character of an existing
+//     diagnostic once this gets connected.
+//   - float/double are THE SAME TYPE (§7): a single Kind::Float, same note.
+//   - A Dict's key is always string (§8): Dict only carries the value's
+//     type, not a pair of types.
+//   - Generics are erased at compile time (§8), but here they ARE
+//     preserved: the checker that consumes this needs to know what's
+//     inside a List<T>/Dict<string,V> to decide the native representation,
+//     even though the bytecode VM erases them afterwards.
 
 class Type {
 public:
-    // Unknown es el "no se sabe" de hoy (la cadena vacia que devuelve
-    // type_of() cuando no hay nada evidente que comprobar: una variable de
-    // for sobre un Json, una expresion que no es un literal ni un
-    // identificador declarado...). Es un estado real, distinto de Void (una
-    // fn que no devuelve nada SI es un tipo conocido).
+    // Unknown is today's "not known" (the empty string that type_of()
+    // returns when there's nothing obvious to check: a for-loop variable
+    // over a Json, an expression that's neither a literal nor a declared
+    // identifier...). It's a real state, distinct from Void (a fn that
+    // returns nothing IS a known type).
     enum class Kind { Unknown, Void, Int, Float, Bool, String, List, Dict, Class, Json };
 
     Kind kind() const { return kind_; }
     bool is_optional() const { return optional_; }
     bool is_unknown() const { return kind_ == Kind::Unknown; }
 
-    // Solo tiene sentido si kind() == List (el tipo de los elementos) o
-    // kind() == Dict (el tipo de los valores; la clave siempre es string).
+    // Only meaningful if kind() == List (the element type) or
+    // kind() == Dict (the value type; the key is always string).
     const Type& element() const { return *elem_; }
 
-    // Solo tiene sentido si kind() == Class.
+    // Only meaningful if kind() == Class.
     const std::string& class_name() const { return class_name_; }
 
     static Type unknown() { return Type(Kind::Unknown); }
@@ -61,36 +61,37 @@ public:
     static Type json() { return Type(Kind::Json); }
     static Type void_() { return Type(Kind::Void); }
 
-    // A partir de un TypeRef del AST (ast.hpp), tal como aparece escrito en
-    // el .lux: "int x", "long x", "List<Usuario> xs"... Conserva la
-    // ortografia exacta ("long", "double") por la razon de arriba. Ver
-    // parser.cpp: TypeRef::str() para la nocion de "tipo declarado" de la
-    // que parte esto. Implementado en type.cpp (necesita ast.hpp completo).
+    // From a TypeRef in the AST (ast.hpp), exactly as it's written in the
+    // .lux source: "int x", "long x", "List<User> xs"... Preserves the
+    // exact spelling ("long", "double") for the reason given above. See
+    // parser.cpp: TypeRef::str() for the "declared type" notion this starts
+    // from. Implemented in type.cpp (needs the full ast.hpp).
     static Type from_declared(const TypeRef& t);
 
-    // A partir de un nombre desnudo ya resuelto (lo que hoy lleva
-    // TypedName::tipo: un campo de clase, o el tipo exacto de un Value
-    // constante). "" da unknown(). No hay generics ni '?' que reconstruir
-    // porque TypedName nunca los llevo.
+    // From an already-resolved bare name (what TypedName::tipo carries
+    // today: a class field, or the exact type of a constant Value). ""
+    // gives unknown(). There are no generics or '?' to reconstruct because
+    // TypedName never carried them.
     static Type from_legacy_name(const std::string& name);
 
-    // El nombre desnudo tal y como lo usan hoy Local::type/type_of: sin `?`,
-    // sin los argumentos de un generico ("List<int>" da "List", no
-    // "List<int>"). Es la clave de busqueda que ya esperan ClassSigs y
-    // metodos_de() (natives.hpp) -- no to_string(), que es mas descriptivo
-    // pero no es la clave que usan esas tablas. "" si is_unknown().
+    // The bare name as used today by Local::type/type_of: no `?`, no
+    // generic arguments ("List<int>" gives "List", not "List<int>"). It's
+    // the lookup key already expected by ClassSigs and metodos_de()
+    // (natives.hpp) -- not to_string(), which is more descriptive but isn't
+    // the key those tables use. "" if is_unknown().
     std::string base_name() const;
 
-    // Copia con el sufijo `?` puesto o quitado; el resto del tipo no cambia.
+    // Copy with the `?` suffix set or cleared; the rest of the type doesn't
+    // change.
     Type with_optional(bool opt) const {
         Type t = *this;
         t.optional_ = opt;
         return t;
     }
 
-    // La igualdad ignora spelling_ a proposito: `int` y `long` son el MISMO
-    // tipo (§7), y es lo que debe decidir si algo type-checkea, no con que
-    // palabra se escribio.
+    // Equality deliberately ignores spelling_: `int` and `long` are the
+    // SAME type (§7), and that's what should decide whether something
+    // type-checks, not which word was written.
     bool operator==(const Type& other) const {
         if (kind_ != other.kind_ || optional_ != other.optional_) return false;
         if (kind_ == Kind::Class) return class_name_ == other.class_name_;
@@ -99,10 +100,10 @@ public:
     }
     bool operator!=(const Type& other) const { return !(*this == other); }
 
-    // Notacion descriptiva completa: "int", "List<string>",
-    // "Dict<string,Json>", "MiClase", "int?"... Para mensajes nuevos (el IR,
-    // el backend nativo). NO es la clave de busqueda (ver base_name()) ni
-    // reproduce necesariamente un mensaje de error ya existente.
+    // Full descriptive notation: "int", "List<string>", "Dict<string,Json>",
+    // "MyClass", "int?"... For new messages (the IR, the native backend).
+    // It is NOT the lookup key (see base_name()) nor does it necessarily
+    // reproduce an already-existing error message.
     std::string to_string() const {
         std::string base = spelling_.empty() ? canonical_name() : spelling_;
         if (kind_ == Kind::List) base = "List<" + elem_->to_string() + ">";
@@ -135,7 +136,7 @@ private:
     bool                  optional_ = false;
     std::shared_ptr<Type> elem_;        // List/Dict
     std::string           class_name_;  // Class
-    std::string           spelling_;    // ortografia exacta del .lux, si viene de from_declared
+    std::string           spelling_;    // exact spelling from the .lux source, if it came from from_declared
 };
 
 } // namespace lux_script

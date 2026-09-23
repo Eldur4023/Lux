@@ -16,24 +16,24 @@ using lux_script::Value;
 static int         failures = 0;
 static std::string dir_tpl = ".";
 
-static void check(const char* name, const std::string& obtenido,
+static void check(const char* name, const std::string& got,
                       const std::string& expected) {
-    if (obtenido == expected) {
+    if (got == expected) {
         std::printf("  ok    %s\n", name);
     } else {
         ++failures;
         std::printf("  FAIL %s\n    expected: <<%s>>\n    got: <<%s>>\n",
-                    name, expected.c_str(), obtenido.c_str());
+                    name, expected.c_str(), got.c_str());
     }
 }
 
 // Compiles and renders; returns "" and sets `err` if something fails.
-static std::string pintar(const std::string& fuente,
+static std::string render(const std::string& source,
                           const std::vector<lux_script::TypedName>& names,
                           std::vector<Value> values, std::string& err) {
     lux_script::DiagnosticBag diags;
     Template p;
-    if (!lux_script::compilar_plantilla(fuente, "test.html", dir_tpl, names, diags, p)) {
+    if (!lux_script::compile_template(source, "test.html", dir_tpl, names, diags, p)) {
         err = diags.items().empty() ? "error without a message" : diags.items().front().message;
         return {};
     }
@@ -42,16 +42,16 @@ static std::string pintar(const std::string& fuente,
     lux_script::NativeCtx  ctx{req, res};
 
     std::string out;
-    if (!lux_script::render_plantilla(p, std::move(values), ctx, nullptr, out, err))
+    if (!lux_script::render_template(p, std::move(values), ctx, nullptr, out, err))
         return {};
     return out;
 }
 
-static void case_(const char* name, const std::string& fuente,
+static void case_(const char* name, const std::string& source,
                  const std::vector<lux_script::TypedName>& names,
                  std::vector<Value> values, const std::string& expected) {
     std::string err;
-    const std::string got = pintar(fuente, names, std::move(values), err);
+    const std::string got = render(source, names, std::move(values), err);
     if (!err.empty()) {
         ++failures;
         std::printf("  FAIL %s\n    unexpected error: %s\n", name, err.c_str());
@@ -61,20 +61,20 @@ static void case_(const char* name, const std::string& fuente,
 }
 
 // Cases that MUST fail to compile, with the expected reason.
-static void fails_to_compile(const char* name, const std::string& fuente,
+static void fails_to_compile(const char* name, const std::string& source,
                        const std::vector<lux_script::TypedName>& names,
-                       const std::string& trozo) {
+                       const std::string& snippet) {
     std::string err;
-    const std::string got = pintar(fuente, names, {}, err);
+    const std::string got = render(source, names, {}, err);
     if (err.empty()) {
         ++failures;
         std::printf("  FAIL %s\n    compiled when it should not: <<%s>>\n", name, got.c_str());
         return;
     }
-    if (err.find(trozo) == std::string::npos) {
+    if (err.find(snippet) == std::string::npos) {
         ++failures;
         std::printf("  FAIL %s\n    expected the error to say '%s'\n    said: %s\n",
-                    name, trozo.c_str(), err.c_str());
+                    name, snippet.c_str(), err.c_str());
         return;
     }
     std::printf("  ok    %s\n", name);
@@ -82,44 +82,44 @@ static void fails_to_compile(const char* name, const std::string& fuente,
 
 int main() {
     std::printf("== text and expressions ==\n");
-    case_("text suelto", "hola mundo", {}, {}, "hola mundo");
-    case_("expresion simple", "<p>{{ n }}</p>", {"n"}, {Value::integer(42)},
+    case_("plain text", "hello world", {}, {}, "hello world");
+    case_("simple expression", "<p>{{ n }}</p>", {"n"}, {Value::integer(42)},
          "<p>42</p>");
-    case_("aritmetica", "{{ n * 2 + 1 }}", {"n"}, {Value::integer(20)}, "41");
-    case_("string_value", "hola {{ quien }}", {"quien"}, {Value::str("Ana")}, "hola Ana");
-    case_("ternario", "{{ n > 10 ? \"alto\" : \"bajo\" }}", {"n"},
-         {Value::integer(20)}, "alto");
+    case_("arithmetic", "{{ n * 2 + 1 }}", {"n"}, {Value::integer(20)}, "41");
+    case_("string interpolation", "hello {{ who }}", {"who"}, {Value::str("Ana")}, "hello Ana");
+    case_("ternary", "{{ n > 10 ? \"high\" : \"low\" }}", {"n"},
+         {Value::integer(20)}, "high");
     case_("method", "{{ s.upper() }}", {"s"}, {Value::str("ana")}, "ANA");
 
-    std::printf("== autoescapado ==\n");
+    std::printf("== autoescaping ==\n");
     case_("escapes by default", "{{ s }}", {"s"},
          {Value::str("<script>alert('x')</script>")},
          "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;");
     case_("safe marker", "{{ s|safe }}", {"s"}, {Value::str("<b>ok</b>")},
          "<b>ok</b>");
-    case_("ampersand y comillas", "{{ s }}", {"s"}, {Value::str("a & \"b\"")},
+    case_("ampersand and quotes", "{{ s }}", {"s"}, {Value::str("a & \"b\"")},
          "a &amp; &quot;b&quot;");
 
-    std::printf("== miembros y fields ==\n");
+    std::printf("== members and fields ==\n");
     {
         Value::Dict d;
-        d["titulo"] = Value::str("Hola");
-        d["vistas"] = Value::integer(7);
-        case_("field de dict", "{{ a.titulo }} ({{ a.vistas }})", {"a"},
-             {Value::dict(std::move(d))}, "Hola (7)");
+        d["title"] = Value::str("Hello");
+        d["views"] = Value::integer(7);
+        case_("field on a dict", "{{ a.title }} ({{ a.views }})", {"a"},
+             {Value::dict(std::move(d))}, "Hello (7)");
     }
 
-    std::printf("== condicionales ==\n");
-    case_("if verdadero", "{% if n > 5 %}grande{% endif %}", {"n"},
-         {Value::integer(9)}, "grande");
-    case_("if falso", "{% if n > 5 %}grande{% endif %}", {"n"},
+    std::printf("== conditionals ==\n");
+    case_("if true", "{% if n > 5 %}big{% endif %}", {"n"},
+         {Value::integer(9)}, "big");
+    case_("if false", "{% if n > 5 %}big{% endif %}", {"n"},
          {Value::integer(1)}, "");
-    case_("if else", "{% if n > 5 %}grande{% else %}pequeno{% endif %}", {"n"},
-         {Value::integer(1)}, "pequeno");
-    case_("elif", "{% if n > 100 %}enorme{% elif n > 5 %}grande{% else %}pequeno{% endif %}",
-         {"n"}, {Value::integer(9)}, "grande");
-    case_("elif ultimo", "{% if n > 100 %}enorme{% elif n > 5 %}grande{% else %}pequeno{% endif %}",
-         {"n"}, {Value::integer(1)}, "pequeno");
+    case_("if else", "{% if n > 5 %}big{% else %}small{% endif %}", {"n"},
+         {Value::integer(1)}, "small");
+    case_("elif", "{% if n > 100 %}huge{% elif n > 5 %}big{% else %}small{% endif %}",
+         {"n"}, {Value::integer(9)}, "big");
+    case_("elif last", "{% if n > 100 %}huge{% elif n > 5 %}big{% else %}small{% endif %}",
+         {"n"}, {Value::integer(1)}, "small");
     case_("lux_script truthiness", "{% if s %}yes{% else %}empty{% endif %}", {"s"},
          {Value::str("")}, "empty");
 
@@ -133,11 +133,11 @@ int main() {
              {Value::list(l)}, "[a][b][c]");
         case_("for with loop.index", "{% for x in xs %}{{ loop.index }}:{{ x }} {% endfor %}",
              {"xs"}, {Value::list(l)}, "1:a 2:b 3:c ");
-        case_("loop.first y last", "{% for x in xs %}{% if loop.first %}<{% endif %}{{ x }}{% if loop.last %}>{% endif %}{% endfor %}",
+        case_("loop.first and last", "{% for x in xs %}{% if loop.first %}<{% endif %}{{ x }}{% if loop.last %}>{% endif %}{% endfor %}",
              {"xs"}, {Value::list(l)}, "<abc>");
         case_("empty for", "[{% for x in xs %}{{ x }}{% endfor %}]", {"xs"},
              {Value::list({})}, "[]");
-        case_("if dentro de for", "{% for x in xs %}{% if x != \"b\" %}{{ x }}{% endif %}{% endfor %}",
+        case_("if inside a for", "{% for x in xs %}{% if x != \"b\" %}{{ x }}{% endif %}{% endfor %}",
              {"xs"}, {Value::list(l)}, "ac");
     }
     {
@@ -152,11 +152,11 @@ int main() {
              {"xs"}, {Value::list(std::move(externa))}, "(12)(12)");
     }
 
-    std::printf("== comentarios y espacios ==\n");
+    std::printf("== comments and whitespace ==\n");
     case_("comment", "a{# this does not show #}b", {}, {}, "ab");
     case_("trim", "a   {%- if true -%}   b{% endif %}", {}, {}, "ab");
 
-    std::printf("== errores de compilacion ==\n");
+    std::printf("== compilation errors ==\n");
     fails_to_compile("unknown field in the syntax", "{{ }}", {}, "expression");
     fails_to_compile("missing closing", "{{ n ", {"n"}, "missing the closing");
     fails_to_compile("stray endif", "{% endif %}", {}, "without {% if %}");
@@ -168,11 +168,11 @@ int main() {
     fails_to_compile("variable that does not exist", "{{ noexiste }}", {}, "in the template expression");
     fails_to_compile("trailing garbage", "{{ n n }}", {"n"}, "trailing input");
 
-    // ── Herencia ────────────────────────────────────────────────────────────
+    // ── Inheritance ──────────────────────────────────────────────────────────
     // It needs real files: {% extends %} reads them from disk.
     {
         namespace fs = std::filesystem;
-        const fs::path d = fs::temp_directory_path() / "lux_script_tpl_prueba";
+        const fs::path d = fs::temp_directory_path() / "lux_script_tpl_test";
         fs::remove_all(d);
         fs::create_directories(d);
         dir_tpl = d.string();
@@ -184,35 +184,35 @@ int main() {
         };
 
         write("base.html",
-                 "<html>{% block cabeza %}HEAD{% endblock %}"
+                 "<html>{% block head %}HEAD{% endblock %}"
                  "|{% block body %}empty{% endblock %}</html>");
-        write("hijo.html",
-                 "{% extends \"base.html\" %}{% block body %}soy {{ quien }}{% endblock %}");
-        write("nieto.html",
-                 "{% extends \"hijo.html\" %}{% block cabeza %}NUEVA{% endblock %}");
-        write("anidado.html",
-                 "<a>{% block fuera %}[{% block dentro %}d{% endblock %}]{% endblock %}</a>");
-        write("hijo_anidado.html",
-                 "{% extends \"anidado.html\" %}{% block dentro %}D{% endblock %}");
+        write("child.html",
+                 "{% extends \"base.html\" %}{% block body %}I am {{ who }}{% endblock %}");
+        write("grandchild.html",
+                 "{% extends \"child.html\" %}{% block head %}NEW{% endblock %}");
+        write("nested.html",
+                 "<a>{% block outer %}[{% block inner %}d{% endblock %}]{% endblock %}</a>");
+        write("nested_child.html",
+                 "{% extends \"nested.html\" %}{% block inner %}D{% endblock %}");
 
         std::printf("== inheritance ==\n");
-        case_("hijo sustituye un bloque", read("hijo.html"), {"quien"},
-             {Value::str("Ana")}, "<html>HEAD|soy Ana</html>");
+        case_("child overrides a block", read("child.html"), {"who"},
+             {Value::str("Ana")}, "<html>HEAD|I am Ana</html>");
         case_("without substitution the default shows", read("base.html"), {}, {},
              "<html>HEAD|empty</html>");
-        case_("string_value de tres", read("nieto.html"), {"quien"},
-             {Value::str("Ana")}, "<html>NUEVA|soy Ana</html>");
-        case_("bloque dentro de bloque", read("hijo_anidado.html"), {}, {},
+        case_("three-level inheritance", read("grandchild.html"), {"who"},
+             {Value::str("Ana")}, "<html>NEW|I am Ana</html>");
+        case_("block inside a block", read("nested_child.html"), {}, {},
              "<a>[D]</a>");
 
-        fails_to_compile("extends is not first", "hola{% extends \"base.html\" %}", {},
+        fails_to_compile("extends is not first", "hi{% extends \"base.html\" %}", {},
                    "must be the first thing");
-        fails_to_compile("base that does not exist", "{% extends \"nada.html\" %}", {},
+        fails_to_compile("base that does not exist", "{% extends \"missing.html\" %}", {},
                    "base template not found");
         fails_to_compile("missing endblock", "{% block x %}unclosed", {},
                    "missing {% endblock %}");
         fails_to_compile("macro does not exist", "{% macro m() %}{% endmacro %}", {},
-                   "no existe en Lux Script");
+                   "does not exist in Lux Script");
 
         dir_tpl = ".";
         fs::remove_all(d);
@@ -220,7 +220,7 @@ int main() {
 
     // When render() knows the type of what it passes, the template is checked
     // against it: a typo inside a {{ }} stops being a broken page.
-    std::printf("== tipos ==\n");
+    std::printf("== types ==\n");
     case_("method that exists", "{{ s.upper().trim() }}", {{"s", "string"}},
          {Value::str(" ana ")}, "ANA");
     fails_to_compile("method that does not exist", "{{ s.mayusculas() }}", {{"s", "string"}},

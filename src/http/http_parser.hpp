@@ -40,11 +40,18 @@ inline constexpr size_t kMaxBodySize    = 16 * 1024 * 1024; // 16 MB
 // connection's write buffer.
 class HttpParser {
 public:
-    using OnComplete = std::function<void(ParsedRequest)>;
+    using OnComplete         = std::function<void(ParsedRequest)>;
+    // Fired once headers are fully parsed, before the body starts arriving.
+    // Lets the connection layer stop the Slowloris (header) timeout at the
+    // point it is actually meant to cover, instead of at on_complete — which
+    // only fires once the BODY has fully arrived too, wrongly charging a
+    // slow request body against the header timeout's much shorter budget.
+    using OnHeadersComplete  = std::function<void()>;
 
     struct ParseContext;
 
-    explicit HttpParser(OnComplete on_complete);
+    explicit HttpParser(OnComplete on_complete,
+                        OnHeadersComplete on_headers_complete = nullptr);
     ~HttpParser();
 
     // Returns false on a parse error (caller should close the connection).
@@ -70,6 +77,7 @@ public:
 
 private:
     OnComplete                       on_complete_;
+    OnHeadersComplete                on_headers_complete_;
     std::unique_ptr<ParseContext>    ctx_;
     std::unique_ptr<llhttp_t>        parser_;
     std::unique_ptr<llhttp_settings_t> settings_;

@@ -34,10 +34,11 @@ bool compare(const Value& a, const Value& b, Op op, bool& ok) {
     }
 }
 
-// Un valor de Lux Script solo puede ser Int/Float/Bool al cruzar hacia
-// nativo -- generar_funcion_nativa() ya garantiza que una funcion solo se
-// ofrece por esta via si todos sus parametros y su retorno son uno de esos
-// tres, asi que el tipo real siempre coincide con el que el wrapper espera.
+// A Lux Script value can only be Int/Float/Bool when crossing over to
+// native code -- generar_funcion_nativa() already guarantees that a
+// function is only offered through this path if all of its parameters and
+// its return type are one of those three, so the real type always matches
+// what the wrapper expects.
 NativeValue a_nativevalue(const Value& v) {
     NativeValue n;
     if (v.is_float()) { n.tag = NativeValue::Tag::Float; n.d = v.as_float(); }
@@ -63,14 +64,15 @@ VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& c
     frames_.clear();
     stack_.clear();
 
-    // Capacidad reservada de una vez: frames_ tiene un tope fijo conocido
-    // (kMaxFrames) que nunca cambia, y stack_/locals_ usan un margen generoso
-    // para el grueso de los handlers reales en vez del 32 arbitrario de antes.
-    // reserve() no reasigna si la capacidad ya alcanza (el caso normal cuando
-    // esta misma VM se reutiliza entre peticiones via el shared_vm thread_local
-    // de project.cpp), asi que esto no cambia el comportamiento observable:
-    // solo evita las reasignaciones repetidas de std::vector::push_back/resize
-    // que salian en el perfil de CPU (Value::emplace_back, ver bench/RESULTS.md).
+    // Capacity reserved once: frames_ has a known fixed cap (kMaxFrames)
+    // that never changes, and stack_/locals_ use a generous margin covering
+    // the bulk of real handlers instead of the arbitrary 32 from before.
+    // reserve() doesn't reallocate if the capacity already suffices (the
+    // normal case when this same VM is reused between requests via
+    // project.cpp's thread_local shared_vm), so this doesn't change
+    // observable behavior: it just avoids the repeated reallocations of
+    // std::vector::push_back/resize that showed up in the CPU profile
+    // (Value::emplace_back, see bench/RESULTS.md).
     frames_.reserve(kMaxFrames);
     stack_.reserve(256);
     locals_.reserve(256);
@@ -228,6 +230,18 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             case Op::Pop:
                 pop();
                 break;
+
+            case Op::CoerceInt: {
+                Value v = pop();
+                push(v.is_float() ? Value::integer(static_cast<long long>(v.as_float())) : v);
+                break;
+            }
+
+            case Op::CoerceFloat: {
+                Value v = pop();
+                push(v.is_int() ? Value::real(static_cast<double>(v.as_int())) : v);
+                break;
+            }
 
             case Op::Add: generic_add: {
                 Value b = pop(), a = pop();
@@ -462,6 +476,19 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                     push(Value::list(std::move(keys)));
                     break;
                 }
+                // A string walks its own codepoints (utf8_chars(),
+                // value.hpp) -- there was no OTHER way to go character by
+                // character over a string at all before this (no index-
+                // based char access either): a slugify, a per-letter
+                // validation, anything of that shape had no way to be
+                // written. Same helper `split(s, "")` uses, so both give
+                // the same characters for the same string.
+                if (v.is_str()) {
+                    Value::List chars;
+                    for (auto& ch : utf8_chars(v.as_str())) chars.push_back(Value::str(std::move(ch)));
+                    push(Value::list(std::move(chars)));
+                    break;
+                }
                 return fail(std::string("cannot iterate over ") + v.type_name() +
                             " with 'for'", in.loc);
             }
@@ -537,11 +564,11 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 return r;
             }
 
-            // Misma forma que CallAsync -- el VM tampoco sabe esperar aqui,
-            // solo junta los argumentos y para -- pero `id` vive en el
-            // id-space de BuiltinModuleRegistry, no en el de kNatives, asi
-            // que await_is_module se lo dice al conductor (project.cpp) para
-            // que no lo confunda con is_db_await/sleep/__ws_recv.
+            // Same shape as CallAsync -- the VM doesn't know how to wait
+            // here either, it just gathers the arguments and stops -- but
+            // `id` lives in BuiltinModuleRegistry's id-space, not kNatives',
+            // so await_is_module tells the driver (project.cpp) that, so it
+            // doesn't confuse it with is_db_await/sleep/__ws_recv.
             case Op::CallAsyncModule: {
                 int id   = static_cast<int>(in.operand >> 8);
                 int argc = static_cast<int>(in.operand & 0xFF);
@@ -608,14 +635,15 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 std::vector<Value> args(static_cast<size_t>(argc));
                 for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
 
-                // Modo mixto de --native (Fase 2): si esta funcion se compilo
-                // a codigo nativo, se llama directamente y no se abre marco
-                // de interprete ninguno -- el resultado acaba en la pila
-                // exactamente igual que tras un Op::Return normal, asi que el
-                // resto del bytecode que la invoco no distingue una cosa de
-                // la otra. Un NativeValue::Tag::Error (division/modulo por
-                // cero, ver native_gen.cpp::lux_native_fail) se convierte
-                // en el mismo fail() que ya usaria el bytecode equivalente.
+                // Mixed mode for --native (Phase 2): if this function was
+                // compiled to native code, it's called directly and no
+                // interpreter frame at all is opened -- the result ends up
+                // on the stack exactly as it would after a normal
+                // Op::Return, so the rest of the bytecode that invoked it
+                // can't tell one from the other. A NativeValue::Tag::Error
+                // (division/modulo by zero, see
+                // native_gen.cpp::lux_native_fail) turns into the same
+                // fail() that the equivalent bytecode would already use.
                 if (native_ && native_->funcs && index < native_->funcs->size() &&
                     (*native_->funcs)[index]) {
                     std::vector<NativeValue> nargs(args.size());

@@ -57,6 +57,20 @@ static const char* mime_for_ext(const std::string& ext) {
     if (ext == ".mp3")   return "audio/mpeg";
     if (ext == ".ogg")   return "audio/ogg";
     if (ext == ".avif")  return "image/avif";
+    // Video streaming/subtitle types: without the right Content-Type a
+    // <track> subtitle file is silently ignored by the browser (.vtt), and
+    // an HLS player refuses to treat the manifest/segments as a stream at
+    // all (.m3u8/.ts) — both are exactly what send_file()/a static mount
+    // are used for alongside Range support (see partial_content()), so
+    // missing them here breaks the one thing this MIME table exists for.
+    if (ext == ".vtt")   return "text/vtt; charset=utf-8";
+    if (ext == ".m3u8")  return "application/vnd.apple.mpegurl";
+    if (ext == ".ts")    return "video/mp2t";
+    if (ext == ".mkv")   return "video/x-matroska";
+    if (ext == ".flac")  return "audio/flac";
+    if (ext == ".wav")   return "audio/wav";
+    if (ext == ".m4a")   return "audio/mp4";
+    if (ext == ".csv")   return "text/csv; charset=utf-8";
     return "application/octet-stream";
 }
 
@@ -70,15 +84,28 @@ static std::string make_etag(const std::filesystem::file_time_type& mtime,
     return ss.str();
 }
 
+// Strict hex-nibble check — see the identical helper's comment in
+// http_connection.cpp's url_decode() for why this can't be std::strtoul():
+// it accepts a leading sign/whitespace before the digits, so "%+2e" (or
+// "%-1", "% e") looked like a fully-consumed, valid escape to it instead of
+// the literal text RFC 3986 says it is — a decoder/filter differential, and
+// on a decoder that feeds a path traversal check exactly the kind of thing
+// that check exists to catch.
+static inline int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 static std::string url_decode_path(const std::string& s) {
     std::string out;
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
         if (s[i] == '%' && i + 2 < s.size()) {
-            char buf[3] = {s[i+1], s[i+2], '\0'};
-            char* end;
-            unsigned long v = std::strtoul(buf, &end, 16);
-            if (end == buf + 2) {
+            int hi = hex_nibble(s[i+1]), lo = hex_nibble(s[i+2]);
+            if (hi >= 0 && lo >= 0) {
+                int v = hi * 16 + lo;
                 // Drop %00: it truncates POSIX path operations after
                 // canonicalisation, creating a mismatch between what auth
                 // middlewares see (decoded path) and what the filesystem
@@ -149,10 +176,24 @@ static bool try_serve_static(
         // Block dotfiles: any path component starting with '.' (e.g. .env,
         // .git/config, .htaccess) — common misconfiguration in deployments.
         // We check the URL-decoded relative path so %2E bypasses are caught.
-        for (size_t i = 0; i < rel.size(); ++i) {
-            if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') {
-                res.status(404).json_text(R"({"error":"Not Found"})");
-                return true;
+        //
+        // EXCEPT /.well-known/ (RFC 8615): a fixed, standardized,
+        // intentionally-public directory. ACME's HTTP-01 domain validation
+        // (RFC 8555 §8.3) serves its challenge response from exactly
+        // /.well-known/acme-challenge/<token> over plain HTTP,
+        // unauthenticated, by design — and a static mount is the only way
+        // to serve it at all, since the path is fixed by the CA, not
+        // something an app route can be written for ahead of time.
+        // Blocking every dotfile unconditionally left no way to pass that
+        // validation through Lux at all.
+        static const std::string kWellKnown = "/.well-known/";
+        bool is_well_known = rel.compare(0, kWellKnown.size(), kWellKnown) == 0;
+        if (!is_well_known) {
+            for (size_t i = 0; i < rel.size(); ++i) {
+                if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') {
+                    res.status(404).json_text(R"({"error":"Not Found"})");
+                    return true;
+                }
             }
         }
 
@@ -180,6 +221,25 @@ static bool try_serve_static(
         auto canonical_file = preliminary;
 
         auto status = fs::status(preliminary, ec);
+
+        // A request for a directory (`/docs`, `/docs/`) serves that
+        // directory's OWN index.html, same as every other static file
+        // server (nginx, Apache, `python -m http.server`...) — not a 404
+        // and not (for an `spa` mount) the ROOT index.html, which would
+        // silently swap in the wrong page instead of the directory's real
+        // one. Falls through to the branches below when there is no
+        // index.html here: a directory with nothing to serve is still
+        // either a 404 or, for `spa`, the root fallback.
+        if (!ec && fs::is_directory(status)) {
+            std::error_code dir_ec;
+            auto dir_index = fs::canonical(preliminary / "index.html", dir_ec);
+            if (!dir_ec && fs::is_regular_file(fs::status(dir_index)) &&
+                path_is_within(canonical_root, dir_index)) {
+                preliminary = dir_index;
+                status = fs::status(preliminary, ec);
+            }
+        }
+
         if (ec || !fs::is_regular_file(status)) {
             // SPA fallback: serve index.html for unknown paths so client-side
             // routers (React Router, Vue Router, etc.) can handle the URL.
@@ -240,9 +300,24 @@ static bool try_serve_static(
             return std::all_of(seg.begin(), seg.end(),
                                [](unsigned char c){ return std::isxdigit(c); });
         };
-        const char* cache_ctrl = is_hex_hash(stem)
-            ? "public, max-age=31536000, immutable"
-            : "public, max-age=3600, must-revalidate";
+        // An index.html — whether requested directly, served for a bare
+        // directory, or reached through the `spa` fallback — is the one
+        // static file whose CONTENT changes on every deploy without its
+        // NAME changing (that is exactly what the hashed-asset names it
+        // references are for), so it needs the opposite of the two rules
+        // above: revalidate on every load, not just once an hour. Without
+        // this, a client could keep the OLD index.html — pointing at
+        // hashed bundles a deploy already deleted — for up to an hour
+        // after a release. `no-cache` (which, despite the name, still lets
+        // the browser cache the file — it just forces the ETag
+        // revalidation below on every load instead of skipping it for
+        // max-age) costs one cheap 304 round trip per navigation, not a
+        // full re-download.
+        const char* cache_ctrl = canonical_file.filename() == "index.html"
+            ? "no-cache"
+            : is_hex_hash(stem)
+                ? "public, max-age=31536000, immutable"
+                : "public, max-age=3600, must-revalidate";
 
         const char* mime = mime_for_ext(ext);
         res.header("ETag",          etag);
@@ -312,9 +387,41 @@ void App::prepare() {
 Task<void> App::handle_request(Request& req, Response& res) {
     res.set_templates_dir(templates_dir_);
 
-    // Static file mounts bypass the middleware chain.
+    // Static file mounts bypass the middleware chain — but only for a path
+    // that has no explicitly declared route of its own. A broad mount like
+    // `static "/" -> "./dist" spa` (the exact shape GUIDE.md recommends for
+    // an SPA's dist folder) matches every path by prefix, so without this
+    // check it silently swallowed EVERY GET/HEAD request the moment ANY
+    // root or wide-prefix static mount existed — including one with a real
+    // handler, answered instead with the mount's own 404 (or, worse, the
+    // SPA's index.html) and the actual route never ran. A route the
+    // developer wrote by hand takes precedence over a directory dump by
+    // construction; the static mount is the fallback for "nothing else
+    // claims this", not the other way around.
     if (req.method == "GET" || req.method == "HEAD") {
-        if (try_serve_static(static_mounts_, req, res)) co_return;
+        // Two sources of "yes, a real route claims this", checked together:
+        //   - router_ itself, EXCLUDING a match that only succeeded via a
+        //     wildcard segment (`via_wildcard`) — App's own concrete routes
+        //     (enable_health()/enable_metrics()/the docs endpoints, or any
+        //     plain app.get()/post()/etc. from the C++ API) match this way,
+        //     but so would the Lux Script engine's two blanket
+        //     any("/",...)/any("/*",...) catch-alls if via_wildcard were
+        //     not excluded — that would make this always true again for
+        //     that engine and silently re-disable every static mount, the
+        //     exact bug the via_wildcard field exists to keep fixed.
+        //   - route_probe_, when set: the Lux Script engine's OWN router
+        //     (mod->router, invisible to router_ above) for its actual
+        //     declared routes -- see App::set_route_probe()'s comment.
+        // Neither alone is enough: router_ misses the live module's routes,
+        // and the probe alone (the previous version of this fix) missed
+        // health/docs/metrics, which live on router_, not the module --
+        // confirmed against the real binary: a root SPA mount answered
+        // /health, /docs and /openapi.json with index.html instead of
+        // reaching any of them.
+        auto rmatch = router_.match(req.method, req.path);
+        bool route_exists = rmatch.found && !rmatch.via_wildcard;
+        if (!route_exists && route_probe_) route_exists = route_probe_(req.method, req.path);
+        if (!route_exists && try_serve_static(static_mounts_, req, res)) co_return;
     }
 
     // ── Async middleware chain ─────────────────────────────────────────────
@@ -427,6 +534,18 @@ void App::run(const std::string& host, uint16_t port) {
     // was picked from: it is the knee of a real variance-vs-typical-case-cost
     // curve, not a round number.
     blocking_pool().start(num_threads);
+
+    // Separate pool for is_async native module calls (os.run(), http.*,
+    // read_file()/write_file()) -- see io_blocking_pool()'s comment
+    // (blocking_pool.hpp) for why sharing blocking_pool() above starved
+    // unrelated requests behind a burst of slow ones. These workers spend
+    // nearly all their time blocked on a subprocess or a socket, not a CPU
+    // core, so a much bigger ceiling than the CPU-bound pool's costs little:
+    // a handful of core-sized permanent workers for the common case, with
+    // plenty of overflow room (self-retiring after 2s idle, same as the
+    // other pool) for a burst of concurrent slow calls to not queue up
+    // behind each other.
+    io_blocking_pool().start(num_threads, num_threads * 16);
 
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);

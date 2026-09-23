@@ -35,6 +35,7 @@
 #include <sys/wait.h>
 #include <poll.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <cerrno>
 #include <chrono>
@@ -163,7 +164,7 @@ Value fn_os_path_abs(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // outcome the script decides about" reasoning as getenv() above, and
 // consistent with the project's existing precedent for "not found" (a DB
 // query with no matching row already comes back as an empty List, not a
-// thrown error -- see GUIDE.md's "no encontrado" pattern) rather than every
+// thrown error -- see GUIDE.md's "not found" pattern) rather than every
 // absence being a hard failure. A genuine system error (permission denied on
 // a path that DOES exist, for instance) still goes through `error`.
 Value fn_os_read_file(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -394,9 +395,23 @@ Value fn_os_run(NativeCtx&, std::vector<Value>& args, std::string& error) {
     for (auto& s : argv_storage) argv.push_back(s.data());
     argv.push_back(nullptr);
 
+    // O_CLOEXEC on the pipe fds themselves, not just the dup2()'d copies
+    // posix_spawn_file_actions_adddup2() below creates in THIS child: without
+    // it, a DIFFERENT os.run()/proc.start() call racing on another thread
+    // whose posix_spawn() forks in the narrow window between this pipe2()
+    // and this function's own posix_spawnp() below inherits every fd this
+    // process has open that lacks CLOEXEC -- including these pipes' write
+    // ends. That other (unrelated) child then holds this one's stdout/stderr
+    // pipe open even after THIS child exits and closes its own copies, so
+    // the read loop below never sees EOF (out_open/err_open never flip to
+    // false) and blocks for the full kRunTimeoutMs on every call, waiting
+    // for a process it has nothing to do with. Confirmed against the real
+    // binary: an unrelated `os.run("sleep", ["4"])` running concurrently
+    // made an `os.run("echo", ["hi"])` on another connection take 7-11s
+    // instead of ~1ms.
     int out_pipe[2], err_pipe[2];
-    if (pipe(out_pipe) != 0) { error = "os.run(): could not create a pipe"; return Value::null(); }
-    if (pipe(err_pipe) != 0) {
+    if (pipe2(out_pipe, O_CLOEXEC) != 0) { error = "os.run(): could not create a pipe"; return Value::null(); }
+    if (pipe2(err_pipe, O_CLOEXEC) != 0) {
         close(out_pipe[0]); close(out_pipe[1]);
         error = "os.run(): could not create a pipe";
         return Value::null();

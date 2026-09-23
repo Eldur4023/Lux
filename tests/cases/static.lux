@@ -9,4 +9,4 @@ app:
     name "static-check"
     port 8089
 
-    static "/" -> "tests/cases/static_fixture" spa
+    static "/" -> "./static_fixture" spa

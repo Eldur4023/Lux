@@ -157,8 +157,18 @@ parse_multipart(const Request& req) {
                 part.filename = extract("filename");
                 // Strip path separators from filename to prevent directory
                 // traversal if callers use part.filename directly as a save path.
+                // Also strip NUL: File.save() (natives.cpp) validates the
+                // extension against this exact std::string (ends_with(".png")
+                // sees the whole thing, embedded NUL included), but then opens
+                // the file through a C string, which truncates AT the NUL --
+                // "evil.sh\0.png" passes an app's `.ends_with(".png")` check
+                // and gets written to disk as "evil.sh". Same class of bug as
+                // every other %00 rejection already in this codebase (query
+                // string, path segments, form fields) -- a NUL bound into
+                // anything that later crosses to a C API can desync the
+                // C++-side check from the C-side effect.
                 for (auto& c : part.filename)
-                    if (c == '/' || c == '\\') c = '_';
+                    if (c == '/' || c == '\\' || c == '\0') c = '_';
             } else if (key == "content-type") {
                 part.content_type = val;
             }

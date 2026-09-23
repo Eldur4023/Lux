@@ -7,6 +7,8 @@
 #include <memory>
 #include <functional>
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <unistd.h>
 #include <cerrno>
 #include <iostream>
@@ -362,6 +364,30 @@ public:
     }
 
 private:
+    // HTTP header field names are case-insensitive (RFC 7230 §3.2), but
+    // state_->headers is keyed by whatever exact case a handler passed to
+    // header() — needed so headers_map() still hands back what the caller
+    // set (native_route_shadow.cpp's own test looks up "Location" by that
+    // exact case). A handler that sets "x-frame-options" (all lowercase)
+    // is, semantically, setting the SAME header as kDefaults'
+    // "X-Frame-Options" below, but an exact-case map lookup does not know
+    // that: both ended up on the wire as two separate, contradictory
+    // header lines instead of the handler's value winning outright.
+    static bool has_header_ci(
+        const std::unordered_map<std::string, std::string>& headers,
+        const char* name) {
+        for (const auto& [k, v] : headers) {
+            if (k.size() != std::strlen(name)) continue;
+            bool eq = true;
+            for (size_t i = 0; i < k.size(); ++i) {
+                if (std::tolower(static_cast<unsigned char>(k[i])) !=
+                    std::tolower(static_cast<unsigned char>(name[i]))) { eq = false; break; }
+            }
+            if (eq) return true;
+        }
+        return false;
+    }
+
     // Every response the framework sends gets this baseline of hardening
     // headers, unless the handler already set one explicitly — a handler
     // that wants to frame its own content (res.header("X-Frame-Options",
@@ -379,7 +405,7 @@ private:
         for (const auto& [k, v] : state_->headers)
             os << k << ": " << v << "\r\n";
         for (const auto& [k, v] : kDefaults)
-            if (state_->headers.find(k) == state_->headers.end())
+            if (!has_header_ci(state_->headers, k))
                 os << k << ": " << v << "\r\n";
     }
 

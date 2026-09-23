@@ -55,6 +55,23 @@ public:
     // in order rather than corrupting the stream.
     std::function<void(std::string)> _ws_queue_write;
 
+    // Cancels HttpConnection's per-request timeout (kRequestTimeoutMs).  Set
+    // by HttpConnection::dispatch(); called once by make_sse() (sse.hpp) and
+    // by the ws() upgrade wrapper (app.hpp), the instant each writes its own
+    // headers and the response stops being a bounded "reply by time X" and
+    // becomes an open-ended stream instead. Without this, a healthy SSE/WS
+    // connection gets a 408 dropped into the middle of its stream 30s after
+    // it opened, timing or connection-count notwithstanding.
+    std::function<void()> _cancel_request_timeout;
+
+    // Forces the underlying connection closed. Used by SSEWriter when a
+    // write partway through a frame fails to complete: from that point the
+    // byte stream is desynced (the client has an incomplete frame with no
+    // length prefix to tell it where the next one starts), so the
+    // connection has to end rather than keep accepting more sse.send()
+    // calls onto an already-corrupted stream.
+    std::function<void()> _force_close;
+
     // Cancellation token — shared with the HttpConnection.
     // Cancelled when the connection closes (timeout, disconnect, write error).
     // Check in long-running handlers to exit early.
@@ -106,6 +123,18 @@ public:
     mutable bool                                          cookies_parsed_ = false;
 
 private:
+    // Strict hex-nibble check — see the identical helper's comment in
+    // http_connection.cpp's url_decode() for why std::strtoul() is wrong
+    // here: it accepts a leading sign/whitespace before the digits, so
+    // "%+2e" or "%-1" decoded as a real byte instead of staying the literal
+    // text RFC 3986 says an escape with non-hex digits is.
+    static int hex_nibble(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    }
+
     static std::string form_url_decode(const std::string& s) {
         std::string out;
         out.reserve(s.size());
@@ -113,10 +142,9 @@ private:
             if (s[i] == '+') {
                 out += ' ';
             } else if (s[i] == '%' && i + 2 < s.size()) {
-                char buf[3] = {s[i+1], s[i+2], '\0'};
-                char* end;
-                unsigned long v = std::strtoul(buf, &end, 16);
-                if (end == buf + 2) {
+                int hi = hex_nibble(s[i+1]), lo = hex_nibble(s[i+2]);
+                if (hi >= 0 && lo >= 0) {
+                    int v = hi * 16 + lo;
                     if (v != 0) out += static_cast<char>(v);  // reject %00 null bytes
                     i += 2;
                 } else { out += '%'; }

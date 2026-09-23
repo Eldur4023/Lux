@@ -33,7 +33,7 @@ private:
     // function (or nested ones) from colliding on the same synthetic name.
     size_t             switch_count_ = 0;
 
-    // ── Navegacion ───────────────────────────────────────────────────────────
+    // ── Navigation ───────────────────────────────────────────────────────────
     const Token& peek(size_t ahead = 0) const;
     const Token& prev() const;
     bool  check(Tok k) const { return peek().is(k); }
@@ -44,21 +44,27 @@ private:
     void  synchronize();
     void  skip_newlines();
 
-    // ── Declaraciones ────────────────────────────────────────────────────────
+    // ── Declarations ─────────────────────────────────────────────────────────
     void parse_declaration(Program& out);
     void parse_route(Program& out, const Token& method_tok,
                      const std::string& prefix, const std::vector<Guard>& guards);
     void parse_group(Program& out, const std::string& prefix,
                      const std::vector<Guard>& guards);
     void parse_app(Program& out);
-    // Resuelve un value de configuracion: string_value, number, booleano o env("VAR").
-    bool config_value(std::string& text, long long& number, bool& flag, int& kind);
+    // Resolves a config value: string_value, number, boolean, or env("VAR").
+    // from_env (optional): true if the value came from env("VAR") -- what
+    // ends up there is decided by the deployment environment, not this
+    // file, so a validation on the value's CONTENT (e.g. a secret's
+    // minimum length) must not apply when it comes from there, whatever
+    // that content happens to be at compile time.
+    bool config_value(std::string& text, long long& number, bool& flag, int& kind,
+                      bool* from_env = nullptr);
     void parse_class(Program& out);
     void parse_enum(Program& out);
     void parse_error(Program& out);
     void parse_fn(Program& out);
 
-    // ── Sentencias ───────────────────────────────────────────────────────────
+    // ── Statements ───────────────────────────────────────────────────────────
     Block   parse_block();
     StmtPtr parse_statement();
     StmtPtr parse_if();
@@ -77,12 +83,12 @@ private:
     // statement function does.
     void parse_switch_into(Block& out);
 
-    // ── Tipos y parametros ───────────────────────────────────────────────────
+    // ── Types and parameters ─────────────────────────────────────────────────
     bool    looks_like_type() const;
     TypeRef parse_type();
     Param   parse_param();
 
-    // ── Expresiones, de menor a mayor precedencia ────────────────────────────
+    // ── Expressions, from lowest to highest precedence ───────────────────────
     ExprPtr parse_expr();
     ExprPtr parse_ternary();
     ExprPtr parse_or();

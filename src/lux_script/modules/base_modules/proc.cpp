@@ -234,8 +234,15 @@ Value fn_proc_start(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
     int stdout_read_fd = -1, stdout_write_fd = -1;
     if (stdout_mode == "pipe") {
+        // O_CLOEXEC here (not just the addclose() file actions below, which
+        // only apply to THIS child): without it, another proc.start()/
+        // os.run() call racing on a different thread can fork (via ITS OWN
+        // posix_spawn()) in the window before this one's posix_spawn() runs
+        // below, inheriting these fds into an unrelated child that then
+        // holds this pipe's write end open indefinitely -- same failure
+        // mode as os.run()'s identical fix, see its comment (os.cpp).
         int fds[2];
-        if (pipe(fds) != 0) { error = "proc.start(): could not create a pipe"; return Value::null(); }
+        if (pipe2(fds, O_CLOEXEC) != 0) { error = "proc.start(): could not create a pipe"; return Value::null(); }
         // Non-blocking on OUR (read) end only -- pipe(2) gives each end its
         // own open file description, so this has no effect on the CHILD's
         // write end (dup2'd from fds[1] below), which stays perfectly

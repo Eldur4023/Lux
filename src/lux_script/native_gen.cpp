@@ -306,7 +306,7 @@ public:
     // lo que llevamos comprobado? Igual que usa_await_: puesto a verdad,
     // nunca a falso. generate_native_route() lo usa para decidir si la ruta
     // necesita cerrar, al final, cualquier transaccion que el handler haya
-    // dejado abierta (rollback_pendientes_db) -- una ruta que nunca llama a
+    // dejado abierta (rollback_pending_db) -- una ruta que nunca llama a
     // begin() no paga ese co_await de mas.
     bool usa_transaccion() const { return usa_transaccion_; }
 
@@ -492,7 +492,7 @@ public:
                     // query/exec/last_id, asi que Type::json() tambien les
                     // sirve. usa_transaccion_ se marca aparte: una ruta que
                     // llama a begin() necesita el cierre de la transaccion al
-                    // final (rollback_pendientes_db), aunque nunca llegue a
+                    // final (rollback_pending_db), aunque nunca llegue a
                     // llamar a commit()/rollback() (return anticipado, error).
                     if (call.call_index == db_last_id_id() ||
                         call.call_index == db_begin_id() ||
@@ -1456,8 +1456,16 @@ public:
                     // de ejecucion -- lux_json_len() decide, igual que
                     // fn_len (natives.cpp).
                     if (es_json_dinamico(*t)) return "lux_json_len(" + expr(*e.args[0].value) + ")";
+                    // Codepoints, not bytes -- static_cast<int64_t>(x.size())
+                    // used to count UTF-8 bytes, matching bytecode's OWN bug
+                    // before it was fixed (fn_len, natives.cpp) rather than
+                    // this generator's own separate mistake; see
+                    // lux_script::utf8_length()'s comment (value.hpp) for
+                    // why this needs to live in a header both backends
+                    // include, not a private reimplementation here.
                     return t->kind() == Type::Kind::String
-                               ? "static_cast<int64_t>(" + expr(*e.args[0].value) + ".size())"
+                               ? "static_cast<int64_t>(lux_script::utf8_length(" +
+                                     expr(*e.args[0].value) + "))"
                                : expr(*e.args[0].value) + ".lux_len()";
                 }
                 // int(x): identidad sobre Int, truncar hacia cero sobre
@@ -1555,8 +1563,17 @@ public:
             // comentario de clamp_sleep_ms en project.cpp).
             case IrExprKind::Await:
                 if (e.lhs->call_shape == IrCallShape::BuiltinGlobalCall)
+                    // req.loop/req.cancel_token, not the bare lux::sleep(ms)
+                    // overload: that one reads thread_local current_token,
+                    // which HttpConnection::dispatch() repoints to whichever
+                    // OTHER connection this thread dispatches next. A route
+                    // that awaits sleep() more than once across a suspension
+                    // (e.g. inside a loop) would then resume against a stale
+                    // token belonging to some unrelated -- possibly already
+                    // closed -- connection instead of its own. See the
+                    // comment on lux::sleep(ms, loop, token) in task.hpp.
                     return "co_await lux::sleep(lux_clamp_sleep_ms(" +
-                           expr(*e.lhs->args[0].value) + "))";
+                           expr(*e.lhs->args[0].value) + "), req.loop, req.cancel_token)";
                 // await <modulo>.query/exec/last_id(...) (Fase 5.5): mismo
                 // camino que bytecode (lux_script::await_db(), ver
                 // db.hpp) -- l_pinned_workers/l_last_exec_workers son las
@@ -1596,7 +1613,7 @@ public:
                     }
                     return "co_await lux_script::await_db(lux_script::DbOp::" + dbop + ", " +
                            literal_string(call.call_name) + ", req.loop, " + sql + ", " + params +
-                           ", l_pinned_workers, l_last_exec_workers)";
+                           ", l_pinned_workers, l_last_exec_workers, l_poisoned_db)";
                 }
 
             default:
@@ -1819,11 +1836,11 @@ public:
     // explicito, un `status(...)` como ultima expresion, un 400 de
     // parametro invalido -- tiene que cerrar antes la transaccion que
     // pudiera seguir abierta, o la conexion que la abrio quedaria pinned
-    // para siempre (ver rollback_pendientes_db, db.hpp). C++ no tiene
+    // para siempre (ver rollback_pending_db, db.hpp). C++ no tiene
     // `finally`; como ret_vacio() ya es el punto de paso obligado de TODO
     // punto de salida temprano (ver el comentario de arriba), basta con
     // anteponer la limpieza aqui una sola vez en vez de repetirla en cada
-    // llamante. Igual que bytecode (rollback_pendientes en project.cpp), no
+    // llamante. Igual que bytecode (rollback_pending en project.cpp), no
     // se hace desde el catch(...) de la ruta: una excepcion sin atrapar dentro
     // de una transaccion abierta ya es un fallo grave del motor, y este
     // documento evita a proposito que bytecode y --native diverjan en que
@@ -1831,7 +1848,7 @@ public:
     std::string ret_vacio() const {
         if (!asincrona_) return "return;";
         if (comprobador_.usa_transaccion())
-            return "co_await lux_script::rollback_pendientes_db(l_pinned_workers, req.loop); co_return;";
+            return "co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop); co_return;";
         return "co_return;";
     }
 
@@ -2112,7 +2129,7 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
 // `clase`, reproduciendo EXACTAMENTE bind_body() (project.cpp) -- mismos
 // mensajes, mismo orden de comprobacion, mismo formato de error -- pero
 // como C++ generado en vez de una funcion compartida: a diferencia de
-// await_db()/rollback_pendientes_db() (Fase 5.5/5.6), bind_body() depende
+// await_db()/rollback_pending_db() (Fase 5.5/5.6), bind_body() depende
 // de tipos (ClassInfo, el `Chunk` de una regla validate:, VM) que viven
 // dentro de project.cpp y no se exponen. Las reglas validate: de `clase`
 // (si tiene, ver ClaseNativa::reglas/reglas_ok) SI se evaluan aqui, pero
@@ -2147,7 +2164,7 @@ std::string codigo_bind_cuerpo(const std::string& nombre_param, const std::strin
     s += "    }\n";
     s += "    if (!" + cuerpo_var + ".is_dict()) {\n";
     s += "        Value::Dict __d;\n";
-    s += "        __d[\"error\"] = Value::str(\"Validacion fallida\");\n";
+    s += "        __d[\"error\"] = Value::str(\"Validation failed\");\n";
     s += "        Value::List __l;\n";
     s += "        __l.push_back(Value::str(\"the body must be a JSON object\"));\n";
     s += "        __d[\"messages\"] = Value::list(std::move(__l));\n";
@@ -2239,7 +2256,7 @@ std::string codigo_bind_cuerpo(const std::string& nombre_param, const std::strin
     // ese manejador y deja pasar la de aqui) ya los lleve bien.
     s += "        lux_script::last_validation_messages() = " + msgs_var + ";\n";
     s += "        Value::Dict __d;\n";
-    s += "        __d[\"error\"] = Value::str(\"Validacion fallida\");\n";
+    s += "        __d[\"error\"] = Value::str(\"Validation failed\");\n";
     s += "        Value::List __l;\n";
     s += "        for (const auto& __m : " + msgs_var + ") __l.push_back(Value::str(__m));\n";
     s += "        __d[\"messages\"] = Value::list(std::move(__l));\n";
@@ -2420,19 +2437,32 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // mismo hilo. Barato: un vector vacio no reasigna memoria al
     // limpiarse.
     cuerpo += "    lux_script::last_validation_messages().clear();\n";
+    // Parsed at most once per request, only if some query-style parameter
+    // below actually needs it (req.form() itself is cheap when the
+    // content-type is not application/x-www-form-urlencoded -- it returns
+    // {} without touching the body -- but re-parsing the same body once per
+    // parameter is not). Mirrors prepare_args()'s identical lazy
+    // `form_data` (project.cpp, the bytecode backend): without this, a
+    // plain HTML <form method=post> (its DEFAULT enctype IS urlencoded, not
+    // multipart) posting to a native route with a string/int/bool
+    // parameter left it "absent" -- a 422 after the fix a few lines below
+    // this one -- even though req.form() read the field correctly the
+    // whole time.
+    cuerpo += "    std::optional<std::unordered_map<std::string, std::string>> l_form_data;\n";
     // Fase 5.5/5.6: equivalentes locales, para toda la duracion de esta
     // peticion, de NativeCtx::pinned_workers/last_exec_workers --
     // lux_script::await_db() (db.hpp) los toma por referencia para fijar
     // una consulta a la misma conexion que abrio una transaccion (begin(),
     // ver Comprobador::usa_transaccion()) o que hizo el ultimo exec() (para
-    // que last_id() lea la conexion correcta); rollback_pendientes_db()
+    // que last_id() lea la conexion correcta); rollback_pending_db()
     // (llamada desde ret_vacio()/el 204 implicito, ver esos comentarios)
     // los consulta al final para cerrar lo que el handler haya dejado
     // abierto. Declarados siempre que la ruta es asincrona, se usen o no:
     // mas simple que detectar de antemano si el cuerpo de verdad toca una
     // base de datos, y el coste de un std::map vacio es insignificante.
     if (asincrona)
-        cuerpo += "    std::map<std::string, int> l_pinned_workers, l_last_exec_workers;\n";
+        cuerpo += "    std::map<std::string, int> l_pinned_workers, l_last_exec_workers;\n"
+                  "    std::set<std::string> l_poisoned_db;\n";
     for (const auto& p : params) {
         if (p.es_cuerpo) {
             cuerpo += codigo_bind_cuerpo(p.nombre, p.tipo.class_name(), *p.clase, gen);
@@ -2445,6 +2475,16 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         cuerpo += "        auto it = " + mapa + ".find(" + literal_string(p.nombre) + ");\n";
         cuerpo += "        bool presente = it != " + mapa + ".end();\n";
         cuerpo += "        std::string raw = presente ? it->second : std::string();\n";
+        // Query-style param not in the query string either: try an
+        // application/x-www-form-urlencoded body field before giving up.
+        // See l_form_data's own comment above for why this is lazy.
+        if (!p.en_path) {
+            cuerpo += "        if (!presente) {\n";
+            cuerpo += "            if (!l_form_data) l_form_data = req.form();\n";
+            cuerpo += "            auto fit = l_form_data->find(" + literal_string(p.nombre) + ");\n";
+            cuerpo += "            if (fit != l_form_data->end()) { raw = fit->second; presente = true; }\n";
+            cuerpo += "        }\n";
+        }
         // Ausente pero con valor por defecto: se trata como SI hubiera
         // llegado ese texto -- exactamente lo que hace prepare_args()
         // (project.cpp) antes de llamar a coerce(), asi que un defecto mal
@@ -2453,18 +2493,43 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         if (p.con_defecto)
             cuerpo += "        if (!presente) { raw = " + literal_string(p.texto_defecto) +
                       "; presente = true; }\n";
+        // An HTML number/date input left blank submits its name with an
+        // EMPTY value (`?page=`), not omitted -- indistinguishable from
+        // "presente" above, and no non-string type has a valid empty-text
+        // spelling to coerce. See the identical fix's comment in
+        // prepare_args() (project.cpp, the bytecode backend).
+        if (p.con_defecto && p.tipo.kind() != Type::Kind::String)
+            cuerpo += "        if (presente && raw.empty()) { raw = " +
+                      literal_string(p.texto_defecto) + "; }\n";
+        // A scalar/string param with no `= default` and no value in the
+        // request is a 422, the same as a missing File or a missing class-
+        // body field -- NOT the type's zero value ("", false, 0) filled in
+        // silently, which is what this used to do. See the identical fix's
+        // comment in prepare_args() (project.cpp, the bytecode backend):
+        // GUIDE.md's parameter table presents `= value` as the only way to
+        // make a parameter optional, so one declared without it was always
+        // meant to be required.
+        const std::string emitir_422_requerido =
+            "            Value::Dict __d;\n"
+            "            __d[\"error\"] = Value::str(\"Validation failed\");\n"
+            "            Value::List __m; __m.push_back(Value::str(" +
+            literal_string(p.nombre + ": required") + "));\n"
+            "            __d[\"messages\"] = Value::list(std::move(__m));\n"
+            "            res.status(422).header(\"Content-Type\", "
+            "\"application/json; charset=utf-8\")"
+            ".send(Value::dict(std::move(__d)).to_json_text());\n"
+            "            " + gen.ret_vacio() + "\n";
         if (p.tipo.kind() == Type::Kind::String) {
-            cuerpo += "        " + nombre + " = raw;\n";
+            cuerpo += "        if (!presente) {\n" + emitir_422_requerido +
+                      "        } else {\n";
+            cuerpo += "            " + nombre + " = raw;\n";
+            cuerpo += "        }\n";
         } else {
-            const std::string cero = p.tipo.kind() == Type::Kind::Bool   ? "false"
-                                    : p.tipo.kind() == Type::Kind::Float ? "0.0"
-                                                                          : "0";
             const std::string fn = p.tipo.kind() == Type::Kind::Bool   ? "lux_route_coerce_bool"
                                   : p.tipo.kind() == Type::Kind::Float ? "lux_route_coerce_float"
                                                                         : "lux_route_coerce_int";
-            cuerpo += "        if (!presente) {\n";
-            cuerpo += "            " + nombre + " = " + cero + ";\n";
-            cuerpo += "        } else if (!" + fn + "(raw, " + nombre + ")) {\n";
+            cuerpo += "        if (!presente) {\n" + emitir_422_requerido +
+                      "        } else if (!" + fn + "(raw, " + nombre + ")) {\n";
             cuerpo += "            Value::Dict __d;\n";
             cuerpo += "            __d[\"error\"] = Value::str(\"invalid parameter\");\n";
             cuerpo += "            __d[\"param\"] = Value::str(" + literal_string(p.nombre) + ");\n";
@@ -2495,12 +2560,27 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // `return`. Si la ruta demostro un begin() en algun punto, necesita el
     // mismo cierre de transaccion que cualquier otra salida.
     if (asincrona && comprobador.usa_transaccion())
-        cuerpo += "    co_await lux_script::rollback_pendientes_db(l_pinned_workers, req.loop);\n";
+        cuerpo += "    co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop);\n";
     cuerpo += "    res.status(204).send(\"\");\n";
     cuerpo += "    } catch (const LuxNativeError&) {\n";
     cuerpo += "        Value::Dict __e;\n";
-    cuerpo += "        __e[\"error\"] = Value::str(lux_native_error_message());\n";
-    cuerpo += "        __e[\"en\"] = Value::str(" + donde + ");\n";
+    // is_production_mode() (natives.hpp) -- same function bytecode's own
+    // 500 body checks (project.cpp), so the two backends can never disagree
+    // about whether a deployment's runtime errors leak their own message
+    // and source location to the client. See its comment for why.
+    //
+    // last_internal_error() (natives.hpp) mirrors project.cpp's identical
+    // assignment: without it, `error.message` in a user's `on error
+    // 500`/`on error` handler was hardcoded to "internal error" in
+    // main.cpp regardless of this branch even running -- --native's
+    // runtime errors never reached it at all.
+    cuerpo += "        lux_script::last_internal_error() = lux_native_error_message();\n";
+    cuerpo += "        if (lux_script::is_production_mode()) {\n";
+    cuerpo += "            __e[\"error\"] = Value::str(\"Internal Server Error\");\n";
+    cuerpo += "        } else {\n";
+    cuerpo += "            __e[\"error\"] = Value::str(lux_native_error_message());\n";
+    cuerpo += "            __e[\"at\"] = Value::str(" + donde + ");\n";
+    cuerpo += "        }\n";
     cuerpo += "        res.status(500).header(\"Content-Type\", \"application/json; charset=utf-8\")"
               ".send(Value::dict(std::move(__e)).to_json_text());\n";
     cuerpo += "    }\n";
@@ -2698,13 +2778,18 @@ std::string string_runtime_prelude() {
         "static bool lux_str_contains(const std::string& s, const std::string& n) {\n"
         "    return s.find(n) != std::string::npos;\n"
         "}\n"
-        "static std::string lux_str_upper(std::string s) {\n"
-        "    for (char& c : s) c = static_cast<char>(::toupper((unsigned char)c));\n"
-        "    return s;\n"
+        // lux_script::utf8_upper/lower (value.hpp, already included -- see
+        // this file's header comment) is called directly rather than
+        // reimplemented here, the same as lux_json_len() calls
+        // lux_script::utf8_length(): a second, ASCII-only copy of case
+        // conversion here would silently diverge from bytecode's (fn_len,
+        // natives.cpp) the moment either one changed -- the exact class of
+        // bug this codebase's own comments repeatedly call out.
+        "static std::string lux_str_upper(const std::string& s) {\n"
+        "    return lux_script::utf8_upper(s);\n"
         "}\n"
-        "static std::string lux_str_lower(std::string s) {\n"
-        "    for (char& c : s) c = static_cast<char>(::tolower((unsigned char)c));\n"
-        "    return s;\n"
+        "static std::string lux_str_lower(const std::string& s) {\n"
+        "    return lux_script::utf8_lower(s);\n"
         "}\n"
         "static std::string lux_str_trim(const std::string& s) {\n"
         "    size_t a = s.find_first_not_of(\" \\t\\r\\n\");\n"
@@ -2771,7 +2856,7 @@ std::string list_runtime_prelude() {
     // lux_get/lux_set comprueban el indice con lux_native_fail() en
     // vez de comportamiento indefinido -- el mismo canal de error que ya
     // usan division/modulo, con el mismo formato de mensaje que GetIndex/
-    // SetIndex en vm.cpp ("indice fuera de rango: N (tamano M)").
+    // SetIndex en vm.cpp ("index out of range: N (size M)").
     //
     // La guia de deduccion permite escribir `LList{1LL, 2LL, 3LL}` sin
     // template argument explicito (Generador::expr, caso ListLit): el
@@ -2805,14 +2890,14 @@ std::string list_runtime_prelude() {
         "    int64_t lux_len() const { return (int64_t)b_->v.size(); }\n"
         "    T lux_get(int64_t i) const {\n"
         "        if (i < 0 || i >= (int64_t)b_->v.size())\n"
-        "            lux_native_fail(\"indice fuera de rango: \" + std::to_string(i) +\n"
-        "                              \" (tamano \" + std::to_string(b_->v.size()) + \")\");\n"
+        "            lux_native_fail(\"index out of range: \" + std::to_string(i) +\n"
+        "                              \" (size \" + std::to_string(b_->v.size()) + \")\");\n"
         "        return b_->v[(size_t)i];\n"
         "    }\n"
         "    void lux_set(int64_t i, T x) const {\n"
         "        if (i < 0 || i >= (int64_t)b_->v.size())\n"
-        "            lux_native_fail(\"indice fuera de rango: \" + std::to_string(i) +\n"
-        "                              \" (tamano \" + std::to_string(b_->v.size()) + \")\");\n"
+        "            lux_native_fail(\"index out of range: \" + std::to_string(i) +\n"
+        "                              \" (size \" + std::to_string(b_->v.size()) + \")\");\n"
         "        b_->v[(size_t)i] = std::move(x);\n"
         "    }\n"
         "    LList lux_add(T x) const { b_->v.push_back(std::move(x)); return *this; }\n"
@@ -2913,9 +2998,13 @@ std::string route_runtime_prelude() {
         "        return pos == t.size();\n"
         "    } catch (...) { return false; }\n"
         "}\n"
+        // "on"/"off": what HTML actually sends for a checkbox (see the
+        // identical fix's comment on coerce(), project.cpp -- the bytecode
+        // backend -- for why "true"/"1" alone left every checked <input
+        // type="checkbox"> 400ing).
         "inline bool lux_route_coerce_bool(const std::string& t, bool& out) {\n"
-        "    if (t == \"true\" || t == \"1\")  { out = true;  return true; }\n"
-        "    if (t == \"false\" || t == \"0\") { out = false; return true; }\n"
+        "    if (t == \"true\" || t == \"1\" || t == \"on\")  { out = true;  return true; }\n"
+        "    if (t == \"false\" || t == \"0\" || t == \"off\") { out = false; return true; }\n"
         "    return false;\n"
         "}\n"
         // El puente a Value para el valor de retorno de una ruta cuando ya
@@ -2965,9 +3054,9 @@ std::string route_runtime_prelude() {
         "inline Value lux_json_add(const Value& a, const Value& b) {\n"
         "    if (a.is_str() && b.is_str()) return Value::str(a.as_str() + b.as_str());\n"
         "    if (a.is_str() || b.is_str())\n"
-        "        lux_native_fail(std::string(\"no se puede sumar \") + a.type_name() + \" y \" +\n"
+        "        lux_native_fail(std::string(\"cannot add \") + a.type_name() + \" and \" +\n"
         "                          b.type_name() +\n"
-        "                          \"; para concatenar usa str(): \\\"...\\\" + str(x)\");\n"
+        "                          \"; to concatenate use str(): \\\"...\\\" + str(x)\");\n"
         "    if (lux_json_numeric_pair(a, b)) {\n"
         "        if (a.is_int() && b.is_int()) return Value::integer(a.as_int() + b.as_int());\n"
         "        return Value::real(a.as_float() + b.as_float());\n"
@@ -2977,16 +3066,16 @@ std::string route_runtime_prelude() {
         "        for (const auto& v : b.as_list()) out.push_back(v);\n"
         "        return Value::list(std::move(out));\n"
         "    }\n"
-        "    lux_native_fail(std::string(\"no se puede sumar \") + a.type_name() + \" y \" +\n"
+        "    lux_native_fail(std::string(\"cannot add \") + a.type_name() + \" and \" +\n"
         "                      b.type_name());\n"
         "}\n"
         "inline Value lux_json_arit(const Value& a, const Value& b, char op) {\n"
         "    if (!lux_json_numeric_pair(a, b))\n"
-        "        lux_native_fail(std::string(\"operacion aritmetica entre \") + a.type_name() +\n"
-        "                          \" y \" + b.type_name());\n"
+        "        lux_native_fail(std::string(\"arithmetic between \") + a.type_name() +\n"
+        "                          \" and \" + b.type_name());\n"
         "    bool ints = a.is_int() && b.is_int();\n"
         "    if (op == '%') {\n"
-        "        if (!ints) lux_native_fail(\"'%' solo aplica a enteros\");\n"
+        "        if (!ints) lux_native_fail(\"'%' only applies to integers\");\n"
         "        if (b.as_int() == 0) lux_native_fail(\"modulo by zero\");\n"
         "        return Value::integer(a.as_int() % b.as_int());\n"
         "    }\n"
@@ -3015,7 +3104,7 @@ std::string route_runtime_prelude() {
         "        int c = a.as_str().compare(b.as_str());\n"
         "        return c < 0 ? -1 : (c > 0 ? 1 : 0);\n"
         "    }\n"
-        "    lux_native_fail(std::string(\"no se pueden comparar \") + a.type_name() + \" y \" +\n"
+        "    lux_native_fail(std::string(\"cannot compare \") + a.type_name() + \" and \" +\n"
         "                      b.type_name());\n"
         "}\n"
         "inline bool lux_json_lt(const Value& a, const Value& b) { return lux_json_compare(a, b) < 0; }\n"
@@ -3032,12 +3121,12 @@ std::string route_runtime_prelude() {
         "    if (obj.is_list()) {\n"
         "        auto& l = obj.as_list();\n"
         "        if (idx < 0 || idx >= (int64_t)l.size())\n"
-        "            lux_native_fail(\"indice fuera de rango: \" + std::to_string(idx) +\n"
-        "                              \" (tamano \" + std::to_string(l.size()) + \")\");\n"
+        "            lux_native_fail(\"index out of range: \" + std::to_string(idx) +\n"
+        "                              \" (size \" + std::to_string(l.size()) + \")\");\n"
         "        return l[(size_t)idx];\n"
         "    }\n"
-        "    if (obj.is_dict()) lux_native_fail(\"la clave de un Dict tiene que ser string\");\n"
-        "    lux_native_fail(std::string(\"no se puede indexar \") + obj.type_name());\n"
+        "    if (obj.is_dict()) lux_native_fail(\"a Dict key must be a string\");\n"
+        "    lux_native_fail(std::string(\"cannot index \") + obj.type_name());\n"
         "}\n"
         "inline Value lux_json_index_str(const Value& obj, const std::string& key) {\n"
         "    if (obj.is_dict()) {\n"
@@ -3045,23 +3134,23 @@ std::string route_runtime_prelude() {
         "        auto it = d.find(key);\n"
         "        return it == d.end() ? Value::null() : it->second;\n"
         "    }\n"
-        "    if (obj.is_list()) lux_native_fail(\"el indice de una List tiene que ser int\");\n"
-        "    lux_native_fail(std::string(\"no se puede indexar \") + obj.type_name());\n"
+        "    if (obj.is_list()) lux_native_fail(\"a List index must be an int\");\n"
+        "    lux_native_fail(std::string(\"cannot index \") + obj.type_name());\n"
         "}\n"
         // len()/int() sobre un Json -- mismas reglas que fn_len/fn_int
         // (natives.cpp).
         "inline int64_t lux_json_len(const Value& v) {\n"
-        "    if (v.is_str())  return (int64_t)v.as_str().size();\n"
+        "    if (v.is_str())  return (int64_t)lux_script::utf8_length(v.as_str());\n"
         "    if (v.is_list()) return (int64_t)v.as_list().size();\n"
         "    if (v.is_dict()) return (int64_t)v.as_dict().size();\n"
-        "    lux_native_fail(std::string(\"len() no aplica a \") + v.type_name());\n"
+        "    lux_native_fail(std::string(\"len() does not apply to \") + v.type_name());\n"
         "}\n"
         "inline int64_t lux_json_as_int(const Value& v) {\n"
         "    if (v.is_int())   return v.as_int();\n"
         "    if (v.is_float()) return (int64_t)v.as_float();\n"
         "    if (v.is_bool())  return v.as_bool() ? 1 : 0;\n"
         "    if (v.is_str())   return lux_str_to_int(v.as_str());\n"
-        "    lux_native_fail(std::string(\"int() no aplica a \") + v.type_name());\n"
+        "    lux_native_fail(std::string(\"int() does not apply to \") + v.type_name());\n"
         "}\n"
         // Fase 5.10: List<Json>.add(x) -- call_method() (natives.cpp,
         // rama recv.is_list()) hace exactamente esto: push_back en sitio,

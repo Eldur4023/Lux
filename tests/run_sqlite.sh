@@ -42,7 +42,7 @@ stop_server() {
     wait "$SRV" 2>/dev/null
     SRV=""
 }
-trap 'stop_server; rm -rf "$TMP" "$HERE/../tests-sqlite-types.db"* 2>/dev/null' EXIT
+trap 'stop_server; rm -rf "$TMP" "$HERE/cases/tests-sqlite-types.db"* 2>/dev/null' EXIT
 
 if ! "$LUX" --check "$HERE/cases/sqlite.lux" > "$TMP/check" 2>&1; then
     if grep -q "sqlite" "$TMP/check" && grep -q "import" "$TMP/check"; then
@@ -80,9 +80,9 @@ json_valid() {
     fi
 }
 
-rm -f "$HERE/../tests-sqlite-types.db"*
+rm -f "$HERE/cases/tests-sqlite-types.db"*
 
-echo "== arranque =="
+echo "== startup =="
 cd "$HERE/.."
 "$LUX" --no-watch --port "$PORT" "$HERE/cases/sqlite.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
@@ -96,13 +96,13 @@ curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/__ping__" || {
 ok "starts and connects"
 check "creates the schema" GET /create 200 '"ok":true'
 
-echo "== lectura =="
+echo "== reading =="
 check "select without parameters" GET /all      200 '"title":"long"'
 check "select with a parameter"  GET /one/1      200 '"author":"Ana"'
 check "missing row"    GET /one/99999  404
 
 echo "== long text =="
-check "4000-byte text" GET /length 200 '"recibido":4000'
+check "4000-byte text" GET /length 200 '"received":4000'
 
 echo "== types =="
 check "integer maximum"  GET /types 200 '"t_int":9223372036854775807'
@@ -120,7 +120,7 @@ check "the driver returns the 5 bytes" GET /null_in_text 200 '"bytes":5'
 check "sqlite's length() stops at the null" GET /null_in_text 200 '"up_to_null":1'
 json_valid "and the JSON stays valid" /null_in_text
 
-echo "== affinity de types =="
+echo "== type affinity =="
 # sqlite does not enforce the declared type: an integer column can hold text, and
 # what comes out has to be what IS THERE, not what the declaration says.
 check "text in an integer column" GET /affinity 200 '"type":"text"'
@@ -129,7 +129,7 @@ check "integer in the same one"       GET /affinity 200 '"type":"integer"'
 echo "== infinite =="
 json_valid "an infinity does not break the JSON" /infinite
 
-echo "== cache de sentencias =="
+echo "== statement cache =="
 # The same query is prepared once and reused: if the bindings were not cleared
 # on reuse, the second call would return the result of the first
 # one.
@@ -140,11 +140,11 @@ check "fourth, missing id"     GET /repeated/9999 200 '"title":null'
 check "same query with null"      GET /optional 200 '"n":0'
 check "same query with a value"     GET '/optional?author=Ana' 200 '"n":1'
 
-echo "== unicode e injection =="
+echo "== unicode and injection =="
 check "unicode in the bind"      GET /unicode 200 'unicode'
-check "quote in the parameter" GET "/injection?q=x'%20OR%20'1'='1" 200 '"encontrados":0'
+check "quote in the parameter" GET "/injection?q=x'%20OR%20'1'='1" 200 '"found":0'
 
-echo "== escritura =="
+echo "== writing =="
 check "insert and last_id" POST /add/probing 201 '"id"'
 check "delete"           POST /delete_row/99999   200 '"rows":0'
 

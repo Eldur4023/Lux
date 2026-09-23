@@ -1,6 +1,8 @@
 #pragma once
+#include <cstdlib>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -13,6 +15,31 @@ struct MultipartPart;
 }
 
 namespace lux_script {
+
+// A runtime error (division by zero, index out of range, a type mismatch
+// the checker could not rule out statically) is answered as a 500 whose
+// body used to always include the raw error message AND the exact
+// file:line:col it happened at (project.cpp's bytecode routes,
+// native_gen.cpp's generated ones) -- useful while developing, but a real
+// deployment leaking its own source layout and internal error text to
+// whoever sent the request that triggered it is the kind of thing this
+// project's own SECURITY-AUDIT.md exists to catch. Both places check this
+// ONE function instead of duplicating the decision, so bytecode and
+// --native can never disagree about which mode a deployment is in --
+// exactly the divergence this codebase's own comments repeatedly call out
+// as the class of bug to design away, not just fix once found.
+//
+// LUX_ENV=production opts in explicitly, the same convention NODE_ENV/
+// RAILS_ENV/etc. use -- checked, not assumed, once per call (cheap: one
+// getenv() and a string compare) so a test harness that sets/unsets it
+// between runs never sees a stale cached answer. Full detail stays in the
+// server's own log either way (lux::log().error(...) already runs before
+// either branch decides what the CLIENT sees); this only ever narrows what
+// leaves the process, never what an operator can see.
+inline bool is_production_mode() {
+    const char* env = std::getenv("LUX_ENV");
+    return env && std::string(env) == "production";
+}
 
 // Context the VM passes to the builtins: it is the layer-2 bridge, where the
 // bytecode reaches the native engine.
@@ -69,6 +96,12 @@ struct NativeCtx {
     // through that SAME connection: the generated identifier does not exist on
     // the others.
     std::map<std::string, int> last_exec_workers;
+
+    // Modules whose CURRENT transaction already had a statement fail. See
+    // the comment on `poisoned` in db.hpp's await_db() -- commit() on a
+    // poisoned module rolls back instead of committing, and every other
+    // call refuses outright until rollback()/commit() closes it.
+    std::set<std::string> poisoned_db;
 
     // Multipart parts already parsed.  A File in the language keeps the index
     // of its part here, not the bytes: copying a File is copying an int.
@@ -137,9 +170,9 @@ struct BuiltinMethod {
     int         max_args;
     // Type of the result, or nullptr if it returns the receiver itself —which
     // is what the chainable ones do: .status(), .add()...—.  Knowing it allows
-    // checking to continue past the dot: s.upper().recortar() also fails at
+    // checking to continue past the dot: s.upper().trim() also fails at
     // compile time.
-    const char* devuelve;
+    const char* return_type;
 };
 
 // The methods that exist for a Lux Script type: "string", "int", "List", ...
@@ -158,6 +191,22 @@ bool             is_db_module(const std::string& name);
 // building the 422 and read by the `on error` handler of the same request;
 // there is no suspension between the two moments, so requests cannot cross.
 std::vector<std::string>& last_validation_messages();
+
+// The real message of the last runtime error (division by zero, index out
+// of range, ...) on this thread -- same idea and same one-request lifetime
+// as last_validation_messages() above, filled right before the route's own
+// 500 body is written (project.cpp's bytecode routes, native_gen.cpp's
+// generated ones) and read by app.on_error() (main.cpp) to fill
+// `error.message` in a user-declared `on error 500`/`on error` handler.
+// Before this existed, `error.message` there was hardcoded to the string
+// "internal error" UNCONDITIONALLY -- not gated by is_production_mode() at
+// all -- so GUIDE.md's own example (`log.error(error.message)`) never
+// logged anything a developer could use to find the actual bug, even
+// outside production. Still gated by is_production_mode() at the one
+// place that reads it (main.cpp), same as the raw 500 body already is:
+// this function always holds the real message, but production mode never
+// looks at it.
+std::string& last_internal_error();
 const NativeDef& native_at(int id);
 int              native_count();
 

@@ -92,9 +92,11 @@ Route parameters are filled in by type (an `:id` of type `int` → `1`), and wit
 work on every reload, so by default only `GET`, `HEAD` and `SSE` are walked. Including the
 rest is a decision of whoever launches the binary, not of the binary.
 
-The watcher watches exactly the set that was compiled. On save, it recompiles and replaces
-the module. **If the new file does not compile, the previous one keeps serving** and the
-error is printed with file, line and column.
+The watcher watches the set that was compiled, plus every file under the templates
+directory (`app: templates "..."`), so editing a `.html` reloads the same way editing a
+`.lux` does. On save, it recompiles and replaces the module. **If the new file does not
+compile, the previous one keeps serving** and the error is printed with file, line and
+column.
 
 ---
 
@@ -171,26 +173,75 @@ app:
 ```
 
 `env("VAR")` is resolved **at compile time**. It is how a secret avoids ending up written in
-the `.lux`.
+the `.lux` — `port` accepts it too (`port env("PORT")`), which is how Railway, Render, Fly.io,
+Heroku and most other platforms assign the listen port at deploy time, leaving the app no
+choice in the number. `--port N` on the command line overrides whatever `port` resolves to,
+literal or `env(...)`.
 
-`spa` on a static mount makes routes that are not found fall back to `index.html`.
+A relative path here (`templates`, a static mount's directory, a `sqlite:`/etc. module's
+`file`) resolves against the directory of the `.lux` file that has the `app:` block, not
+against wherever the `lux` process happens to be launched from — so `lux /srv/blog/app.lux`
+from a cron job, a systemd unit with no `WorkingDirectory=`, or any other directory still
+finds `/srv/blog/templates` and opens `/srv/blog/blog.db`, not a same-named one relative to
+whatever directory that launcher happened to start in (which, for a database file, means
+silently creating and using an empty one — no error, since a missing sqlite file is normally
+just a fresh database). An absolute path, or one built from `env(...)`, is never touched.
+
+`spa` on a static mount makes routes that are not found fall back to `index.html`. A directory
+request (`/docs` or `/docs/`) serves that directory's own `index.html` if it has one, same as
+any other static file server — not the mount's root page. `index.html` itself is always sent
+with `Cache-Control: no-cache` (an ETag revalidation on every load — one cheap 304, not a full
+re-download), so a deploy that publishes new hashed asset names is picked up immediately
+instead of up to an hour later; every other file keeps the usual long cache once its name
+contains a content hash.
+
+Because `spa` matches EVERY path nothing else claims, it also swallows a typo'd or genuinely
+missing endpoint under an API prefix — `fetch('/api/typo')` gets `index.html` back with a
+`200`, not a `404`, which surfaces client-side as an unrelated JSON-parse error. Reserve the
+prefix explicitly if you serve both an API and an SPA from the same app:
+
+```lux
+any endpoint("/api/*"):
+    return status(404)
+```
+
+A real route always wins over BOTH the SPA fallback and this catch-all, since routes are
+matched before falling back to static files at all — this only catches what neither matched.
 
 ---
 
 ## 4. Routes
 
 ```lux
-get    endpoint("/path"):
-post   endpoint("/path"):
-put    endpoint("/path"):
-patch  endpoint("/path"):
-delete endpoint("/path"):
-any    endpoint("/path"):
-sse    endpoint("/path"):                       # event stream
-ws     endpoint("/path") origins("https://x"):  # WebSocket
+get     endpoint("/path"):
+post    endpoint("/path"):
+put     endpoint("/path"):
+patch   endpoint("/path"):
+delete  endpoint("/path"):
+options endpoint("/path"):                      # CORS preflight
+any     endpoint("/path"):
+sse     endpoint("/path"):                      # event stream
+ws      endpoint("/path") origins("https://x"):  # WebSocket
 ```
 
 Patterns: `/users/:id`, `/users/{id}`, `/files/*`.
+
+There is no CORS middleware: Lux has no middleware layer at all by design (delegated to the
+reverse proxy, see §17), so a cross-origin caller (a mobile app, another backend, a browser
+extension -- not a separate JS frontend, which Lux's own templates make unnecessary) needs
+the usual two things spelled out by hand. The actual
+response needs the header on every request, not only during the preflight:
+
+```lux
+options endpoint("/api/*"):
+    return status(204)
+        .header("Access-Control-Allow-Origin", "https://example.com")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+
+get endpoint("/api/hello"):
+    return { "hi": true }.header("Access-Control-Allow-Origin", "https://example.com")
+```
 
 ### The two route levels
 
@@ -228,6 +279,7 @@ get endpoint("/users/:id", int id, int page = 1, string q):
 | A name that does not appear | Query string |
 | `= value` | Default value if missing from the query |
 | A type that is a `class` | JSON body, with validation |
+| `Json` | JSON body, unvalidated -- any shape, including a top-level array |
 | `File` / `List<File>` | Multipart parts |
 
 Scalar types: `int`, `long`, `float`, `double`, `bool`, `string`.
@@ -239,6 +291,37 @@ A value that does not fit its type is a **400**, not an exception:
 
 ```json
 {"error":"invalid parameter","expected":"int","param":"id","received":"abc"}
+```
+
+A query parameter with no `= value` is required: missing it entirely is a **422**, the same
+as a missing `File` or a missing field of a class body, not the type's zero value (`""`,
+`false`, `0`) filled in silently:
+
+```json
+{"error":"Validation failed","messages":["q: required"]}
+```
+
+An `int`/`float`/`bool` query or form parameter that IS present but empty (`?page=`, an
+`<input type="number">` left blank) falls back to `= value` instead of a 400: there is no
+valid empty spelling of a number or a boolean to reject, and this is the ordinary way a
+browser submits "nothing was entered" for one. A `bool` parameter also accepts `"on"`/`"off"`
+alongside `"true"`/`"false"`/`"1"`/`"0"`, since `"on"` is the literal value an HTML
+`<input type="checkbox">` sends when checked and given no explicit `value=`.
+
+`request.body` holds the raw, unparsed request body as a `string`, whatever the
+`Content-Type`. Use it instead of a `class` body parameter when the shape is not fixed
+(`Json`, for a body you only need to pass through or index dynamically) or when you need the
+exact bytes the client sent — a class body parameter re-serializes what it parsed, which is
+not byte-identical to the original and breaks a webhook's HMAC signature check
+(Stripe/GitHub/etc. sign the bytes on the wire, not your interpretation of them):
+
+```lux
+post endpoint("/webhooks/stripe"):
+    string sig = header("Stripe-Signature")
+    if not hash.hmac_sha256(webhook_secret, request.body) == sig:
+        return status(400)
+    Json event = json.parse(request.body)
+    return { "ok": true }
 ```
 
 ---
@@ -524,6 +607,17 @@ post endpoint("/logout"):
     return redirect("/")
 ```
 
+`session.clear()` tells the BROWSER to drop the cookie (a `Set-Cookie` that expires it
+immediately) — it does not, and structurally cannot, invalidate a COPY of the old cookie taken
+before logout (saved by other software, replayed from a proxy log, lifted via a
+vulnerability elsewhere in a page). There is no server-side session store to revoke an entry
+in (that is the whole design, see above): the signature alone is what a request is checked
+against, and a signature stays valid until its own `exp`, logout or not. Keep `max_age` only
+as long as the session actually needs to live, and put anything that truly must be
+revocable-on-demand (a password reset, a banned user) behind a check against real data —
+`state.*` or a database row keyed by user id, consulted alongside the session, not instead of
+it.
+
 `session.<whatever>` accepts any name: it is a store, not an object with fixed fields. A
 field that does not exist is `null`.
 
@@ -533,6 +627,14 @@ field that does not exist is `null`.
 - The content is **signed but not encrypted**: the user can read it, they just cannot forge
   it. Do not keep anything there they should not see.
 - An invalid signature leaves the session empty, never half-filled.
+- **Everything you put in `session` has to fit inside the cookie**, since there is no
+  server-side store behind it — unlike a session id that looks up a row somewhere. Real
+  browsers drop a cookie over ~4096 bytes silently: no error, the next request just comes back
+  with an empty session. Past that size, a server log line (`WARN session cookie is N bytes,
+  over the 4096-byte limit...`) says so — the one place this can be caught, since neither the
+  request that grew it nor the one that lost it sees anything wrong on its own. A shopping
+  cart or any other collection that grows with use is the usual way to hit it; store an id and
+  look the data up server-side (a database row, `state.*`) once it does.
 
 ---
 
@@ -873,15 +975,20 @@ It lives in process memory: it is lost on restart, and is not shared between mac
 post endpoint("/avatar", File image):
     require image.content_type.starts_with("image/") else status(415)
     require image.size <= 5 * 1024 * 1024             else status(413)
-    string name = image.save("./uploads")
+    string name = image.save("./public/uploads")
     return { "url": "/static/uploads/" + name }
 
 post endpoint("/gallery", List<File> photos):
     List<string> names = []
     for File f in photos:
-        names.add(f.save("./uploads"))
+        names.add(f.save("./public/uploads"))
     return { "names": names }
 ```
+
+The saved-to directory and the returned URL have to agree with the same `static "..." -> "..."`
+mount (§3) for the URL to actually resolve — `save("./public/uploads")` above pairs with the
+`static "/static" -> "./public"` mount §3 shows, so `/static/uploads/<name>` is that same file.
+Saving into a directory no mount covers gives back a URL that 404s.
 
 A `File` has `name`, `filename`, `content_type` and `size`, plus the method
 `save(directory)`, which returns the name it was saved under.
@@ -1029,6 +1136,15 @@ Json  List<T>  Dict<K,V>  File  Func           native classes, uppercase
 `T?` marks that the value may be missing. Generics are **erased**: the checker verifies them
 and they disappear before the bytecode. There are no user-defined generic classes.
 
+Declaring a local as `int` or `float` coerces the initializer to match, the one case where
+that actually matters: `/` between two `int`s gives an `int` when the division is exact and
+a `float` otherwise, decided at runtime, so `int pages = total / per` truncates toward zero
+(2.5 becomes 2) instead of silently holding a `float` that only breaks something several
+lines later. A `float` local similarly promotes an `int` initializer (`float f = 10` holds
+`10.0`). This applies to the initializer only — reassigning an existing local (`x = "text"`
+over an `int x`) still runs with the same fully dynamic semantics as everywhere else in the
+language.
+
 ### Enums
 
 ```lux
@@ -1173,7 +1289,7 @@ string role = age >= 18 ? "adult" : "minor"
 
 | Object | Members | Where |
 |---|---|---|
-| `request` | `path` `method` `ip` | Any handler |
+| `request` | `path` `method` `ip` `body` | Any handler |
 | `session` | any field, `clear()` | Any handler |
 | `jwt` | `valid` `claims` | Any handler |
 | `state` | `incr` `decr` `get` `set` `remove` | Any handler |
@@ -1196,31 +1312,58 @@ asynchronous: they are called with `await`.
 | `Dict` | `has(key)` `keys()` `values()` `get(key[, default])` `remove(key)` `merge(other)` |
 | `File` | `save(directory)` |
 
-`index_of` is a byte offset, not a Unicode codepoint index — correct for ASCII and for
-multi-byte UTF-8 as long as a slice does not land mid-sequence. `slice` accepts negative
-indices (counted from the end, like Python) on both `string` and `List`; out-of-range bounds
-are clamped, not an error. `List.sort()` is natural order only (numbers ascending, strings
-lexicographic) — no custom-comparator form: `map`/`filter`/`reduce`/`for_each` are, for now,
-the only methods that take a function reference (§18) as an argument.
+`index_of` and `slice` work in byte offsets, not Unicode codepoints — correct for ASCII and for
+multi-byte UTF-8 as long as a slice does not land mid-sequence. `len(s)`, `upper()`, `lower()`,
+`split(s, "")` and `for c in s` are codepoint-aware, not byte-aware: `len("ñandú")` is `5`, and
+`"café".upper()` is `"CAFÉ"`. `upper`/`lower` cover ASCII, the Latin-1 Supplement, and Latin
+Extended-A — Spanish, French, German, Portuguese and most other Latin-script languages — but
+are not a complete Unicode case-conversion table; a codepoint outside that set passes through
+unchanged rather than being silently dropped or corrupted. `split(s, "")` (an empty separator)
+and `for c in s` both walk `s` one codepoint at a time — the only two ways to go
+character-by-character over a string, since there is no index-based single-character access.
+`slice` accepts negative indices (counted from the end, like Python) on both `string` and
+`List`; out-of-range bounds are clamped, not an error. `List.sort()` is natural order only
+(numbers ascending, strings lexicographic) — no custom-comparator form: `map`/`filter`/
+`reduce`/`for_each` are, for now, the only methods that take a function reference (§18) as an
+argument.
 
 When the receiver's type is known at compile time —a declared parameter, a typed variable, a
 literal— the name and the argument count are checked **there**, not at run time:
 
 ```
-error: values of type string have no method 'mayusculas';
+error: values of type string have no method 'uppercase';
        it has status, header, cookie, starts_with, ends_with, contains, upper, lower, trim
 ```
 
 The check continues down the chain, because every method knows what it returns:
-`s.upper().recortar()` also fails at compile time. The same goes for a class's fields:
-`p.noexiste` says which fields `p` has instead of silently returning `null`.
+`s.upper().trimm()` also fails at compile time. The same goes for a class's fields:
+`p.doesnotexist` says which fields `p` has instead of silently returning `null`.
 
 This reaches **inside the templates** too, because `render()` passes its argument types to
-the template compiler: `{{ who.mayusculas() }}` is a `lux --check` error, with the
+the template compiler: `{{ who.uppercase() }}` is a `lux --check` error, with the
 template's file and line.
 
 Where the type is not known —the variable of a `{% for %}`, a field of a `Json`— nothing is
 checked and dispatch stays at run time, as before.
+
+Because of this, **every `render()` call for a given template has to pass every variable that
+template references**, even one this particular call has no real use for — a `layout.html`
+included by several pages, with `{{ user }}` in its header, means every page that
+`{% include %}`s or `{% extends %}` it needs a `user=...` in ITS OWN `render()` call, not just
+the pages that actually show it:
+
+```lux
+get endpoint("/a"):
+    return render("page.html", title="A", user=current_user)   # fine
+
+get endpoint("/b"):
+    return render("page.html", title="B")                       # error: 'user' is not declared
+```
+
+Pass `null` for a page that genuinely has nothing to put there (`user=null`) rather than
+leaving it out — each `render()` call is checked independently against what IT supplies, the
+same as any other typed parameter, so there is no way for one call site to "inherit" a
+variable another call site happens to pass for the same file.
 
 ---
 
@@ -1333,22 +1476,33 @@ them usually needs an `<name>: { ... }` block in `app:` at all:
 - **`math`** — `abs`/`min`/`max`/`round`/`floor`/`ceil`/`sqrt`/`pow`/`log`, plus
   `random()` (`[0.0, 1.0)`) and `random_int(lo, hi)` (inclusive on both ends).
 - **`time`** — a timestamp is a plain `int` (milliseconds since the Unix epoch, UTC always, no
-  local timezone anywhere): `now()`/`now_seconds()`, `format(ms, strftime_fmt)`/`format_iso(ms)`,
+  server-local timezone anywhere): `now()`/`now_seconds()`,
+  `format(ms, strftime_fmt, utc_offset_minutes = 0)`/`format_iso(ms)`,
   `parse(s, strftime_fmt)`/`parse_iso(s)` — the last two are `null`, not an error, when `s`
-  does not match. Being a plain `int` means duration arithmetic ("5 minutes from now") is just
-  `time.now() + 5 * 60 * 1000` — the language's own `+` already does it, no method needed.
+  does not match. `format`'s optional 3rd argument is a fixed UTC offset applied before
+  formatting, for displaying local time without making the stored timestamp itself
+  timezone-dependent (`time.format(ms, "%H:%M", 60)` for CET). `parse_iso` accepts the common
+  real-world variations on ISO 8601, not one exact spelling: a date with no time
+  ("2026-09-23"), a space instead of `T` (what SQLite's `CURRENT_TIMESTAMP` produces),
+  milliseconds (`Date.toISOString()`'s own format), and an explicit `+HH:MM`/`-HHMM` offset in
+  place of `Z` — all normalized to UTC. Being a plain `int` means duration arithmetic ("5
+  minutes from now") is just `time.now() + 5 * 60 * 1000` — the language's own `+` already
+  does it, no method needed.
 - **`regex`** — `test(pattern, text)` (bool), `find`/`find_all` (first match / every match, as
   strings), `groups(pattern, text)` (a `List` — index 0 is the whole match, 1.. are capture
   groups — or `null` on no match), `replace(pattern, text, replacement)` (every match, `$1`/`$2`
-  backreferences), `split(pattern, text)`. ECMAScript syntax (`std::regex`'s default grammar) —
-  close enough to Python's `re` that most patterns copied from either work unchanged. Compiles
-  the pattern fresh on every call, no caching — fine for the microsecond-scale patterns most
-  routes need, a real (not yet addressed) repeated cost for a complex one reused very often.
-  **Every `regex.*` call rejects a `text` (subject) over 4096 bytes**, with a clear error —
-  `std::regex` recurses over the subject once per character, which a normal 8 MB thread stack
-  cannot survive much past ~30 000 characters even for a trivial pattern, far sooner with a
-  few nested capture groups; this is a deliberate, permanent guard against that crash, not a
-  bug to work around by raising the limit. Chop a long text into pieces yourself first — with
+  backreferences), `split(pattern, text)`. A deliberate ECMAScript-like SUBSET, not `std::regex`:
+  literals, `.`, `^$`, `[...]`/negation/ranges/`\d\w\s\D\W\S`, groups, `|`, `* + ? {n,m}` — no
+  non-capturing groups, lookaround, or backreferences inside the pattern itself (only in a
+  `replace()` replacement string). Its own engine (a Thompson-NFA/Pike-VM), specifically so
+  that running it on request data can never become a stack overflow or a multi-second stall:
+  every pattern runs in time proportional to `pattern size * subject size`, with no
+  exponential-blowup case for a "normal-looking" pattern to hit, unlike a backtracking engine.
+  Compiles the pattern fresh on every call, no caching — fine for the microsecond-scale
+  patterns most routes need, a real (not yet addressed) repeated cost for a complex one reused
+  very often. **Every `regex.*` call still rejects a `text` (subject) over 4096 bytes**, with a
+  clear error — a bound on a single call's cost is good hygiene even with a linear-time engine
+  underneath, not a workaround for a crash. Chop a long text into pieces yourself first — with
   `string.index_of()`/`string.slice()` (no length limit of their own), a line-by-line
   `string.split(text, "\n")`, or whatever structure the text already has — and run `regex.*`
   on each piece, not the whole thing at once.

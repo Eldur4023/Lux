@@ -65,11 +65,36 @@ private:
     bool cycle_pending_ = false;
 
     // ── Timeouts ──────────────────────────────────────────────────────────────
-    // kHeaderTimeoutMs: armed at construction; fires 408 if complete headers are
-    //   not received within this window (Slowloris defence).
-    //   Cancelled in dispatch() once headers are fully parsed.
-    // kRequestTimeoutMs: armed in dispatch(); fires 408 if handler + write take
-    //   too long.  Cancelled in on_write_complete().
+    // kHeaderTimeoutMs: armed at construction (and again after each response,
+    //   for the next keep-alive/pipelined request); fires 408 if complete
+    //   headers are not received within this window (Slowloris defence).
+    //   Cancelled in on_headers_complete() -- the llhttp callback that fires
+    //   the instant headers finish parsing, NOT in dispatch(), which only
+    //   runs once the BODY has fully arrived too. Cancelling in dispatch()
+    //   charged a slow request BODY against the header timeout's much
+    //   shorter budget: a client sending headers instantly but a large body
+    //   slowly got a bogus "Request Header Timeout" the moment kHeaderTimeoutMs
+    //   elapsed, even though the headers had long since arrived.
+    // kRequestTimeoutMs: an INACTIVITY timeout, not a fixed total-duration
+    //   budget. Armed in on_headers_complete(), right after the header timer
+    //   is cancelled, and re-armed (refresh_request_timeout()) on every
+    //   read()/write()/sendfile() call that makes forward progress -- so it
+    //   only fires 408 after kRequestTimeoutMs with NO progress at all, not
+    //   merely because reading the body, running the handler and writing
+    //   the response together happened to take longer than that. A fixed
+    //   budget starting at headers-complete cannot tell a stalled
+    //   connection from a large upload/download that is still moving, just
+    //   slowly (a rate-limited client, a big send_file()) -- it 408s both
+    //   alike. Refreshing on progress fixes that without giving up the
+    //   protection: a connection that goes fully quiet (no bytes either
+    //   way) for the whole window still gets cut.
+    //   Cancelled in on_write_complete() for a normal request/response, or
+    //   early via cancel_request_timeout() the instant a response turns
+    //   into an open-ended stream (SSE headers written, or the WS upgrade
+    //   completes) -- neither has a "finishes eventually" shape at all, so
+    //   the request timeout does not apply to them past that point; leaving
+    //   it armed would 408 a healthy SSE/WS stream mid-flight regardless of
+    //   how much data was flowing.
     static constexpr int kHeaderTimeoutMs  = 5'000;
     static constexpr int kRequestTimeoutMs = 30'000;
     int header_tfd_  = -1;
@@ -106,6 +131,10 @@ private:
     void queue_ws_write(std::string frame);
     void do_sendfile();
     void on_write_complete();
+    void on_headers_complete();
+    void arm_request_timeout();
+    void refresh_request_timeout();
+    void cancel_request_timeout();
 
     // Response cycle close: resumes the parser, replays anything that arrived
     // by pipelining, rearms the header timer and EPOLLIN.

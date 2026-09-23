@@ -30,26 +30,73 @@ struct CookieOptions {
     SameSite                   same_site = SameSite::Lax;
 };
 
+// RFC 3986 percent-encoding of everything outside the unreserved set
+// (ALPHA / DIGIT / '-' / '_' / '.' / '~') -- the same escaping
+// http.url_encode() (modules/base_modules/http.cpp) does, duplicated here in
+// a few lines rather than shared, since that module is only conditionally
+// compiled in (CMakeLists.txt) while this header is always available.
+//
+// Used to encode a cookie NAME or VALUE before it is spliced into a
+// Set-Cookie header. Every byte outside the unreserved set -- notably the
+// separators RFC 6265's cookie-octet forbids (';', ',', space, '"', '\\')
+// and CR/LF (header injection) -- becomes a harmless "%XX" triplet instead
+// of being silently dropped, which is what this replaced: stripping ';',
+// ',', space and tab out of a value meant `cookie("name", "José García")`
+// was stored as "JoséGarcía" with no error, and a value built from
+// `x.to_json_text()` lost every comma. Percent-encoding is lossless and
+// reversible (see cookie_decode(), used by parse_cookie_header() below), so
+// nothing needs to change on the reading side except decoding it back.
+inline std::string cookie_encode(const std::string& s) {
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                          (c >= '0' && c <= '9') ||
+                          c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved) out += static_cast<char>(c);
+        else {
+            out += '%';
+            out += kHex[c >> 4];
+            out += kHex[c & 0x0F];
+        }
+    }
+    return out;
+}
+
+inline std::string cookie_decode(const std::string& s) {
+    auto hex_nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = hex_nibble(s[i + 1]), lo = hex_nibble(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += static_cast<char>(hi * 16 + lo);
+                i += 2;
+                continue;
+            }
+        }
+        out += s[i];
+    }
+    return out;
+}
+
 // ─── build_set_cookie() ─────────────────────────────────────────────────────
 //
 // Serialises a Set-Cookie header value following RFC 6265.
-// CR/LF in name or value is stripped to prevent header injection.
+// Name and value are percent-encoded (see cookie_encode() above) to prevent
+// header injection and silent data loss, not stripped.
 // SameSite=None without Secure is auto-promoted to Secure (browsers reject it
 // otherwise) and a warning is emitted to stderr.
 //
 inline std::string build_set_cookie(std::string name, std::string value,
                                      CookieOptions opts = {}) {
-    auto strip = [](std::string& s) {
-        for (auto it = s.begin(); it != s.end(); ) {
-            unsigned char c = *it;
-            // RFC 6265: cookie-name and cookie-value forbid CTLs and separators.
-            // We strip the dangerous ones aggressively to prevent header injection.
-            if (c == '\r' || c == '\n' || c == ';' || c == ',' || c == ' ' || c == '\t')
-                it = s.erase(it);
-            else
-                ++it;
-        }
-    };
     // Path/Domain are concatenated into the Set-Cookie header below.  Without
     // sanitising them, a handler that passes user input (e.g. tenant-specific
     // path) could inject arbitrary headers via CR/LF.
@@ -57,8 +104,8 @@ inline std::string build_set_cookie(std::string name, std::string value,
         s.erase(std::remove_if(s.begin(), s.end(),
             [](char c){ return c == '\r' || c == '\n'; }), s.end());
     };
-    strip(name);
-    strip(value);
+    name  = cookie_encode(name);
+    value = cookie_encode(value);
     strip_crlf(opts.path);
     strip_crlf(opts.domain);
 
@@ -97,6 +144,13 @@ inline std::string build_set_cookie(std::string name, std::string value,
 // Parses an HTTP `Cookie:` request header into a name→value map.
 // Tolerates leading whitespace and missing values.  Quoted values keep their
 // quotes (Servlet/RFC ambiguity — the caller can strip them if needed).
+// Percent-decodes both name and value (see cookie_decode() above), the
+// inverse of the percent-encoding build_set_cookie() applies on the way out
+// -- a cookie this same app set (or read back from a browser that round-
+// tripped it verbatim, which every real browser does) decodes losslessly. A
+// cookie from somewhere that never percent-encoded it in the first place
+// (e.g. a `%` that is not a valid escape) passes through unchanged, since
+// cookie_decode() only touches well-formed "%XX" triplets.
 //
 inline std::unordered_map<std::string, std::string>
 parse_cookie_header(std::string_view header) {
@@ -111,8 +165,8 @@ parse_cookie_header(std::string_view header) {
         auto pair = header.substr(pos, end - pos);
         auto eq = pair.find('=');
         if (eq != std::string_view::npos) {
-            std::string k(pair.substr(0, eq));
-            std::string v(pair.substr(eq + 1));
+            std::string k = cookie_decode(std::string(pair.substr(0, eq)));
+            std::string v = cookie_decode(std::string(pair.substr(eq + 1)));
             if (!k.empty()) out.emplace(std::move(k), std::move(v));
         }
         pos = end + 1;

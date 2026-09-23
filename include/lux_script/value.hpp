@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <map>
@@ -389,6 +390,138 @@ inline Value& Value::Dict::operator[](std::string_view k) {
     if (!idx_.empty())            idx_.emplace(v_.back().first, v_.size() - 1);
     else if (v_.size() > kIndexThreshold) build_index();
     return v_.back().second;
+}
+
+// ─── UTF-8 helpers ──────────────────────────────────────────────────────────
+//
+// Lux Script strings are UTF-8 bytes with no separate "codepoint" concept of
+// their own -- `len()`, `.upper()`/`.lower()`, and iterating a string with
+// `for` used to all work byte-by-byte, which is exactly right for ASCII and
+// silently wrong for anything else: `len("ñandú")` counted 7 (the two
+// accented letters each take 2 UTF-8 bytes), not the 5 characters a person
+// looking at the word would count, and `.upper()`/`.lower()` left every
+// accented letter untouched (`toupper()`/`tolower()` are single-byte and
+// locale-dependent; a lone continuation byte handed to either is undefined
+// behavior on some libc's, not just a no-op). Declared here (not natives.cpp)
+// because native_gen.cpp's generated --native code includes this same header
+// and needs the identical logic, not a second reimplementation that could
+// silently drift from it -- the same divergence class already fixed once for
+// route parameter coercion (project.cpp's coerce()) and runtime error
+// messages (route_runtime_prelude()) elsewhere in this codebase.
+//
+// This is NOT a full Unicode implementation: case conversion covers ASCII,
+// the Latin-1 Supplement, and the regular pairs of Latin Extended-A -- the
+// scripts most non-English-only Lux apps actually need (Spanish, French,
+// German, Portuguese, Polish, Czech, Romanian...), not every script Unicode
+// defines, and not locale-sensitive special cases (Turkish's dotless ı,
+// German ß having no single uppercase letter). A codepoint this does not
+// recognize is returned unchanged, so applying it never corrupts text it
+// does not know how to case-convert -- correct is a subset of the input,
+// never wrong on any of it.
+
+// Counts codepoints, not bytes: a UTF-8 continuation byte always has its top
+// two bits as `10`, so skipping those and counting everything else counts
+// exactly one unit per codepoint regardless of how many bytes it takes.
+inline size_t utf8_length(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
+    return n;
+}
+
+// Decodes the codepoint starting at s[i] and advances i past it. Malformed
+// input (a truncated multi-byte sequence, a continuation byte with no
+// leader, an overlong/invalid leader) decodes as that ONE byte's own value
+// and advances by only 1 -- never an exception, and never a desync that
+// could skip or duplicate later valid bytes: a resync happens on its own,
+// one byte later, since a malformed byte cannot masquerade as a valid
+// continuation byte of whatever comes next either.
+inline uint32_t utf8_decode(const std::string& s, size_t& i) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    size_t len; uint32_t cp;
+    if      ((c & 0x80) == 0x00) { len = 1; cp = c; }
+    else if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1Fu; }
+    else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0Fu; }
+    else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07u; }
+    else { ++i; return c; }
+    if (i + len > s.size()) { ++i; return c; }
+    for (size_t k = 1; k < len; ++k) {
+        unsigned char cc = static_cast<unsigned char>(s[i + k]);
+        if ((cc & 0xC0) != 0x80) { ++i; return c; }
+        cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    i += len;
+    return cp;
+}
+
+inline std::string utf8_encode(uint32_t cp) {
+    std::string out;
+    if (cp <= 0x7Fu) {
+        out += static_cast<char>(cp);
+    } else if (cp <= 0x7FFu) {
+        out += static_cast<char>(0xC0u | (cp >> 6));
+        out += static_cast<char>(0x80u | (cp & 0x3Fu));
+    } else if (cp <= 0xFFFFu) {
+        out += static_cast<char>(0xE0u | (cp >> 12));
+        out += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+        out += static_cast<char>(0x80u | (cp & 0x3Fu));
+    } else {
+        out += static_cast<char>(0xF0u | (cp >> 18));
+        out += static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu));
+        out += static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu));
+        out += static_cast<char>(0x80u | (cp & 0x3Fu));
+    }
+    return out;
+}
+
+inline uint32_t utf8_codepoint_upper(uint32_t cp) {
+    if (cp >= 'a' && cp <= 'z') return cp - 32;
+    if (cp >= 0xE0u && cp <= 0xFEu && cp != 0xF7u) return cp - 0x20u; // à-þ, not ÷
+    if (cp == 0xFFu) return 0x178u;                                   // ÿ -> Ÿ
+    if (cp >= 0x100u && cp <= 0x137u && (cp % 2 == 1)) return cp - 1; // Latin Ext-A pairs
+    if (cp >= 0x139u && cp <= 0x148u && (cp % 2 == 0)) return cp - 1;
+    if (cp >= 0x14Au && cp <= 0x177u && (cp % 2 == 1)) return cp - 1;
+    if (cp >= 0x179u && cp <= 0x17Eu && (cp % 2 == 0)) return cp - 1;
+    return cp;
+}
+
+inline uint32_t utf8_codepoint_lower(uint32_t cp) {
+    if (cp >= 'A' && cp <= 'Z') return cp + 32;
+    if (cp >= 0xC0u && cp <= 0xDEu && cp != 0xD7u) return cp + 0x20u; // À-Þ, not ×
+    if (cp == 0x178u) return 0xFFu;                                   // Ÿ -> ÿ
+    if (cp >= 0x100u && cp <= 0x137u && (cp % 2 == 0)) return cp + 1;
+    if (cp >= 0x139u && cp <= 0x148u && (cp % 2 == 1)) return cp + 1;
+    if (cp >= 0x14Au && cp <= 0x177u && (cp % 2 == 0)) return cp + 1;
+    if (cp >= 0x179u && cp <= 0x17Eu && (cp % 2 == 1)) return cp + 1;
+    return cp;
+}
+
+inline std::string utf8_upper(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ) out += utf8_encode(utf8_codepoint_upper(utf8_decode(s, i)));
+    return out;
+}
+
+inline std::string utf8_lower(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ) out += utf8_encode(utf8_codepoint_lower(utf8_decode(s, i)));
+    return out;
+}
+
+// Splits a string into its individual codepoints, each its own (1-4 byte)
+// string -- what `for c in <string>` and `split(s, "")` iterate over,
+// instead of either being unsupported (no way to walk a string a character
+// at a time at all) or, worse, walking raw bytes and handing back a broken
+// half-a-codepoint "character" for anything outside ASCII.
+inline std::vector<std::string> utf8_chars(const std::string& s) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < s.size(); ) {
+        size_t start = i;
+        utf8_decode(s, i);
+        out.push_back(s.substr(start, i - start));
+    }
+    return out;
 }
 
 } // namespace lux_script

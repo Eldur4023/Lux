@@ -31,7 +31,7 @@ get endpoint("/length"):
     List<Json> rows = await mysql.query("select id, title, body from articles where title = ?", "length")
     if len(rows) == 0:
         return status(404)
-    return { "recibido": len(rows[0]["body"]), "esperado": 4000 }
+    return { "received": len(rows[0]["body"]), "expected": 4000 }
 
 # ── Every type at once ───────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ get endpoint("/unicode"):
 
 get endpoint("/injection", string q = "x"):
     List<Json> rows = await mysql.query("select id, title from articles where title = ?", q)
-    return { "encontrados": len(rows) }
+    return { "found": len(rows) }
 
 # ── Escritura, rows afectadas y last_id ─────────────────────────────────────
 

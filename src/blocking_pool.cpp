@@ -101,4 +101,9 @@ BlockingPool& blocking_pool() {
     return pool;
 }
 
+BlockingPool& io_blocking_pool() {
+    static BlockingPool pool;
+    return pool;
+}
+
 } // namespace lux

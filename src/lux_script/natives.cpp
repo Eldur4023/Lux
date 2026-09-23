@@ -78,7 +78,7 @@ Value fn_render_tpl(NativeCtx& ctx, std::vector<Value>& args, std::string& error
     }
 
     std::string out;
-    if (!render_plantilla(p, std::move(values), ctx, ctx.functions, out, error))
+    if (!render_template(p, std::move(values), ctx, ctx.functions, out, error))
         return Value::null();
 
     ctx.res.header("Content-Type", "text/html; charset=utf-8").send(std::move(out));
@@ -150,7 +150,7 @@ Value fn_send_file(NativeCtx& ctx, std::vector<Value>& args, std::string& error)
 
 Value fn_len(NativeCtx&, std::vector<Value>& args, std::string& error) {
     const Value& v = args[0];
-    if (v.is_str())  return Value::integer((long long)v.as_str().size());
+    if (v.is_str())  return Value::integer((long long)utf8_length(v.as_str()));
     if (v.is_list()) return Value::integer((long long)v.as_list().size());
     if (v.is_dict()) return Value::integer((long long)v.as_dict().size());
     error = std::string("len() does not apply to ") + v.type_name();
@@ -412,7 +412,20 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
-const std::array<NativeDef, 50> kNatives = {{
+// The raw, unparsed request body -- added for webhook signature
+// verification (Stripe/GitHub/etc. HMAC-sign the exact bytes they sent, so
+// a handler has to hash the SAME bytes, not a re-serialization of whatever
+// a JSON class-body parameter happened to decode them into). Before this,
+// there was no way to reach it at all from Lux Script: a `class`-typed body
+// parameter parses and validates it, and `form()` only covers
+// application/x-www-form-urlencoded -- neither hands back the original
+// bytes. See looks_like_direct_request_data() (emitter.cpp) for why this is
+// also flagged by the same SQL-splice warning query()/header() already get.
+Value fn_req_body(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(ctx.req.body);
+}
+
+const std::array<NativeDef, 51> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -451,6 +464,7 @@ const std::array<NativeDef, 50> kNatives = {{
     {"__req_path",      0, 0,  fn_req_path},
     {"__req_method",    0, 0,  fn_req_method},
     {"__req_ip",        0, 0,  fn_req_ip},
+    {"__req_body",      0, 0,  fn_req_body},
     {"__state_incr",    1, 2,  fn_state_incr},
     {"__state_decr",    1, 2,  fn_state_decr},
     {"__state_get",     1, 2,  fn_state_get},
@@ -481,6 +495,11 @@ const std::array<NativeDef, 50> kNatives = {{
 std::vector<std::string>& last_validation_messages() {
     thread_local std::vector<std::string> msgs;
     return msgs;
+}
+
+std::string& last_internal_error() {
+    thread_local std::string msg;
+    return msg;
 }
 
 SharedState& SharedState::instance() {
@@ -537,8 +556,18 @@ bool want(size_t got, size_t min, size_t max, const std::string& name,
 // Saves an uploaded part keeping only the file name, with no path: that way a
 // filename with ".." or an absolute one cannot escape the directory.
 std::string safe_name(const std::string& raw) {
-    size_t slash = raw.find_last_of("/\\");
-    std::string base = (slash == std::string::npos) ? raw : raw.substr(slash + 1);
+    // Truncate at the first NUL rather than stripping/replacing it: whatever
+    // comes after a NUL is invisible to every C API this name eventually
+    // reaches (::open() below takes a C string via c_str()), so keeping it
+    // in the C++-side value only makes the mismatch worse -- a name that
+    // LOOKS like "evil.sh\0.png" to any .ends_with()/.contains() check an
+    // app runs on it, but writes to disk as "evil.sh". Belt-and-suspenders
+    // with multipart.hpp already doing the same at parse time: this makes
+    // save() safe regardless of where its filename argument came from, not
+    // just the multipart path.
+    std::string raw_trunc = raw.substr(0, raw.find('\0'));
+    size_t slash = raw_trunc.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? raw_trunc : raw_trunc.substr(slash + 1);
     if (base.empty() || base == "." || base == "..") base = "subida";
     return base;
 }
@@ -581,7 +610,7 @@ void clamp_range(long long len, long long& start, long long& end) {
 // C++ function called from the VM's own opcode dispatch loop, so there is
 // no "suspend and let the driver resume us later" available here the way a
 // real route handler has. A NESTED, re-entrant VM::start() is the answer:
-// the same idea render_plantilla() (template.cpp) uses to let a template
+// the same idea render_template() (template.cpp) uses to let a template
 // expression call a user function.
 //
 // A FRESH VM per call, not a shared/thread_local one: VM::start() clears
@@ -691,10 +720,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             return Value::boolean(s.find(n) != std::string::npos);
         }
         if (name == "upper" || name == "lower") {
-            std::string out = s;
-            for (char& c : out) c = static_cast<char>(name == "upper" ? ::toupper((unsigned char)c)
-                                                                     : ::tolower((unsigned char)c));
-            return Value::str(std::move(out));
+            return Value::str(name == "upper" ? utf8_upper(s) : utf8_lower(s));
         }
         if (name == "trim") {
             size_t a = s.find_first_not_of(" \t\r\n");
@@ -735,7 +761,19 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             if (!want(args.size(), 1, 1, name, error)) return Value::null();
             if (!args[0].is_str()) { error = "'split()' expects a string"; return Value::null(); }
             const std::string& sep = args[0].as_str();
-            if (sep.empty()) { error = "'split()': the separator cannot be empty"; return Value::null(); }
+            // An empty separator splits into individual characters --
+            // codepoints, not bytes, via utf8_chars() (value.hpp), the same
+            // thing `for c in <string>` iterates -- instead of the
+            // "separator cannot be empty" error this used to be
+            // unconditionally: `s.split("")` is the one way Lux Script has
+            // to build a slugify/character-by-character transform at all
+            // (there is no other character-iteration form of `for`), and
+            // rejecting it left that with no answer.
+            if (sep.empty()) {
+                Value::List out;
+                for (auto& ch : utf8_chars(s)) out.push_back(Value::str(std::move(ch)));
+                return Value::list(std::move(out));
+            }
             Value::List out;
             size_t pos = 0, prev = 0;
             while ((pos = s.find(sep, prev)) != std::string::npos) {
@@ -897,6 +935,58 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                 if (!error.empty()) return Value::null();
             }
             return recv;
+        }
+        // sort_by/find/find_index: the same "pass a fn, no closure" shape as
+        // map/filter/reduce/for_each above, added because sort()'s natural-
+        // order-only limit (comment above it) and index_of()'s equals-only
+        // match are exactly the two gaps a hand-rolled loop keeps getting
+        // reintroduced for (sort a list of Dicts by one field, find the
+        // first element matching more than a single equals check).
+        if (name == "sort_by") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'sort_by()' expects a function"; return Value::null(); }
+            std::vector<Value> keys;
+            keys.reserve(l.size());
+            for (auto& item : l) {
+                Value k = call_func_value(ctx, args[0], {item}, "sort_by", error);
+                if (!error.empty()) return Value::null();
+                keys.push_back(std::move(k));
+            }
+            std::vector<size_t> order(l.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            bool ok = true;
+            std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                bool this_ok = true;
+                bool r = keys[a].less_than(keys[b], this_ok);
+                if (!this_ok) ok = false;
+                return r;
+            });
+            if (!ok) { error = "sort_by(): the key values cannot be compared with each other"; return Value::null(); }
+            Value::List out;
+            out.reserve(l.size());
+            for (size_t i : order) out.push_back(l[i]);
+            l = std::move(out);
+            return recv;
+        }
+        if (name == "find") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'find()' expects a function"; return Value::null(); }
+            for (auto& item : l) {
+                Value keep = call_func_value(ctx, args[0], {item}, "find", error);
+                if (!error.empty()) return Value::null();
+                if (keep.truthy()) return item;
+            }
+            return Value::null();
+        }
+        if (name == "find_index") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'find_index()' expects a function"; return Value::null(); }
+            for (size_t i = 0; i < l.size(); ++i) {
+                Value keep = call_func_value(ctx, args[0], {l[i]}, "find_index", error);
+                if (!error.empty()) return Value::null();
+                if (keep.truthy()) return Value::integer(static_cast<long long>(i));
+            }
+            return Value::integer(-1);
         }
         error = "Lists have no method '" + name + "'";
         return Value::null();
@@ -1073,6 +1163,8 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
         {"join", 1, 1, "string"},
         {"map", 1, 1, "List"},         {"filter", 1, 1, "List"},
         {"reduce", 2, 2, "Json"},      {"for_each", 1, 1, nullptr},
+        {"sort_by", 1, 1, nullptr},    {"find", 1, 1, "Json"},
+        {"find_index", 1, 1, "int"},
     });
     static const std::vector<BuiltinMethod> kDict = with_own({
         {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
@@ -1093,7 +1185,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 42> kMembers = {{
+const std::array<MemberMap, 43> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -1128,6 +1220,7 @@ const std::array<MemberMap, 42> kMembers = {{
     {"request", "path",    "__req_path"},
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},
+    {"request", "body",    "__req_body"},
     {"state",   "incr",    "__state_incr"},
     {"state",   "decr",    "__state_decr"},
     {"state",   "get",     "__state_get"},

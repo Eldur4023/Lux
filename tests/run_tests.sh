@@ -132,7 +132,7 @@ compiles() {
     fi
 }
 
-cleanup() { stop_server; rm -rf "$TMP"; }
+cleanup() { stop_server; rm -rf "$TMP"; rm -f "$HERE/cases/tests-suite.db"*; }
 trap cleanup EXIT
 
 # ─── Suites ──────────────────────────────────────────────────────────────────
@@ -246,7 +246,10 @@ check "404 handler"       GET /tampoco          404 '"path":"/tampoco"'
 echo "== parameter binding =="
 start_server "$HERE/cases/params.lux" || exit 1
 
-check "missing query without a default gives the type's zero" GET /query 200 '"q":""'
+check "missing query param with no default is a 422, not the type's zero" \
+    GET /query 422 '"q: required"'
+check "query param present, the other one falls back to its default" \
+    GET "/query?q=hi" 200 '"q":"hi","n":5'
 
 check_mp "multipart: text next to a file" /mp/one 200 '"title":"hello"' \
     -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "title=hello"
@@ -303,25 +306,25 @@ check "class field: POST body rejects the list itself being the wrong shape" POS
 
 echo "== session and jwt =="
 start_server "$HERE/cases/session.lux" || exit 1
-check "no session"          GET /quien            200 '"user":null'
+check "no session"          GET /whoami           200 '"user":null'
 check "protected area"      GET /admin/panel      403
-check "forged cookie"  GET /quien            200 '"user":null'
-check "jwt missing"         GET /api/yo           401
-check "invalid jwt"        GET /api/yo           401
+check "forged cookie"  GET /whoami           200 '"user":null'
+check "jwt missing"         GET /api/me           401
+check "invalid jwt"        GET /api/me           401
 
 echo "== database =="
-rm -f "$TMP/tests.db"
+rm -f "$HERE/cases/tests-suite.db"*
 start_server "$HERE/cases/data.lux" || exit 1
 check "create table"         GET  /create           200 '"ok":true'
 check "insert"            POST /add/ana        201 '"id":1'
 check "insert another"       POST /add/bob        201 '"id":2'
 check "list"              GET  /all           200 '"name":"ana"'
 check "lookup by id"       GET  /one/1           200 '"name":"ana"'
-check "no encontrado"       GET  /one/99          404
-check "sql injection"       GET  "/search?q=ana'%20OR%20'1'='1" 200 '"encontrados":0'
+check "not found"       GET  /one/99          404
+check "sql injection"       GET  "/search?q=ana'%20OR%20'1'='1" 200 '"found":0'
 check "transaction"         POST /transfer      200 '"ok":true'
 check "balances after commit"  GET  /balances          200 '"balance":70'
-check "rollback"            POST /undo         200 '"deshecho":true'
+check "rollback"            POST /undo         200 '"undone":true'
 check "balances after rollback" GET /balances          200 '"balance":70'
 check "engine error"     GET  /bad            200 'no such table'
 

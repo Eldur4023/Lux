@@ -51,6 +51,7 @@ private:
     std::shared_ptr<std::atomic<int>> conn_count_;
 
     void on_accept();
+    void register_listen_fd();
 };
 
 } // namespace lux::core

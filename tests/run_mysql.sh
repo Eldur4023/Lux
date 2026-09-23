@@ -5,7 +5,7 @@
 # It is separate from run_tests.sh because it needs a server: without one, this suite
 # it SKIPS itself instead of failing, so `ctest` stays green on a machine
 # with no mysqld.  Exit code 77 is the one CMake understands as
-# "omitida".
+# "skipped".
 #
 # To set the environment up once:
 #
@@ -71,7 +71,7 @@ if ! mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NAME" \
     exit 77
 fi
 if ! "$LUX" --check "$HERE/cases/mysql.lux" > "$TMP/check" 2>&1; then
-    if grep -q "modulo 'mysql'" "$TMP/check" || grep -q "import mysql" "$TMP/check"; then
+    if grep -q "module 'mysql'" "$TMP/check" || grep -q "import mysql" "$TMP/check"; then
         grey "mysql: the binary was built without the module — suite skipped"
         exit 77
     fi
@@ -109,13 +109,13 @@ json_valid() {
     fi
 }
 
-# ─── Arranque ────────────────────────────────────────────────────────────────
+# ─── Startup ─────────────────────────────────────────────────────────────────
 
 mysql -h "$DB_HOST" -u "$DB_USER" "-p$DB_PASS" "$DB_NAME" \
       < "$HERE/cases/mysql-schema.sql" 2>/dev/null || {
     red "cannot load the schema"; exit 1; }
 
-echo "== arranque =="
+echo "== startup =="
 "$LUX" --no-watch --port "$PORT" "$HERE/cases/mysql.lux" > "$TMP/srv.log" 2>&1 &
 SRV=$!
 for _ in $(seq 1 60); do
@@ -127,7 +127,7 @@ curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/__ping__" || {
     red "the server did not answer"; cat "$TMP/srv.log"; exit 1; }
 ok "starts and connects"
 
-echo "== lectura =="
+echo "== reading =="
 check "select without parameters" GET /all      200 '"title":"length"'
 check "select with a parameter"  GET /one/1      200 '"author":"Ana"'
 check "missing row"    GET /one/99999  404
@@ -136,17 +136,17 @@ check "missing row"    GET /one/99999  404
 # which is zero unless it is asked for and the result is fetched: anything
 # past 1023 bytes was silently truncated.
 echo "== long text =="
-check "TEXT de 4000 bytes integer" GET /length 200 '"recibido":4000'
+check "4000-byte TEXT column" GET /length 200 '"received":4000'
 
 echo "== types =="
 check "signed integer"   GET /types 200 '"t_big":-9223372036854775808'
 check "decimal"            GET /types 200 '"t_decimal":12345678.9012'
 check "utf8 textmb4"     GET /types 200 'emoji'
-check "fecha"              GET /types 200 '"t_date":"2026-08-31"'
+check "date"               GET /types 200 '"t_date":"2026-08-31"'
 check "json"               GET /types 200 '"t_json"'
 check "null"               GET /types 200 '"t_null":null'
 # A BLOB is arbitrary bytes, not text: it comes out in base64 so the response
-# siga siendo UTF-8 valido.  'bytes' -> 'Ynl0ZXM='.
+# stays valid UTF-8.  'bytes' -> 'Ynl0ZXM='.
 check "the blob comes out in base64" GET /types 200 '"t_blob":"Ynl0ZXM="'
 # Above 2^63 a BIGINT UNSIGNED does not fit in the Lux Script integer and falls
 # back to a decimal, as in the JSON parser: the last digit is lost.  It used to
@@ -159,13 +159,13 @@ check "the driver returns the 5 bytes" GET /null_in_text 200 '"bytes":5'
 json_valid "and the JSON stays valid" /null_in_text
 
 echo "== params =="
-check "echo de params"  GET '/echo?n=42&s=abc' 200 '"integer"'
+check "echo of params"  GET '/echo?n=42&s=abc' 200 '"integer"'
 check "unicode in the bind" GET /unicode          200 'unicode'
 
 echo "== injection =="
-check "quote in the parameter" GET "/injection?q=x'%20OR%20'1'='1" 200 '"encontrados":0'
+check "quote in the parameter" GET "/injection?q=x'%20OR%20'1'='1" 200 '"found":0'
 
-echo "== escritura =="
+echo "== writing =="
 check "insert and last_id" POST /add/probing 201 '"id"'
 check "delete"           POST /delete_row/99999   200 '"ok":true'
 
@@ -191,7 +191,7 @@ check "too few parameters"  GET /too_few_params 200 "were passed"
 # exactly the shape that failure had before it was fixed, and it only shows
 # comparing the content, not just the status code.
 echo "== concurrency (pool 8) =="
-fallos_conc=0
+conc_failures=0
 pids=""
 for i in $(seq 1 40); do
     curl -s --max-time 10 -o "$TMP/c$i" -w '%{http_code}' \
@@ -200,18 +200,18 @@ for i in $(seq 1 40); do
 done
 for p in $pids; do wait "$p" 2>/dev/null; done
 for i in $(seq 1 40); do
-    [ "$(cat "$TMP/s$i" 2>/dev/null)" = "200" ] || fallos_conc=$((fallos_conc + 1))
+    [ "$(cat "$TMP/s$i" 2>/dev/null)" = "200" ] || conc_failures=$((conc_failures + 1))
     case $(( (i % 3) + 1 )) in
-        1) grep -q 'length'   "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
-        2) grep -q 'short'   "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
-        3) grep -q 'unicode' "$TMP/c$i" || fallos_conc=$((fallos_conc + 1)) ;;
+        1) grep -q 'length'   "$TMP/c$i" || conc_failures=$((conc_failures + 1)) ;;
+        2) grep -q 'short'   "$TMP/c$i" || conc_failures=$((conc_failures + 1)) ;;
+        3) grep -q 'unicode' "$TMP/c$i" || conc_failures=$((conc_failures + 1)) ;;
     esac
 done
-if [ "$fallos_conc" -eq 0 ]; then ok "40 concurrent, each with its own result"
-else fail "40 concurrent, each with its own result" "40 correctas" "$fallos_conc mal"; fi
+if [ "$conc_failures" -eq 0 ]; then ok "40 concurrent, each with its own result"
+else fail "40 concurrent, each with its own result" "40 correct" "$conc_failures wrong"; fi
 
 kill -0 "$SRV" 2>/dev/null && ok "the server is still alive" \
-                           || fail "the server is still alive" "vivo" "muerto"
+                           || fail "the server is still alive" "alive" "dead"
 
 echo
 if [ "$failed" -eq 0 ]; then green "$passed tests, all passing"; exit 0; fi

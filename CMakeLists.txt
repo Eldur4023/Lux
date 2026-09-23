@@ -5,14 +5,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
-# --native (Fase 4, rutas): el .so que genera compilar_nativo() para una ruta
-# enlaza liblux_script.a de verdad (necesita Value::write_json, no inline en
-# el header) desde una biblioteca COMPARTIDA. Un
-# .a compilado sin -fPIC no se puede meter dentro de un .so -- de ahi esto
-# global, no solo en el target de lux_script: mas simple que marcar cada
-# dependencia transitiva (lux, lux_llhttp) una por una, y el coste (PIC en
-# el binario `lux` mismo, que no lo necesitaba) es insignificante frente a
-# tener que recompilar bajo demanda.
+# --native (phase 4, routes): the .so that compile_native() generates for a
+# route really does link liblux_script.a (it needs Value::write_json, not
+# inlined in the header) from a SHARED library. A .a compiled without
+# -fPIC cannot be pulled into a .so -- hence this being global, not just on
+# the lux_script target: simpler than flagging every transitive dependency
+# (lux, lux_llhttp) one by one, and the cost (PIC in the `lux` binary
+# itself, which did not need it) is negligible next to having to
+# recompile on demand.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -179,6 +179,7 @@ add_library(lux_script STATIC
     src/lux_script/vm.cpp
     src/lux_script/autotest.cpp
     src/lux_script/project.cpp
+    src/lux_script/tiny_regex.cpp
     ${LUX_MODULE_SOURCES}
 )
 target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -325,16 +326,17 @@ target_compile_options(lux_script PRIVATE -Wall -Wextra)
 add_executable(lux-bin src/lux_script/main.cpp)
 set_target_properties(lux-bin PROPERTIES OUTPUT_NAME lux)
 lux_link_script(lux-bin)
-# --native (Fase 5, `await`): sin esto, el .so que dlopen() carga en tiempo
-# de ejecucion NO comparte los `inline thread_local` de task.hpp
-# (lux::detail::current_loop/current_token, que HttpConnection::dispatch()
-# deja puestos antes de cada peticion) con este ejecutable -- cada uno se
-# lleva su propia copia privada, siempre a null en la del .so. Sin loop,
-# SleepAwaitable::await_suspend() resume el acto, sin esperar nada: `await
-# sleep(200)` en una ruta nativa respondia en ~3ms en vez de ~200ms,
-# encontrado probando la primera ruta con `await` de verdad contra HTTP, no
-# adivinado de antemano. -rdynamic exporta los simbolos de este binario al
-# tabla dinamica para que el .so resuelva contra ELLOS, no cree los suyos.
+# --native (phase 5, `await`): without this, the .so that dlopen() loads at
+# runtime does NOT share task.hpp's `inline thread_local`s
+# (lux::detail::current_loop/current_token, which HttpConnection::dispatch()
+# sets before every request) with this executable -- each one carries its
+# own private copy, always null in the .so's. With no loop,
+# SleepAwaitable::await_suspend() resumes immediately, without waiting for
+# anything: `await sleep(200)` in a native route answered in ~3ms instead of
+# ~200ms, found by testing the first route with a real `await` against
+# HTTP, not guessed ahead of time. -rdynamic exports this binary's symbols
+# into the dynamic table so the .so resolves against THOSE, instead of
+# creating its own.
 target_link_options(lux-bin PRIVATE -rdynamic)
 
 # Frontend development tools.

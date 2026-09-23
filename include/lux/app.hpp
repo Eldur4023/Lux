@@ -228,6 +228,14 @@ public:
                 sent += static_cast<size_t>(n);
             }
 
+            // The 101 is out: this connection is a WebSocket now, not a
+            // bounded HTTP request/response. Cancel the connection's request
+            // timeout the same way make_sse() does for a stream response --
+            // otherwise a perfectly healthy, actively-used WS connection
+            // gets a 408 spliced into its frame stream 30s after the
+            // handshake, every single time.
+            if (req._cancel_request_timeout) req._cancel_request_timeout();
+
             auto ws_state = std::make_shared<detail::WSState>();
             ws_state->token = req.cancel_token;
             ws_state->loop  = req.loop;
@@ -319,6 +327,23 @@ public:
     // Excess connections receive 503 immediately.
     App& max_connections(int n) { max_connections_ = n; return *this; }
 
+    // Overrides how handle_request() decides "is there a declared route for
+    // this (method, path)?" when gating static-mount serving (see its call
+    // site). The DEFAULT check — router_.match(method, path).found — is
+    // correct for an app built directly on the C++ API (get()/post()/...
+    // register on router_ itself), but wrong for the Lux Script engine: its
+    // main.cpp installs exactly two catch-all entries on router_ itself
+    // (any("/", ...), any("/*", ...)) that always match, and does the REAL
+    // per-project routing against a completely separate Router owned by the
+    // live module (mod->router), invisible to App. Without this override,
+    // the default check always reports "found" for a Lux Script app and
+    // every static mount goes permanently dark; main.cpp supplies a probe
+    // that asks mod->router instead.
+    App& set_route_probe(std::function<bool(const std::string&, const std::string&)> probe) {
+        route_probe_ = std::move(probe);
+        return *this;
+    }
+
     // Start listening — Flask style:
     //   app.run()               → 0.0.0.0:5000
     //   app.run(8080)           → 0.0.0.0:8080
@@ -342,6 +367,7 @@ private:
     Router                                    router_;
     std::vector<Middleware>                   middlewares_;
     std::vector<StaticMount>                  static_mounts_;
+    std::function<bool(const std::string&, const std::string&)> route_probe_;
     std::unordered_map<int, ErrorHandler>     error_handlers_;
     ErrorHandler                              catchall_error_handler_;
     std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;

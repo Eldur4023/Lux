@@ -5,11 +5,107 @@
 
 #include <sqlite3.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 
 namespace lux_script {
 
 namespace {
+
+// Expands a List argument into as many `?` placeholders as it has elements,
+// e.g. `where id in (?)` with args = [["a","b","c"]] becomes
+// `where id in (?,?,?)` bound to "a","b","c" individually. Lux Script has no
+// spread/variadic syntax (GUIDE.md), so a query like "ids in (...)" over a
+// list whose length is only known at RUN time could not otherwise be
+// expressed with real bind parameters — the only alternative was building
+// the `in (...)` literal by hand and sanitizing it with a character
+// whitelist instead of parameterizing it for real. An empty list becomes
+// `(NULL)`: valid SQL, and `x IN (NULL)` is never true for any `x`, the same
+// "matches nothing" behavior an empty `in (...)` is meant to have.
+//
+// A hand-rolled scanner, not a real SQL tokenizer: it only needs to walk
+// past single/double-quoted string literals and `--`/`/* */` comments so a
+// literal `?` inside one of those is not mistaken for a placeholder — the
+// same minimal amount of SQL awareness sqlite3_prepare_v2 itself needs to
+// count real parameters correctly. Every `?` still maps 1:1, in order, to
+// one element of `args`, exactly like before this function existed; only a
+// List argument now consumes more than one placeholder in the rewritten
+// text.
+bool expand_list_params(const std::string& sql, const std::vector<Value>& args,
+                        std::string& out_sql, std::vector<Value>& out_args,
+                        std::string& error) {
+    bool any_list = false;
+    for (const auto& a : args) if (a.is_list()) { any_list = true; break; }
+    if (!any_list) { out_sql = sql; out_args = args; return true; }
+
+    out_sql.clear();
+    out_sql.reserve(sql.size());
+    out_args.clear();
+    out_args.reserve(args.size());
+
+    size_t arg_i = 0;
+    bool in_squote = false, in_dquote = false;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        char c = sql[i];
+        if (in_squote || in_dquote) {
+            char quote = in_squote ? '\'' : '"';
+            out_sql += c;
+            if (c == quote) {
+                if (i + 1 < sql.size() && sql[i + 1] == quote) out_sql += sql[++i]; // escaped quote
+                else { in_squote = false; in_dquote = false; }
+            }
+            continue;
+        }
+        if (c == '\'') { in_squote = true; out_sql += c; continue; }
+        if (c == '"')  { in_dquote = true; out_sql += c; continue; }
+        if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+            while (i < sql.size() && sql[i] != '\n') out_sql += sql[i++];
+            if (i < sql.size()) out_sql += sql[i]; // the newline itself
+            continue;
+        }
+        if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+            out_sql += c;
+            out_sql += sql[++i];
+            while (i + 1 < sql.size() && !(sql[i] == '*' && sql[i + 1] == '/')) out_sql += sql[++i];
+            if (i + 1 < sql.size()) out_sql += sql[++i]; // the closing '/'
+            continue;
+        }
+        if (c == '?') {
+            if (arg_i >= args.size()) { out_sql += c; continue; } // let the count check below report it
+            const Value& a = args[arg_i++];
+            if (!a.is_list()) { out_sql += c; out_args.push_back(a); continue; }
+            const auto& l = a.as_list();
+
+            // Accept both the idiomatic `in (?)` and a bare `in ?` as the
+            // list-expanding placeholder. If it is already sitting inside
+            // its own parens, expand INSIDE them instead of adding a
+            // second layer: `in ((?,?,?))` is a parenthesized row-value,
+            // not a plain expr-list, and SQLite rejects it ("row value
+            // misused") where `in (?,?,?)` is exactly what IN expects.
+            size_t back = out_sql.size();
+            while (back > 0 && std::isspace(static_cast<unsigned char>(out_sql[back - 1]))) --back;
+            size_t fwd = i + 1;
+            while (fwd < sql.size() && std::isspace(static_cast<unsigned char>(sql[fwd]))) ++fwd;
+            bool already_wrapped = back > 0 && out_sql[back - 1] == '(' &&
+                                   fwd < sql.size() && sql[fwd] == ')';
+
+            if (l.empty()) { out_sql += already_wrapped ? "NULL" : "(NULL)"; continue; }
+            if (!already_wrapped) out_sql += '(';
+            for (size_t k = 0; k < l.size(); ++k) {
+                if (k) out_sql += ',';
+                if (l[k].is_list()) { error = "sqlite: a List argument cannot contain another List"; return false; }
+                out_sql += '?';
+                out_args.push_back(l[k]);
+            }
+            if (!already_wrapped) out_sql += ')';
+            continue;
+        }
+        out_sql += c;
+    }
+    for (; arg_i < args.size(); ++arg_i) out_args.push_back(args[arg_i]);
+    return true;
+}
 
 // SQLite driver.
 //
@@ -67,13 +163,13 @@ public:
         char* msg = nullptr;
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
-        // synchronous=FULL (el valor por defecto) fsyncea en cada commit --
-        // medido: 2.78ms/commit, contra 0.04ms/commit con NORMAL. En WAL,
-        // NORMAL sigue siendo seguro ante cualquier caida del proceso o de la
-        // aplicacion (el WAL queda consistente); solo se pueden perder los
-        // ultimos commits ante una perdida de energia o un panico del kernel
-        // -- es la recomendacion propia de SQLite para journal_mode=WAL, no
-        // una relajacion improvisada.
+        // synchronous=FULL (the default) fsyncs on every commit -- measured:
+        // 2.78ms/commit, versus 0.04ms/commit with NORMAL. In WAL, NORMAL is
+        // still safe against any crash of the process or the application
+        // (the WAL stays consistent); only the last few commits can be lost
+        // in the event of a power loss or a kernel panic -- this is SQLite's
+        // own recommendation for journal_mode=WAL, not an improvised
+        // relaxation.
         sqlite3_exec(db, "PRAGMA synchronous=NORMAL", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
         sqlite3_exec(db, "PRAGMA foreign_keys=ON", nullptr, nullptr, &msg);
@@ -89,8 +185,8 @@ public:
     bool query(size_t worker, const std::string& sql, const std::vector<Value>& args,
                Value& out, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        bool          cacheada = false;
-        if (!prepare(worker, sql, args, &stmt, &cacheada, error)) return false;
+        bool          cached = false;
+        if (!prepare(worker, sql, args, &stmt, &cached, error)) return false;
 
         Value::List rows;
         int cols = sqlite3_column_count(stmt);
@@ -100,7 +196,7 @@ public:
             if (rc == SQLITE_DONE) break;
             if (rc != SQLITE_ROW) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
-                release(stmt, cacheada);
+                release(stmt, cached);
                 return false;
             }
             Value::Dict row;
@@ -118,7 +214,7 @@ public:
             rows.push_back(Value::dict(std::move(row)));
         }
 
-        release(stmt, cacheada);
+        release(stmt, cached);
         out = Value::list(std::move(rows));
         return true;
     }
@@ -126,16 +222,16 @@ public:
     bool exec(size_t worker, const std::string& sql, const std::vector<Value>& args,
               long long& affected, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        bool          cacheada = false;
-        if (!prepare(worker, sql, args, &stmt, &cacheada, error)) return false;
+        bool          cached = false;
+        if (!prepare(worker, sql, args, &stmt, &cached, error)) return false;
 
         int rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
             error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
-            release(stmt, cacheada);
+            release(stmt, cached);
             return false;
         }
-        release(stmt, cacheada);
+        release(stmt, cached);
         affected = sqlite3_changes(conns_[worker]);
         return true;
     }
@@ -159,9 +255,9 @@ public:
     // Returns the statement to where it came from.  A cached one is reset —it
     // has to be: in WAL mode a half-walked statement keeps its read snapshot
     // open— and a one-off one is destroyed.
-    static void release(sqlite3_stmt* stmt, bool cacheada) {
+    static void release(sqlite3_stmt* stmt, bool cached) {
         if (!stmt) return;
-        if (cacheada) { sqlite3_reset(stmt); sqlite3_clear_bindings(stmt); }
+        if (cached) { sqlite3_reset(stmt); sqlite3_clear_bindings(stmt); }
         else          sqlite3_finalize(stmt);
     }
 
@@ -175,7 +271,7 @@ private:
     // With the cap full, a new query is prepared and destroyed as before: one
     // already inside is never evicted.  That way, whoever builds SQL by hand
     // cannot blow up the memory or evict the good ones.
-    static constexpr size_t kMaxSentencias = 128;
+    static constexpr size_t kMaxCachedStatements = 128;
 
     std::string           file_;
     int                   busy_timeout_ = 5000;
@@ -185,35 +281,44 @@ private:
     // Parameters ALWAYS go through bind, never concatenated: that is what makes
     // SQL injection impossible from Lux Script.
     bool prepare(size_t worker, const std::string& sql, const std::vector<Value>& args,
-                 sqlite3_stmt** out, bool* cacheada, std::string& error) {
+                 sqlite3_stmt** out, bool* cached, std::string& error) {
         sqlite3* db = conns_[worker];
         auto&    table = cache_[worker];
 
-        if (auto it = table.find(sql); it != table.end()) {
+        // A List argument expands the SQL text itself (one `?` becomes N),
+        // so the cache below is keyed on the EXPANDED text -- two calls
+        // with lists of different lengths are, correctly, different
+        // prepared statements. Everything after this point works on
+        // eff_sql/eff_args exactly as it always worked on sql/args.
+        std::string eff_sql;
+        std::vector<Value> eff_args;
+        if (!expand_list_params(sql, args, eff_sql, eff_args, error)) return false;
+
+        if (auto it = table.find(eff_sql); it != table.end()) {
             *out      = it->second;
-            *cacheada = true;
+            *cached = true;
             sqlite3_reset(*out);
             sqlite3_clear_bindings(*out);
         } else {
-            if (sqlite3_prepare_v2(db, sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
+            if (sqlite3_prepare_v2(db, eff_sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(db);
                 return false;
             }
-            *cacheada = table.size() < kMaxSentencias;
-            if (*cacheada) table.emplace(sql, *out);
+            *cached = table.size() < kMaxCachedStatements;
+            if (*cached) table.emplace(eff_sql, *out);
         }
 
         int expected = sqlite3_bind_parameter_count(*out);
-        if (expected != static_cast<int>(args.size())) {
+        if (expected != static_cast<int>(eff_args.size())) {
             error = "sqlite: the query has " + std::to_string(expected) +
-                    " parameter(s) but " + std::to_string(args.size()) + " were passed";
-            release(*out, *cacheada);
+                    " parameter(s) but " + std::to_string(eff_args.size()) + " were passed";
+            release(*out, *cached);
             *out = nullptr;
             return false;
         }
 
-        for (size_t i = 0; i < args.size(); ++i) {
-            const Value& v = args[i];
+        for (size_t i = 0; i < eff_args.size(); ++i) {
+            const Value& v = eff_args[i];
             int idx = static_cast<int>(i) + 1;
             int rc;
             if      (v.is_null())  rc = sqlite3_bind_null(*out, idx);
@@ -228,7 +333,7 @@ private:
             if (rc != SQLITE_OK) {
                 error = std::string("sqlite: while binding parameter ") +
                         std::to_string(idx) + ": " + sqlite3_errmsg(db);
-                release(*out, *cacheada);
+                release(*out, *cached);
                 *out = nullptr;
                 return false;
             }
@@ -236,10 +341,44 @@ private:
         return true;
     }
 
+    // SQLite has no boolean storage class of its own: a column declared
+    // `BOOLEAN` (or `BOOL`) is really INTEGER affinity underneath, and a
+    // plain sqlite3_column_type() can never tell the two apart -- 0/1 comes
+    // back as Value::integer() either way. That silently broke the most
+    // ordinary CRUD loop: read a row into a class with a `bool done` field
+    // (fine, the ORM coerces it), send that exact object back on a later
+    // PUT/POST (also fine, it is real Value::boolean() JSON on the wire by
+    // then) -- but read the row again with a raw, schemaless query() and
+    // hand THAT dict back as a request body, and the once-real bool is now
+    // a 1/0 int, which value_matches() (project.cpp/native_gen.cpp)
+    // correctly refuses for a `bool` field ("expected bool"), because
+    // letting an int through there silently would blur every other
+    // int/bool mismatch the strict body validator exists to catch.
+    // sqlite3_column_decltype() gives the column's declared type from the
+    // CREATE TABLE statement (not available for an expression column, in
+    // which case it returns nullptr and this falls through to the plain
+    // int case below, same as before) -- checking it for "BOOL" is the
+    // same affinity-detection convention SQLite's own documentation
+    // recommends for telling a real boolean apart from an ordinary integer
+    // column, and what most sqlite wrappers that DO expose a bool type do
+    // under the hood.
+    static bool decltype_is_bool(sqlite3_stmt* stmt, int i) {
+        const char* decl = sqlite3_column_decltype(stmt, i);
+        if (!decl) return false;
+        std::string d(decl);
+        std::transform(d.begin(), d.end(), d.begin(), ::toupper);
+        return d.find("BOOL") != std::string::npos;
+    }
+
     static Value column_value(sqlite3_stmt* stmt, int i) {
         switch (sqlite3_column_type(stmt, i)) {
             case SQLITE_NULL:    return Value::null();
-            case SQLITE_INTEGER: return Value::integer(sqlite3_column_int64(stmt, i));
+            case SQLITE_INTEGER: {
+                long long v = sqlite3_column_int64(stmt, i);
+                if (decltype_is_bool(stmt, i) && (v == 0 || v == 1))
+                    return Value::boolean(v != 0);
+                return Value::integer(v);
+            }
             case SQLITE_FLOAT:   return Value::real(sqlite3_column_double(stmt, i));
 
             // A BLOB is not text: it is arbitrary bytes.  Returning them as a

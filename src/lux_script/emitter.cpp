@@ -19,7 +19,7 @@ int Emitter::declare_local(const std::string& name, SourceLoc loc, Type type) {
     for (auto it = locals_.rbegin(); it != locals_.rend(); ++it) {
         if (it->depth < scope_depth_) break;
         if (it->name == name) {
-            error(loc, "'" + name + "' ya esta declarada en este ambito");
+            error(loc, "'" + name + "' is already declared in this scope");
             return static_cast<int>(std::distance(locals_.begin(), it.base()) - 1);
         }
     }
@@ -48,29 +48,30 @@ void Emitter::begin_scope() { ++scope_depth_; }
 
 void Emitter::end_scope() {
     --scope_depth_;
-    // Las ranuras no se reciclan: el coste es una entrada mas en el vector de
-    // locales y a cambio los indices son estables, lo que simplifica el VM.
+    // Slots are not recycled: the cost is one more entry in the locals
+    // vector, and in exchange the indices are stable, which simplifies the VM.
     while (!locals_.empty() && locals_.back().depth > scope_depth_)
         locals_.pop_back();
 }
 
-// Los 6 puntos de entrada reales (emit_route/emit_function/emit_method/
-// emit_ctor/emit_condition/emit_error_handler) delegan en su check_*
-// correspondiente para construir el IR -- con diags_ real, no un shadow
-// aparte, asi que check_* pasa a ser la UNICA fuente de diagnosticos -- y
-// solo si eso tuvo exito llaman a emit_block/emit_expr (el emisor que
-// consume el IR) para producir el bytecode. La version de emit_expr/
-// emit_stmt/emit_call/emit_block que recorria Expr/Stmt comprobando y
-// emitiendo a la vez, y comprobar_campo/comprobar_metodo_builtin, ya no
-// existen: se retiraron en un commit aparte una vez confirmado -- con este
-// corte hecho y probado de punta a punta -- que nada las seguia llamando.
-// type_of() SI se conserva (la sigue usando check_expr/check_call/
-// check_field): sigue en terminos de Expr porque es al AST, no al IR, a lo
-// que mira el checker cuando necesita el tipo estatico de un receptor.
-// El `return !failed_` final (no `return true`) importa: emitir_render_
-// compilado (el unico sitio que sigue pudiendo fallar durante la emision,
-// no solo durante el chequeo -- ver su comentario) pone failed_ a true si
-// la plantilla en si no compila, y eso solo se sabe DESPUES de emit_block.
+// The 6 real entry points (emit_route/emit_function/emit_method/
+// emit_ctor/emit_condition/emit_error_handler) delegate to their
+// corresponding check_* to build the IR -- with the real diags_, not a
+// separate shadow, so check_* becomes the ONLY source of diagnostics -- and
+// only if that succeeded do they call emit_block/emit_expr (the emitter
+// that consumes the IR) to produce the bytecode. The version of emit_expr/
+// emit_stmt/emit_call/emit_block that walked Expr/Stmt checking and
+// emitting at the same time, and check_field/check_builtin_method,
+// no longer exist: they were removed in a separate commit once it was
+// confirmed -- with this cutover made and tested end to end -- that
+// nothing was calling them anymore. type_of() IS kept (check_expr/
+// check_call/check_field still use it): it stays in terms of Expr because
+// it's the AST, not the IR, that the checker looks at when it needs a
+// receiver's static type. The final `return !failed_` (not `return true`)
+// matters: compiled render emission (the only spot that can still fail
+// during emission, not only during checking -- see its comment) sets
+// failed_ to true if the template itself doesn't compile, and that's only
+// known AFTER emit_block.
 bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
     IrBlock body;
     if (!check_route(route, out, diags_, &body)) { failed_ = true; return false; }
@@ -78,8 +79,8 @@ bool Emitter::emit_route(const RouteDecl& route, Chunk& out) {
 
     emit_block(body);
 
-    // Un handler que se cae por el final no devuelve nada: el motor respondera
-    // con lo que haya escrito un builtin, o 204 si no escribio nada.
+    // A handler that falls through the end returns nothing: the engine will
+    // respond with whatever a builtin wrote, or 204 if nothing was written.
     out.emit(Op::ReturnNull, route.loc);
     return !failed_;
 }
@@ -110,13 +111,13 @@ bool Emitter::emit_ctor(const std::string& cls, const std::vector<std::string>& 
     if (!check_ctor(cls, fields, ct, out, diags_, &body)) { failed_ = true; return false; }
     failed_ = false;
 
-    // check_ctor ya declaro los parametros y `this` (en ese orden, antes de
-    // cualquier begin_scope/end_scope que los pudiera hacer desaparecer de
-    // locals_), asi que siguen ahi para resolverlos por nombre.
+    // check_ctor already declared the parameters and `this` (in that order,
+    // before any begin_scope/end_scope that could make them disappear from
+    // locals_), so they're still there to resolve by name.
     int self = resolve_local("this");
 
-    // La instancia arranca con todos los campos declarados a null, para que
-    // acceder a uno que el constructor no toque de null y no falle.
+    // The instance starts with every declared field set to null, so that
+    // accessing one the constructor doesn't touch is null and doesn't fail.
     for (const auto& f : fields) {
         chunk_->emit(Op::Const, ct.loc, chunk_->add_constant(Value::str(f)));
         chunk_->emit(Op::Const, ct.loc, chunk_->add_constant(Value::null()));
@@ -127,9 +128,9 @@ bool Emitter::emit_ctor(const std::string& cls, const std::vector<std::string>& 
     if (ct.has_body) {
         emit_block(body);
     } else {
-        // Sin cuerpo: cada parametro va al campo de su mismo nombre.
-        // check_ctor ya rechazo cualquier parametro que no sea un campo, asi
-        // que si se llega aqui, todos lo son.
+        // No body: each parameter goes to the field of the same name.
+        // check_ctor already rejected any parameter that isn't a field, so
+        // if we get here, they all are.
         for (const auto& p : ct.params) {
             chunk_->emit(Op::LoadLocal, ct.loc, static_cast<uint32_t>(self));
             int slot = resolve_local(p.name);
@@ -169,14 +170,14 @@ IrExprPtr Emitter::check_condition(const Expr& e, const std::vector<TypedName>& 
 }
 
 // check_route/check_function/check_method/check_ctor/check_error_handler:
-// contrapartida de emit_route/emit_function/emit_method/emit_ctor/
-// emit_error_handler para check_stmt, con el mismo reinicio de estado y las
-// mismas declaraciones de parametros/`this`. Devuelven si esta llamada en
-// concreto no anadio ningun error a `shadow` (no si `shadow` esta vacio del
-// todo: quien llama puede reusar el mismo DiagnosticBag para varios casos).
+// counterpart of emit_route/emit_function/emit_method/emit_ctor/
+// emit_error_handler for check_stmt, with the same state reset and the same
+// parameter/`this` declarations. They return whether this specific call
+// added no error to `shadow` (not whether `shadow` is entirely empty:
+// callers may reuse the same DiagnosticBag across several cases).
 bool Emitter::check_route(const RouteDecl& route, Chunk& out, DiagnosticBag& shadow,
                           IrBlock* out_body) {
-    size_t antes    = shadow.size();
+    size_t before   = shadow.size();
     chunk_          = &out;
     route_method_   = route.method;
     locals_.clear();
@@ -185,29 +186,29 @@ bool Emitter::check_route(const RouteDecl& route, Chunk& out, DiagnosticBag& sha
 
     for (const auto& p : route.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
 
-    // Las guardas son "si no X, devuelve Y" -- el mismo IrStmtKind::Require
-    // que ya usa `require`, y se ejecutan antes que el cuerpo (de fuera hacia
-    // dentro), asi que van primero en el IrBlock que se devuelve.
-    IrBlock guardas;
+    // Guards are "if not X, return Y" -- the same IrStmtKind::Require that
+    // `require` already uses, and they run before the body (from outside
+    // in), so they go first in the IrBlock that's returned.
+    IrBlock guards;
     for (const auto& g : route.guards) {
         if (!g.condition || !g.otherwise) continue;
         if (IrStmtPtr r = check_require_like(g.loc, *g.condition, *g.otherwise, shadow))
-            guardas.push_back(std::move(r));
+            guards.push_back(std::move(r));
     }
 
     IrBlock body = check_block(route.body, shadow);
     if (out_body) {
         out_body->clear();
-        out_body->reserve(guardas.size() + body.size());
-        for (auto& g : guardas) out_body->push_back(std::move(g));
-        for (auto& s : body)    out_body->push_back(std::move(s));
+        out_body->reserve(guards.size() + body.size());
+        for (auto& g : guards) out_body->push_back(std::move(g));
+        for (auto& s : body)   out_body->push_back(std::move(s));
     }
-    return shadow.size() == antes;
+    return shadow.size() == before;
 }
 
 bool Emitter::check_function(const FnDecl& fn, Chunk& out, DiagnosticBag& shadow,
                              IrBlock* out_body) {
-    size_t antes  = shadow.size();
+    size_t before = shadow.size();
     chunk_        = &out;
     route_method_ = "FN";
     locals_.clear();
@@ -217,12 +218,12 @@ bool Emitter::check_function(const FnDecl& fn, Chunk& out, DiagnosticBag& shadow
     for (const auto& p : fn.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
     IrBlock body = check_block(fn.body, shadow);
     if (out_body) *out_body = std::move(body);
-    return shadow.size() == antes;
+    return shadow.size() == before;
 }
 
 bool Emitter::check_method(const std::string& cls, const FnDecl& m, Chunk& out,
                            DiagnosticBag& shadow, IrBlock* out_body) {
-    size_t antes  = shadow.size();
+    size_t before = shadow.size();
     chunk_        = &out;
     route_method_ = "FN";
     locals_.clear();
@@ -233,13 +234,13 @@ bool Emitter::check_method(const std::string& cls, const FnDecl& m, Chunk& out,
     for (const auto& p : m.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
     IrBlock body = check_block(m.body, shadow);
     if (out_body) *out_body = std::move(body);
-    return shadow.size() == antes;
+    return shadow.size() == before;
 }
 
 bool Emitter::check_ctor(const std::string& cls, const std::vector<std::string>& fields,
                          const CtorDecl& ct, Chunk& out, DiagnosticBag& shadow,
                          IrBlock* out_body) {
-    size_t antes  = shadow.size();
+    size_t before = shadow.size();
     chunk_        = &out;
     route_method_ = "FN";
     locals_.clear();
@@ -258,12 +259,12 @@ bool Emitter::check_ctor(const std::string& cls, const std::vector<std::string>&
                 shadow.error(p.loc, "'" + p.name + "' is not a field of '" + cls + "'");
         }
     }
-    return shadow.size() == antes;
+    return shadow.size() == before;
 }
 
 bool Emitter::check_error_handler(const ErrorDecl& decl, Chunk& out, DiagnosticBag& shadow,
                                   IrBlock* out_body) {
-    size_t antes  = shadow.size();
+    size_t before = shadow.size();
     chunk_        = &out;
     route_method_ = "ERROR";
     locals_.clear();
@@ -272,7 +273,7 @@ bool Emitter::check_error_handler(const ErrorDecl& decl, Chunk& out, DiagnosticB
 
     IrBlock body = check_block(decl.body, shadow);
     if (out_body) *out_body = std::move(body);
-    return shadow.size() == antes;
+    return shadow.size() == before;
 }
 
 bool Emitter::emit_error_handler(const ErrorDecl& decl, Chunk& out) {
@@ -285,10 +286,10 @@ bool Emitter::emit_error_handler(const ErrorDecl& decl, Chunk& out) {
     return !failed_;
 }
 
-// Traduce un StmtKind al IrStmtKind correspondiente -- ver el comentario de
-// ir_kind_de: un switch explicito, no un static_cast, para que un StmtKind
-// nuevo sin actualizar esto avise en compilacion.
-static IrStmtKind ir_stmt_kind_de(StmtKind k) {
+// Translates a StmtKind into the corresponding IrStmtKind -- see the
+// comment on ir_kind_of: an explicit switch, not a static_cast, so that a
+// new StmtKind left unupdated here triggers a compile warning.
+static IrStmtKind ir_stmt_kind_of(StmtKind k) {
     switch (k) {
         case StmtKind::Return:   return IrStmtKind::Return;
         case StmtKind::ExprStmt: return IrStmtKind::ExprStmt;
@@ -302,11 +303,11 @@ static IrStmtKind ir_stmt_kind_de(StmtKind k) {
         case StmtKind::Break:    return IrStmtKind::Break;
         case StmtKind::Continue: return IrStmtKind::Continue;
     }
-    return IrStmtKind::Return; // inalcanzable si el switch de arriba es exhaustivo
+    return IrStmtKind::Return; // unreachable if the switch above is exhaustive
 }
 
-// Compartido por check_stmt (Require) y check_route (guardas de grupo): las
-// dos son "si no `cond`, devuelve `otherwise`", el mismo IrStmtKind::Require.
+// Shared by check_stmt (Require) and check_route (group guards): both are
+// "if not `cond`, return `otherwise`", the same IrStmtKind::Require.
 IrStmtPtr Emitter::check_require_like(SourceLoc loc, const Expr& cond, const Expr& otherwise,
                                       DiagnosticBag& shadow) const {
     IrExprPtr c = check_expr(cond, shadow);
@@ -320,22 +321,23 @@ IrStmtPtr Emitter::check_require_like(SourceLoc loc, const Expr& cond, const Exp
     return r;
 }
 
-// Shadow de emit_block/emit_stmt (fase 1, checker en paralelo -- ver
-// emitter.hpp). Mismo orden de comprobaciones, mismo texto, sin tocar chunk_.
-// A diferencia de check_expr, SI llama a declare_local/begin_scope/end_scope:
-// VarDecl, el `for` desazucarado y el nombre de un `catch` son contabilidad
-// de nombres real (no un temporal de codegen), y hace falta reproducirla para
-// que el Ident de una sentencia posterior resuelva a la ranura correcta.
+// Shadow of emit_block/emit_stmt (phase 1, parallel checker -- see
+// emitter.hpp). Same check order, same text, without touching chunk_.
+// Unlike check_expr, it DOES call declare_local/begin_scope/end_scope:
+// VarDecl, the desugared `for`, and a `catch`'s name are real name
+// accounting (not a codegen temporary), and it's necessary to reproduce it
+// so that a later statement's Ident resolves to the correct slot.
 //
-// check_block SIEMPRE visita las sentencias que tiene, aunque alguna falle:
-// eso es lo que permite reportar todos los errores de un bloque en una sola
-// pasada, igual que hace hoy emit_stmt. Una sentencia que fallo (nullptr) se
-// omite del IrBlock resultante -- silenciosamente, no es un error nuevo, ya
-// se reporto en su sitio -- asi que un IrBlock nunca lleva un hueco nulo. Un
-// If/While/For cuya condicion o iterable fallo tampoco se propaga (devuelve
-// nullptr el mismo), aunque su cuerpo se haya revisado entero para no perder
-// los errores que haya dentro; un Try nunca falla por cuenta propia, porque
-// no tiene una expresion propia que comprobar, solo delega en sus bloques.
+// check_block ALWAYS visits every statement it has, even if one fails:
+// that's what allows reporting all of a block's errors in a single pass,
+// just like emit_stmt does today. A statement that failed (nullptr) is
+// omitted from the resulting IrBlock -- silently, it's not a new error, it
+// was already reported at its spot -- so an IrBlock never carries a null
+// gap. An If/While/For whose condition or iterable failed doesn't
+// propagate either (it returns nullptr itself), even though its body was
+// checked in full so as not to lose any errors inside it; a Try never fails
+// on its own account, because it has no expression of its own to check, it
+// only delegates to its blocks.
 IrBlock Emitter::check_block(const Block& body, DiagnosticBag& shadow) {
     begin_scope();
     IrBlock out;
@@ -348,16 +350,16 @@ IrBlock Emitter::check_block(const Block& body, DiagnosticBag& shadow) {
 }
 
 IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
-    auto nodo = [&]() {
+    auto node = [&]() {
         auto r = std::make_unique<IrStmt>();
-        r->kind = ir_stmt_kind_de(s.kind);
+        r->kind = ir_stmt_kind_of(s.kind);
         r->loc  = s.loc;
         return r;
     };
 
     switch (s.kind) {
         case StmtKind::Return: {
-            auto r = nodo();
+            auto r = node();
             if (s.value) {
                 IrExprPtr v = check_expr(*s.value, shadow);
                 if (!v) return nullptr;
@@ -369,7 +371,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
         case StmtKind::ExprStmt: {
             IrExprPtr v = check_expr(*s.value, shadow);
             if (!v) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->value = std::move(v);
             return r;
         }
@@ -381,7 +383,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
                 if (!v) return nullptr;
             }
             int slot = declare_local(s.name, s.loc, Type::from_declared(s.type));
-            auto r = nodo();
+            auto r = node();
             r->value     = std::move(v);
             r->name      = s.name;
             r->decl_type = Type::from_declared(s.type);
@@ -390,27 +392,27 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
         }
 
         case StmtKind::Assign: {
-            // `session.x = v` → __session_set("x", v).
+            // `session.x = v` -> __session_set("x", v).
             if (s.target->kind == ExprKind::Member &&
                 s.target->object->kind == ExprKind::Ident &&
                 s.target->object->text == "session" &&
                 resolve_local("session") < 0) {
                 IrExprPtr v = check_expr(*s.value, shadow);
                 if (!v) return nullptr;
-                auto r = nodo();
+                auto r = node();
                 r->assign_target = IrAssignTarget::Session;
                 r->assign_field  = s.target->text;
                 r->value = std::move(v);
                 return r;
             }
 
-            // `xs[0] = v` y `d["k"] = v`.
+            // `xs[0] = v` and `d["k"] = v`.
             if (s.target->kind == ExprKind::Index) {
                 IrExprPtr obj = check_expr(*s.target->object, shadow);
                 IrExprPtr idx = check_expr(*s.target->lhs, shadow);
                 IrExprPtr val = check_expr(*s.value, shadow);
                 if (!obj || !idx || !val) return nullptr;
-                auto r = nodo();
+                auto r = node();
                 r->assign_target = IrAssignTarget::Index;
                 r->assign_object = std::move(obj);
                 r->assign_index  = std::move(idx);
@@ -418,13 +420,13 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
                 return r;
             }
 
-            // `this.campo = v` y `objeto.campo = v`.
+            // `this.field = v` and `object.field = v`.
             if (s.target->kind == ExprKind::Member) {
                 if (!check_field(*s.target->object, s.target->text, s.loc, shadow)) return nullptr;
                 IrExprPtr obj = check_expr(*s.target->object, shadow);
                 IrExprPtr val = check_expr(*s.value, shadow);
                 if (!obj || !val) return nullptr;
-                auto r = nodo();
+                auto r = node();
                 r->assign_target = IrAssignTarget::Member;
                 r->assign_object = std::move(obj);
                 r->assign_field  = s.target->text;
@@ -443,7 +445,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             }
             IrExprPtr val = check_expr(*s.value, shadow);
             if (!val) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->assign_target = IrAssignTarget::Local;
             r->assign_slot   = slot;
             r->value = std::move(val);
@@ -456,7 +458,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             IrBlock   orelse;
             if (!s.orelse.empty()) orelse = check_block(s.orelse, shadow);
             if (!cond) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->value  = std::move(cond);
             r->body   = std::move(then);
             r->orelse = std::move(orelse);
@@ -469,7 +471,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             IrBlock body = check_block(s.body, shadow);
             loops_.pop_back();
             if (!cond) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->value = std::move(cond);
             r->body  = std::move(body);
             return r;
@@ -480,11 +482,11 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
 
         case StmtKind::Break:
             if (loops_.empty()) { shadow.error(s.loc, "'break' outside a loop"); return nullptr; }
-            return nodo();
+            return node();
 
         case StmtKind::Continue:
             if (loops_.empty()) { shadow.error(s.loc, "'continue' outside a loop"); return nullptr; }
-            return nodo();
+            return node();
 
         case StmtKind::For: {
             begin_scope();
@@ -500,7 +502,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             end_scope();
 
             if (!iterable) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->target    = std::move(iterable);
             r->name      = s.name;
             r->decl_type = Type::from_declared(s.type);
@@ -521,7 +523,7 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             }
             end_scope();
 
-            auto r = nodo();
+            auto r = node();
             r->body   = std::move(body);
             r->name   = s.name;
             r->slot   = slot;
@@ -529,12 +531,12 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             return r;
         }
     }
-    return nullptr; // inalcanzable si el switch de arriba es exhaustivo
+    return nullptr; // unreachable if the switch above is exhaustive
 }
 
-// Solo lo evidente: un literal, o una variable con tipo declarado. No hay
-// inferencia, asi que ante la duda devuelve Type::unknown() y no se
-// comprueba nada.
+// Only the obvious: a literal, or a variable with a declared type. There's
+// no inference, so when in doubt it returns Type::unknown() and nothing
+// gets checked.
 Type Emitter::type_of(const Expr& e) const {
     switch (e.kind) {
         case ExprKind::StringLit: return Type::primitive(Type::Kind::String);
@@ -543,9 +545,9 @@ Type Emitter::type_of(const Expr& e) const {
         case ExprKind::BoolLit:   return Type::primitive(Type::Kind::Bool);
         case ExprKind::Ident:     return local_type(e.text);
         case ExprKind::This:      return local_type("this");
-        // A call's own type, so chaining straight off it (`f().campo`,
-        // `f().metodo()`) resolves exactly like chaining off a variable
-        // that already holds the same value does -- see FnSig::devuelve's
+        // A call's own type, so chaining straight off it (`f().field`,
+        // `f().method()`) resolves exactly like chaining off a variable
+        // that already holds the same value does -- see FnSig::return_type's
         // comment (emitter.hpp) for the bug this closes (an untyped call
         // result silently fell back to whatever a receiver of unknown type
         // dispatches as at runtime, which for a Value::Dict is "only has
@@ -553,7 +555,7 @@ Type Emitter::type_of(const Expr& e) const {
         case ExprKind::Call: {
             if (!e.object) return Type::unknown();
 
-            // A bare name: either a standalone function (`hacer_punto(3, 4)`,
+            // A bare name: either a standalone function (`make_point(3, 4)`,
             // typed by its OWN declared return type) or a constructor
             // (`Item("a")` -- any successful call to one always produces
             // exactly that class, regardless of which overload matched).
@@ -561,7 +563,7 @@ Type Emitter::type_of(const Expr& e) const {
                 const std::string& name = e.object->text;
                 if (functions_) {
                     auto it = functions_->find(name);
-                    if (it != functions_->end()) return it->second.devuelve;
+                    if (it != functions_->end()) return it->second.return_type;
                 }
                 if (classes_ && classes_->count(name)) return Type::class_ref(name);
                 return Type::unknown();
@@ -570,34 +572,34 @@ Type Emitter::type_of(const Expr& e) const {
             if (e.object->kind != ExprKind::Member) return Type::unknown();
             const Type recv = type_of(*e.object->object);
 
-            // A method on a user-defined class (`p.cuadrado()`), typed by
+            // A method on a user-defined class (`p.square()`), typed by
             // that method's OWN declared return type -- checked before the
             // builtin-method table below, since a class is never in it.
             if (classes_) {
                 auto cls = classes_->find(recv.base_name());
                 if (cls != classes_->end()) {
                     auto m = cls->second.methods.find(e.object->text);
-                    if (m != cls->second.methods.end()) return m->second.devuelve;
+                    if (m != cls->second.methods.end()) return m->second.return_type;
                 }
             }
 
-            // Metodo builtin on un receptor de tipo conocido: la cadena sigue.
-            const auto* lista = methods_of(recv.base_name());
-            if (!lista) return Type::unknown();
-            for (const auto& m : *lista)
+            // A builtin method on a receiver of known type: the chain continues.
+            const auto* list = methods_of(recv.base_name());
+            if (!list) return Type::unknown();
+            for (const auto& m : *list)
                 if (e.object->text == m.name)
-                    return m.devuelve ? Type::from_legacy_name(m.devuelve) : recv;
+                    return m.return_type ? Type::from_legacy_name(m.return_type) : recv;
             return Type::unknown();
         }
         default:                  return Type::unknown();
     }
 }
 
-// Shadow de comprobar_campo: misma logica letra por letra, error a `shadow`
-// en vez de a diags_ (fase 1, checker en paralelo -- ver emitter.hpp).
-bool Emitter::check_field(const Expr& objeto, const std::string& campo, SourceLoc loc,
+// Shadow of check_field: same logic letter for letter, error goes to
+// `shadow` instead of diags_ (phase 1, parallel checker -- see emitter.hpp).
+bool Emitter::check_field(const Expr& object, const std::string& field, SourceLoc loc,
                           DiagnosticBag& shadow) const {
-    const Type tr = type_of(objeto);
+    const Type tr = type_of(object);
     if (tr.is_unknown()) return true;
     const std::string base = tr.base_name();
 
@@ -605,42 +607,42 @@ bool Emitter::check_field(const Expr& objeto, const std::string& campo, SourceLo
         auto it = classes_->find(base);
         if (it != classes_->end()) {
             const auto& f = it->second.fields;
-            if (std::find(f.begin(), f.end(), campo) != f.end()) return true;
-            if (it->second.methods.count(campo)) {
-                shadow.error(loc, "'" + base + "." + campo + "' es un method: "
+            if (std::find(f.begin(), f.end(), field) != f.end()) return true;
+            if (it->second.methods.count(field)) {
+                shadow.error(loc, "'" + base + "." + field + "' is a method: "
                            "it must be called with ()");
             } else {
-                std::string hay;
-                for (const auto& n : f) hay += (hay.empty() ? "" : ", ") + n;
-                shadow.error(loc, "'" + base + "' has no field '" + campo + "'" +
-                           (hay.empty() ? "" : "; it has " + hay));
+                std::string has;
+                for (const auto& n : f) has += (has.empty() ? "" : ", ") + n;
+                shadow.error(loc, "'" + base + "' has no field '" + field + "'" +
+                           (has.empty() ? "" : "; it has " + has));
             }
             return false;
         }
     }
     if (methods_of(base) && base != "Dict") {
-        shadow.error(loc, "'" + campo + "' on " + base + ", which has no fields");
+        shadow.error(loc, "'" + field + "' on " + base + ", which has no fields");
         return false;
     }
     return true;
 }
 
-// Shadow de comprobar_metodo_builtin: idem.
+// Shadow of check_builtin_method: same idea.
 bool Emitter::check_builtin_method(const Expr& e, DiagnosticBag& shadow) const {
     const Type recv = type_of(*e.object->object);
-    const auto* lista = methods_of(recv.base_name());
-    if (!lista) return true;
+    const auto* list = methods_of(recv.base_name());
+    if (!list) return true;
 
-    const std::string& metodo = e.object->text;
+    const std::string& method = e.object->text;
     const BuiltinMethod* def = nullptr;
-    for (const auto& m : *lista)
-        if (metodo == m.name) { def = &m; break; }
+    for (const auto& m : *list)
+        if (method == m.name) { def = &m; break; }
 
     if (!def) {
-        std::string hay;
-        for (const auto& m : *lista) hay += (hay.empty() ? "" : ", ") + std::string(m.name);
+        std::string has;
+        for (const auto& m : *list) has += (has.empty() ? "" : ", ") + std::string(m.name);
         shadow.error(e.object->loc, "values of type " + recv.base_name() +
-                             " have no method '" + metodo + "'; it has " + hay);
+                             " have no method '" + method + "'; it has " + has);
         return false;
     }
 
@@ -650,21 +652,22 @@ bool Emitter::check_builtin_method(const Expr& e, DiagnosticBag& shadow) const {
 
     if (static_cast<int>(argc) < def->min_args ||
         static_cast<int>(argc) > def->max_args) {
-        std::string espera = std::to_string(def->min_args);
-        if (def->max_args != def->min_args) espera += "-" + std::to_string(def->max_args);
-        shadow.error(e.loc, "'" + metodo + "()' expects " + espera +
+        std::string expected = std::to_string(def->min_args);
+        if (def->max_args != def->min_args) expected += "-" + std::to_string(def->max_args);
+        shadow.error(e.loc, "'" + method + "()' expects " + expected +
                      " argument(s), but receives " + std::to_string(argc));
         return false;
     }
     return true;
 }
 
-// Traduce un ExprKind al IrExprKind correspondiente. Es una funcion, no un
-// static_cast: las dos enumeraciones it has hoy el mismo orden a proposito,
-// pero un cast confiaria en eso silenciosamente. Con un switch explicito, si
-// alguien anade un ExprKind sin actualizar esta funcion, el compilador avisa
-// (switch no exhaustivo) en vez de dejar pasar un IrExprKind inventado.
-static IrExprKind ir_kind_de(ExprKind k) {
+// Translates an ExprKind into the corresponding IrExprKind. It's a
+// function, not a static_cast: the two enums happen to have the same order
+// today on purpose, but a cast would silently rely on that. With an
+// explicit switch, if someone adds an ExprKind without updating this
+// function, the compiler warns (non-exhaustive switch) instead of letting
+// a made-up IrExprKind slip through.
+static IrExprKind ir_kind_of(ExprKind k) {
     switch (k) {
         case ExprKind::StringLit: return IrExprKind::StringLit;
         case ExprKind::IntLit:    return IrExprKind::IntLit;
@@ -685,35 +688,35 @@ static IrExprKind ir_kind_de(ExprKind k) {
         case ExprKind::ListLit:   return IrExprKind::ListLit;
         case ExprKind::DictLit:   return IrExprKind::DictLit;
     }
-    return IrExprKind::NullLit; // inalcanzable si el switch de arriba es exhaustivo
+    return IrExprKind::NullLit; // unreachable if the switch above is exhaustive
 }
 
-// Shadow de emit_expr (fase 1, checker en paralelo -- ver emitter.hpp): misma
-// forma, mismo orden de comprobaciones y mismo texto de error, pero sin tocar
-// chunk_ y sin declarar ninguna ranura (las declare_local() de emit_expr son
-// temporales de codegen que un paso de solo comprobacion no necesita).
+// Shadow of emit_expr (phase 1, parallel checker -- see emitter.hpp): same
+// shape, same check order and same error text, but without touching chunk_
+// and without declaring a single slot (emit_expr's declare_local() calls
+// are codegen temporaries that a check-only pass doesn't need).
 //
-// Ademas de comprobar, construye el IrExpr de esta expresion. El tipo de
-// cada nodo es SIEMPRE type_of(e), nunca algo mas preciso inventado aqui
-// (seria funcionalidad nueva, no una reproduccion de lo que hay hoy) -- por
-// eso `nodo()` lo fija una sola vez y cada case solo rellena su estructura.
-// nullptr significa "ya se llamo a shadow.error en el sitio exacto": ningun
-// nodo a medio construir se propaga hacia arriba.
+// Besides checking, it builds the IrExpr for this expression. Each node's
+// type is ALWAYS type_of(e), never something more precise invented here
+// (that would be new functionality, not a reproduction of what exists
+// today) -- that's why `node()` sets it just once and each case only fills
+// in its own structure. nullptr means "shadow.error was already called at
+// the exact spot": no half-built node propagates upward.
 IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
-    auto nodo = [&]() {
+    auto node = [&]() {
         auto r = std::make_unique<IrExpr>();
-        r->kind = ir_kind_de(e.kind);
+        r->kind = ir_kind_of(e.kind);
         r->loc  = e.loc;
         r->type = type_of(e);
         return r;
     };
 
     switch (e.kind) {
-        case ExprKind::StringLit: { auto r = nodo(); r->text = e.text; return r; }
-        case ExprKind::IntLit:    { auto r = nodo(); r->int_value = e.int_value; return r; }
-        case ExprKind::FloatLit:  { auto r = nodo(); r->float_value = e.float_value; return r; }
-        case ExprKind::BoolLit:   { auto r = nodo(); r->bool_value = e.bool_value; return r; }
-        case ExprKind::NullLit:   return nodo();
+        case ExprKind::StringLit: { auto r = node(); r->text = e.text; return r; }
+        case ExprKind::IntLit:    { auto r = node(); r->int_value = e.int_value; return r; }
+        case ExprKind::FloatLit:  { auto r = node(); r->float_value = e.float_value; return r; }
+        case ExprKind::BoolLit:   { auto r = node(); r->bool_value = e.bool_value; return r; }
+        case ExprKind::NullLit:   return node();
 
         case ExprKind::Ident: {
             int slot = resolve_local(e.text);
@@ -731,7 +734,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                 // (value.hpp) for why that is a deliberate, smaller feature.
                 auto it = functions_ ? functions_->find(e.text) : FunctionSigs::const_iterator();
                 if (functions_ && it != functions_->end()) {
-                    auto r = nodo();
+                    auto r = node();
                     r->kind = IrExprKind::FuncRef;
                     r->text = e.text;
                     r->call_index = static_cast<int>(it->second.index);
@@ -741,18 +744,18 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                 shadow.error(e.loc, "'" + e.text + "' is not declared");
                 return nullptr;
             }
-            auto r = nodo();
+            auto r = node();
             r->text = e.text;
             r->slot = slot;
             return r;
         }
 
         case ExprKind::Unary: {
-            IrExprPtr operando = check_expr(*e.lhs, shadow);
-            if (!operando) return nullptr;
-            auto r = nodo();
+            IrExprPtr operand = check_expr(*e.lhs, shadow);
+            if (!operand) return nullptr;
+            auto r = node();
             r->text = e.text;
-            r->lhs  = std::move(operando);
+            r->lhs  = std::move(operand);
             return r;
         }
 
@@ -761,7 +764,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                 IrExprPtr l = check_expr(*e.lhs, shadow);
                 IrExprPtr r2 = check_expr(*e.rhs, shadow);
                 if (!l || !r2) return nullptr;
-                auto r = nodo();
+                auto r = node();
                 r->text = e.text;
                 r->lhs = std::move(l);
                 r->rhs = std::move(r2);
@@ -776,7 +779,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                 return nullptr;
             }
             if (!l || !r2) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->text = e.text;
             r->lhs = std::move(l);
             r->rhs = std::move(r2);
@@ -784,19 +787,19 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
         }
 
         case ExprKind::Ternary: {
-            IrExprPtr cond = check_expr(*e.object, shadow);
-            IrExprPtr si   = check_expr(*e.lhs, shadow);
-            IrExprPtr no   = check_expr(*e.rhs, shadow);
-            if (!cond || !si || !no) return nullptr;
-            auto r = nodo();
+            IrExprPtr cond      = check_expr(*e.object, shadow);
+            IrExprPtr then_expr = check_expr(*e.lhs, shadow);
+            IrExprPtr else_expr = check_expr(*e.rhs, shadow);
+            if (!cond || !then_expr || !else_expr) return nullptr;
+            auto r = node();
             r->object = std::move(cond);
-            r->lhs    = std::move(si);
-            r->rhs    = std::move(no);
+            r->lhs    = std::move(then_expr);
+            r->rhs    = std::move(else_expr);
             return r;
         }
 
         case ExprKind::ListLit: {
-            auto r = nodo();
+            auto r = node();
             for (const auto& item : e.items) {
                 IrExprPtr it = check_expr(*item, shadow);
                 if (!it) return nullptr;
@@ -806,7 +809,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
         }
 
         case ExprKind::DictLit: {
-            auto r = nodo();
+            auto r = node();
             for (const auto& entry : e.entries) {
                 IrExprPtr k = check_expr(*entry.key, shadow);
                 IrExprPtr v = check_expr(*entry.value, shadow);
@@ -820,20 +823,20 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
             IrExprPtr obj = check_expr(*e.object, shadow);
             IrExprPtr idx = check_expr(*e.lhs, shadow);
             if (!obj || !idx) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->object = std::move(obj);
             r->lhs    = std::move(idx);
             return r;
         }
 
         case ExprKind::Member: {
-            // `session.x` admite cualquier nombre: se traduce a
-            // __session_get("x"). `text` ya lleva "x"; no hace falta mas.
+            // `session.x` accepts any name: it translates to
+            // __session_get("x"). `text` already carries "x"; nothing more is needed.
             if (e.object->kind == ExprKind::Ident &&
                 e.object->text == "session" &&
                 resolve_local("session") < 0 &&
                 member_native_id("session", e.text) < 0) {
-                auto r = nodo();
+                auto r = node();
                 r->text = e.text;
                 return r;
             }
@@ -863,9 +866,9 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                     shadow.error(e.loc, "'error' only exists inside an 'on error'");
                     return nullptr;
                 }
-                // Miembro de 0 argumentos de un objeto reservado (`sse.open`):
-                // reusa call_name/call_index, ver el comentario de ir.hpp.
-                auto r = nodo();
+                // A 0-argument member of a reserved object (`sse.open`):
+                // reuses call_name/call_index, see the comment in ir.hpp.
+                auto r = node();
                 r->text = e.text;
                 r->call_name  = e.object->text;
                 r->call_index = id;
@@ -892,7 +895,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                                  e.text + "'; it has " + list);
                     return nullptr;
                 }
-                auto r = nodo();
+                auto r = node();
                 r->kind = IrExprKind::StringLit;
                 r->text = e.text;
                 r->type = Type::from_legacy_name("string");
@@ -902,7 +905,7 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
             if (!check_field(*e.object, e.text, e.loc, shadow)) return nullptr;
             IrExprPtr obj = check_expr(*e.object, shadow);
             if (!obj) return nullptr;
-            auto r = nodo();
+            auto r = node();
             r->object = std::move(obj);
             r->text   = e.text;
             return r;
@@ -921,48 +924,49 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                     shadow.error(tgt.loc, "'" + tgt.text + "' is not declared");
                     return nullptr;
                 }
-                auto objetivo = std::make_unique<IrExpr>();
-                objetivo->kind = IrExprKind::Ident;
-                objetivo->loc  = tgt.loc;
-                objetivo->text = tgt.text;
-                objetivo->slot = slot;
-                objetivo->type = local_type(tgt.text);
-                auto r = nodo();
+                auto target = std::make_unique<IrExpr>();
+                target->kind = IrExprKind::Ident;
+                target->loc  = tgt.loc;
+                target->text = tgt.text;
+                target->slot = slot;
+                target->type = local_type(tgt.text);
+                auto r = node();
                 r->text = e.text;
-                r->lhs  = std::move(objetivo);
+                r->lhs  = std::move(target);
                 return r;
             }
             if (tgt.kind == ExprKind::Member) {
-                // Igual que emit_expr: NO se comprueba que el campo exista
-                // (comprobar_campo no se llama aqui hoy tampoco). Reproducir
-                // ese hueco, no arreglarlo, es lo que toca en esta fase.
+                // Same as emit_expr: it does NOT check that the field
+                // exists (check_field isn't called here today either).
+                // Reproducing that gap, not fixing it, is what this phase
+                // calls for.
                 IrExprPtr obj = check_expr(*tgt.object, shadow);
                 if (!obj) return nullptr;
-                auto objetivo = std::make_unique<IrExpr>();
-                objetivo->kind   = IrExprKind::Member;
-                objetivo->loc    = tgt.loc;
-                objetivo->text   = tgt.text;
-                objetivo->object = std::move(obj);
-                auto r = nodo();
+                auto target = std::make_unique<IrExpr>();
+                target->kind   = IrExprKind::Member;
+                target->loc    = tgt.loc;
+                target->text   = tgt.text;
+                target->object = std::move(obj);
+                auto r = node();
                 r->text = e.text;
-                r->lhs  = std::move(objetivo);
+                r->lhs  = std::move(target);
                 return r;
             }
             if (tgt.kind == ExprKind::Index) {
                 IrExprPtr obj = check_expr(*tgt.object, shadow);
                 IrExprPtr idx = check_expr(*tgt.lhs, shadow);
                 if (!obj || !idx) return nullptr;
-                auto objetivo = std::make_unique<IrExpr>();
-                objetivo->kind   = IrExprKind::Index;
-                objetivo->loc    = tgt.loc;
-                objetivo->object = std::move(obj);
-                objetivo->lhs    = std::move(idx);
-                auto r = nodo();
+                auto target = std::make_unique<IrExpr>();
+                target->kind   = IrExprKind::Index;
+                target->loc    = tgt.loc;
+                target->object = std::move(obj);
+                target->lhs    = std::move(idx);
+                auto r = node();
                 r->text = e.text;
-                r->lhs  = std::move(objetivo);
+                r->lhs  = std::move(target);
                 return r;
             }
-            shadow.error(e.loc, "'++' y '--' only apply to a variable, a field "
+            shadow.error(e.loc, "'++' and '--' only apply to a variable, a field "
                          "or an indexed element");
             return nullptr;
         }
@@ -973,10 +977,10 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                              "(sleep, a database module, or an is_async native module call)");
                 return nullptr;
             }
-            IrExprPtr llamada = check_call(*e.lhs, /*awaited=*/true, shadow);
-            if (!llamada) return nullptr;
-            auto r = nodo();
-            r->lhs = std::move(llamada);
+            IrExprPtr call = check_call(*e.lhs, /*awaited=*/true, shadow);
+            if (!call) return nullptr;
+            auto r = node();
+            r->lhs = std::move(call);
             return r;
         }
 
@@ -986,17 +990,17 @@ IrExprPtr Emitter::check_expr(const Expr& e, DiagnosticBag& shadow) const {
                 shadow.error(e.loc, "'this' only exists inside a method or a constructor");
                 return nullptr;
             }
-            auto r = nodo();
+            auto r = node();
             r->slot = slot;
             return r;
         }
     }
-    return nullptr; // inalcanzable si el switch de arriba es exhaustivo
+    return nullptr; // unreachable if the switch above is exhaustive
 }
 
-// Shadow de emit_call: misma forma, mismo orden, mismo texto -- ver el
-// comentario de check_expr. Construye un IrExpr(kind=Call) con call_shape ya
-// resuelto a una de las formas de IrCallShape (ir.hpp).
+// Shadow of emit_call: same shape, same order, same text -- see check_expr's
+// comment. Builds an IrExpr(kind=Call) with call_shape already resolved to
+// one of the IrCallShape shapes (ir.hpp).
 // Collects the operands of a '+' chain in evaluation order, on the raw AST.
 // It only walks down the left: the right-hand side enters as is, even if it
 // is another '+' in parentheses, so as not to reassociate what the parser
@@ -1012,16 +1016,24 @@ void Emitter::flatten_concat(const Expr& e, std::vector<const Expr*>& out) {
 }
 
 // True if `e` IS, or is built by concatenating in, a direct call to
-// query()/header() — the two builtins that hand back exactly what the
-// client sent, unvalidated. No dataflow tracking: assigning the result to a
-// local first (`string next = query("next")`) is not caught, on purpose —
-// that shape at least gives the developer a place to put a check before the
-// value reaches redirect()/SQL. This only catches the literal, unguarded
-// splice, which is also the only shape with no legitimate reading.
+// query()/header() or a read of request.body — the ones that hand back
+// exactly what the client sent, unvalidated. No dataflow tracking: assigning
+// the result to a local first (`string next = query("next")`) is not
+// caught, on purpose — that shape at least gives the developer a place to
+// put a check before the value reaches redirect()/SQL. This only catches
+// the literal, unguarded splice, which is also the only shape with no
+// legitimate reading.
 bool Emitter::looks_like_direct_request_data(const Expr& e) {
     if (e.kind == ExprKind::Call && e.object &&
         e.object->kind == ExprKind::Ident &&
         (e.object->text == "query" || e.object->text == "header")) {
+        return true;
+    }
+    // request.body: the raw request body, added for webhook signature
+    // verification (GUIDE.md) -- exactly as attacker-controlled as
+    // query()/header(), so glueing it into SQL text needs the same warning.
+    if (e.kind == ExprKind::Member && e.text == "body" && e.object &&
+        e.object->kind == ExprKind::Ident && e.object->text == "request") {
         return true;
     }
     if (e.kind == ExprKind::Binary && e.text == "+" && e.lhs && e.rhs) {
@@ -1034,7 +1046,7 @@ bool Emitter::looks_like_direct_request_data(const Expr& e) {
 IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow) const {
     if (!e.object) { shadow.error(e.loc, "call without a target"); return nullptr; }
 
-    auto llamada = [&](IrCallShape shape) {
+    auto make_call = [&](IrCallShape shape) {
         auto r = std::make_unique<IrExpr>();
         r->kind = IrExprKind::Call;
         r->loc  = e.loc;
@@ -1091,7 +1103,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             return nullptr;
         }
 
-        IrExprPtr r = llamada(IrCallShape::BuiltinModuleCall);
+        IrExprPtr r = make_call(IrCallShape::BuiltinModuleCall);
         r->call_name  = obj;
         r->call_index = BuiltinModuleRegistry::instance().id_of(obj, member);
 
@@ -1130,7 +1142,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         return r;
     }
 
-    // sse.send(...) — miembro de un objeto reservado.
+    // sse.send(...) — a member of a reserved object.
     if (e.object->kind == ExprKind::Member &&
         e.object->object->kind == ExprKind::Ident &&
         resolve_local(e.object->object->text) < 0 &&
@@ -1159,7 +1171,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                              "(...)'");
                 return nullptr;
             }
-            IrExprPtr r = llamada(IrCallShape::DbModuleCall);
+            IrExprPtr r = make_call(IrCallShape::DbModuleCall);
             r->call_name  = obj;
             r->call_index = id;
 
@@ -1254,7 +1266,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             auto it = functions_ ? functions_->find(name) : FunctionSigs::const_iterator();
             if (functions_ && it != functions_->end()) {
                 const FnSig& sig = it->second;
-                IrExprPtr r = llamada(IrCallShape::UserFunctionCall);
+                IrExprPtr r = make_call(IrCallShape::UserFunctionCall);
                 r->call_index = static_cast<int>(sig.index);
 
                 size_t given = 0;
@@ -1270,16 +1282,16 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                 }
 
                 if (given < sig.required || given > sig.defaults.size()) {
-                    std::string esperado = std::to_string(sig.required);
+                    std::string expected = std::to_string(sig.required);
                     if (sig.defaults.size() != sig.required)
-                        esperado += " to " + std::to_string(sig.defaults.size());
-                    shadow.error(e.loc, "'" + name + "()' expects " + esperado +
+                        expected += " to " + std::to_string(sig.defaults.size());
+                    shadow.error(e.loc, "'" + name + "()' expects " + expected +
                                  " argument(s), but receives " + std::to_string(given));
                     return nullptr;
                 }
-                // Los que faltan se rellenan con su valor por defecto: la
-                // funcion recibe siempre la lista completa (igual que hoy
-                // emit_call, ver el comentario de IrArg).
+                // The missing ones are filled in with their default value:
+                // the function always receives the full list (same as
+                // emit_call does today, see IrArg's comment).
                 for (size_t i = given; i < sig.defaults.size(); ++i) {
                     IrExprPtr v = check_expr(*sig.defaults[i], shadow);
                     if (!v) return nullptr;
@@ -1289,7 +1301,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             }
             auto ct = classes_ ? classes_->find(name) : ClassSigs::const_iterator();
             if (classes_ && ct != classes_->end()) {
-                IrExprPtr r = llamada(IrCallShape::ConstructorCall);
+                IrExprPtr r = make_call(IrCallShape::ConstructorCall);
 
                 size_t argc = 0;
                 for (const auto& a : e.args) {
@@ -1304,12 +1316,12 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                 }
                 auto found = ct->second.ctors.find(argc);
                 if (found == ct->second.ctors.end()) {
-                    std::string opciones;
+                    std::string options;
                     for (const auto& [n, _] : ct->second.ctors)
-                        opciones += (opciones.empty() ? "" : ", ") + std::to_string(n);
+                        options += (options.empty() ? "" : ", ") + std::to_string(n);
                     shadow.error(e.loc, "'" + name + "' has no constructor taking " +
                                  std::to_string(argc) + " parameter(s)" +
-                                 (opciones.empty() ? "" : "; there are ones taking " + opciones));
+                                 (options.empty() ? "" : "; there are ones taking " + options));
                     return nullptr;
                 }
                 r->call_index = static_cast<int>(found->second);
@@ -1324,9 +1336,9 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
     else if (e.object->kind == ExprKind::Member && classes_) {
         // type_of(), not a hand-rolled Ident/This-only check: the receiver
         // can be any expression whose type is known, including a call to
-        // a function/constructor/method (`hacer_punto(3, 4).cuadrado()`,
+        // a function/constructor/method (`make_point(3, 4).square()`,
         // chaining straight off the result) -- see type_of()'s own Call
-        // case (added alongside FnSig::devuelve) for why that now resolves
+        // case (added alongside FnSig::return_type) for why that now resolves
         // to something other than unknown.
         Type recv_type = type_of(*e.object->object);
         const std::string recv_name = recv_type.base_name();
@@ -1342,14 +1354,14 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                                          e.object->text + "'");
                     return nullptr;
                 }
-                // Campo con un metodo generico encima: sigue mas abajo.
+                // A field with a generic method on top: continues further below.
             } else {
                 const FnSig& sig = m->second;
-                IrExprPtr receptor = check_expr(*e.object->object, shadow);
-                if (!receptor) return nullptr;
+                IrExprPtr receiver = check_expr(*e.object->object, shadow);
+                if (!receiver) return nullptr;
 
-                IrExprPtr r = llamada(IrCallShape::ClassMethodCall);
-                r->object     = std::move(receptor);
+                IrExprPtr r = make_call(IrCallShape::ClassMethodCall);
+                r->object     = std::move(receiver);
                 r->call_index = static_cast<int>(sig.index);
 
                 size_t given = 0;
@@ -1378,38 +1390,40 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             }
         }
         if (!check_builtin_method(e, shadow)) return nullptr;
-        IrExprPtr receptor = check_expr(*e.object->object, shadow);
-        if (!receptor) return nullptr;
-        IrExprPtr r = llamada(IrCallShape::BuiltinMethodCall);
-        r->object    = std::move(receptor);
+        IrExprPtr receiver = check_expr(*e.object->object, shadow);
+        if (!receiver) return nullptr;
+        IrExprPtr r = make_call(IrCallShape::BuiltinMethodCall);
+        r->object    = std::move(receiver);
         r->call_name = e.object->text;
         for (const auto& a : e.args) {
             IrExprPtr v = check_expr(*a.value, shadow);
             if (!v) return nullptr;
-            // A diferencia de las demas formas, un metodo builtin SI admite
-            // nombrados (comprobar_metodo_builtin los cuenta como un hueco
-            // mas, no los rechaza): a.name viaja, para que emit_method_call_
-            // dynamic pueda agruparlos en el Dict del ultimo hueco
-            // posicional, igual que hace hoy con el Expr original.
+            // Unlike the other shapes, a builtin method DOES accept named
+            // arguments (check_builtin_method counts them as just
+            // another slot, it doesn't reject them): a.name travels along,
+            // so emit_method_call_dynamic can group them into the Dict of
+            // the last positional slot, the same way it does today with the
+            // original Expr.
             r->args.push_back({a.name, std::move(v), a.loc});
         }
         return r;
     }
     else if (e.object->kind == ExprKind::Member) {
         if (!check_builtin_method(e, shadow)) return nullptr;
-        IrExprPtr receptor = check_expr(*e.object->object, shadow);
-        if (!receptor) return nullptr;
-        IrExprPtr r = llamada(IrCallShape::BuiltinMethodCall);
-        r->object    = std::move(receptor);
+        IrExprPtr receiver = check_expr(*e.object->object, shadow);
+        if (!receiver) return nullptr;
+        IrExprPtr r = make_call(IrCallShape::BuiltinMethodCall);
+        r->object    = std::move(receiver);
         r->call_name = e.object->text;
         for (const auto& a : e.args) {
             IrExprPtr v = check_expr(*a.value, shadow);
             if (!v) return nullptr;
-            // A diferencia de las demas formas, un metodo builtin SI admite
-            // nombrados (comprobar_metodo_builtin los cuenta como un hueco
-            // mas, no los rechaza): a.name viaja, para que emit_method_call_
-            // dynamic pueda agruparlos en el Dict del ultimo hueco
-            // posicional, igual que hace hoy con el Expr original.
+            // Unlike the other shapes, a builtin method DOES accept named
+            // arguments (check_builtin_method counts them as just
+            // another slot, it doesn't reject them): a.name travels along,
+            // so emit_method_call_dynamic can group them into the Dict of
+            // the last positional slot, the same way it does today with the
+            // original Expr.
             r->args.push_back({a.name, std::move(v), a.loc});
         }
         return r;
@@ -1419,9 +1433,9 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         return nullptr;
     }
 
-    // Cola compartida por las formas 2 (ReservedMemberCall) y 6
-    // (BuiltinGlobalCall): las dos resuelven a un native_id valido y
-    // comparten exactamente las mismas reglas de await/nombrados/aridad.
+    // Tail shared by shapes 2 (ReservedMemberCall) and 6
+    // (BuiltinGlobalCall): both resolve to a valid native_id and share
+    // exactly the same await/named-argument/arity rules.
     const NativeDef& def = native_at(id);
 
     if (def.is_async && !awaited) {
@@ -1442,7 +1456,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         return nullptr;
     }
 
-    IrExprPtr r = llamada(shape);
+    IrExprPtr r = make_call(shape);
     r->call_name  = name;
     r->call_index = id;
 
@@ -1466,9 +1480,10 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         return nullptr;
     }
 
-    // render() compila la plantilla en si en emit_compiled_render, que es
-    // superficie de plantillas (fase 3), no de expresiones -- no se reproduce
-    // aqui; solo se valida lo que ya se valido arriba mas las subexpresiones.
+    // render() compiles the template itself in emit_compiled_render, which
+    // is template surface (phase 3), not expression surface -- it isn't
+    // reproduced here; only what was already validated above plus the
+    // subexpressions gets validated.
     if (name == "render") {
         if (e.args.empty() || !e.args[0].name.empty() ||
             e.args[0].value->kind != ExprKind::StringLit) {
@@ -1511,7 +1526,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         (def.max_args >= 0 && static_cast<int>(argc) > def.max_args)) {
         std::string expected = std::to_string(def.min_args);
         if (def.max_args != def.min_args)
-            expected += def.max_args < 0 ? " o mas"
+            expected += def.max_args < 0 ? " or more"
                                          : "-" + std::to_string(def.max_args);
         shadow.error(e.loc, "'" + name + "()' expects " + expected +
                      " argument(s), but receives " + std::to_string(argc));
@@ -1523,17 +1538,17 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Fase 1 de --native: el emisor real, que consume el IR ya
-// construido y validado por check_expr/check_stmt (llamados con diags_ real
-// desde los 6 puntos de entrada -- ver emit_route/emit_function/etc. mas
-// arriba). No comprueba nada -- ni una llamada a error(), ni una busqueda
-// por nombre -- porque para cuando se llama a cualquiera de estas funciones,
-// el checker ya dio el visto bueno: lee campos ya resueltos (slot,
-// call_shape, call_index, call_name, type) en vez de resolverlos. La version
-// on Expr/Stmt que este emisor reemplaza (mismos opcodes, mismo orden;
-// esto es su contrapartida MECANICA, node a nodo) ya no existe: se retiro
-// una vez confirmado, con el corte real hecho y probado, que nada la seguia
-// llamando.
+// Phase 1 of --native: the real emitter, which consumes the IR already
+// built and validated by check_expr/check_stmt (called with the real diags_
+// from the 6 entry points -- see emit_route/emit_function/etc. above). It
+// checks nothing -- not a call to error(), not a name lookup -- because by
+// the time any of these functions is called, the checker has already given
+// its approval: it reads already-resolved fields (slot, call_shape,
+// call_index, call_name, type) instead of resolving them. The version over
+// Expr/Stmt that this emitter replaces (same opcodes, same order; this is
+// its MECHANICAL counterpart, node for node) no longer exists: it was
+// removed once it was confirmed, with the real cutover made and tested,
+// that nothing was calling it anymore.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Same idea as flatten_concat, but walking the already-built IrExpr chain
@@ -1637,9 +1652,9 @@ void Emitter::emit_expr(const IrExpr& e) {
             else if (e.text == "<=") op = Op::Le;
             else if (e.text == ">")  op = Op::Gt;
             else if (e.text == ">=") op = Op::Ge;
-            // check_expr ya rechazo cualquier operador que no sea uno de
-            // estos once -- un IrExpr::Binary con otro texto no deberia
-            // poder existir.
+            // check_expr already rejected any operator that isn't one of
+            // these eleven -- an IrExpr::Binary with any other text
+            // shouldn't be able to exist.
 
             if (is_int_expr_ir(*e.lhs) && is_int_expr_ir(*e.rhs)) {
                 switch (op) {
@@ -1688,10 +1703,10 @@ void Emitter::emit_expr(const IrExpr& e) {
             break;
 
         case IrExprKind::Member: {
-            // Sin receptor: o bien session.x (__session_get) o bien un
-            // miembro de 0 argumentos de un objeto reservado (sse.open),
-            // distinguibles por si call_name viene relleno -- ver el
-            // comentario de ir.hpp on este reuso.
+            // No receiver: either session.x (__session_get) or a
+            // 0-argument member of a reserved object (sse.open),
+            // distinguished by whether call_name comes filled in -- see
+            // ir.hpp's comment on this reuse.
             if (!e.object) {
                 if (e.call_name.empty()) {
                     chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::str(e.text)));
@@ -1738,12 +1753,12 @@ void Emitter::emit_expr(const IrExpr& e) {
                 uint32_t name_k = chunk_->add_constant(Value::str(tgt.text));
 
                 emit_expr(*tgt.object);
-                int obj = declare_local(" recep", e.loc);
+                int obj = declare_local(" receiver", e.loc);
                 chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(obj));
 
                 chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(obj));
                 chunk_->emit(Op::GetMember, e.loc, name_k);
-                int prev = declare_local(" previo", e.loc);
+                int prev = declare_local(" previous", e.loc);
                 chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(prev));
 
                 chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(obj));
@@ -1763,17 +1778,17 @@ void Emitter::emit_expr(const IrExpr& e) {
             if (tgt.kind == IrExprKind::Index) {
                 begin_scope();
                 emit_expr(*tgt.object);
-                int cont = declare_local(" contened", e.loc);
+                int cont = declare_local(" container", e.loc);
                 chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(cont));
 
                 emit_expr(*tgt.lhs);
-                int idx = declare_local(" indice", e.loc);
+                int idx = declare_local(" index", e.loc);
                 chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(idx));
 
                 chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(cont));
                 chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(idx));
                 chunk_->emit(Op::GetIndex, e.loc);
-                int prev = declare_local(" previo", e.loc);
+                int prev = declare_local(" previous", e.loc);
                 chunk_->emit(Op::StoreLocal, e.loc, static_cast<uint32_t>(prev));
 
                 chunk_->emit(Op::LoadLocal, e.loc, static_cast<uint32_t>(cont));
@@ -1790,18 +1805,18 @@ void Emitter::emit_expr(const IrExpr& e) {
                 end_scope();
                 break;
             }
-            // check_expr ya rechazo cualquier otro objetivo de ++/--.
+            // check_expr already rejected any other target of ++/--.
             break;
         }
 
         case IrExprKind::Await:
-            emit_call(*e.lhs); // e.lhs es siempre Call, con awaited ya en true
+            emit_call(*e.lhs); // e.lhs is always Call, with awaited already true
             break;
     }
 }
 
-// Contrapartida de emit_method_call_dynamic on el IR: mismo orden
-// (receptor, posicionales, nombrados agrupados en un Dict), mismo opcode.
+// Counterpart of emit_method_call_dynamic over the IR: same order
+// (receiver, positional arguments, named ones grouped into a Dict), same opcode.
 void Emitter::emit_method_call_dynamic(const IrExpr& e) {
     emit_expr(*e.object);
     uint32_t argc = 0, named = 0;
@@ -1819,14 +1834,14 @@ void Emitter::emit_method_call_dynamic(const IrExpr& e) {
         chunk_->emit(Op::MakeDict, e.loc, named);
         ++argc;
     }
-    // check_builtin_method ya rechazo mas de 255 argumentos.
+    // check_builtin_method already rejected more than 255 arguments.
     chunk_->emit(Op::CallMethod, e.loc,
                  (chunk_->add_constant(Value::str(e.call_name)) << 8) | argc);
 }
 
-// Cola compartida por ReservedMemberCall y BuiltinGlobalCall (salvo
-// render()): las dos resuelven a un native_id valido con las mismas reglas
-// de nombrados que hoy tiene emit_call.
+// Tail shared by ReservedMemberCall and BuiltinGlobalCall (except
+// render()): both resolve to a valid native_id with the same named-argument
+// rules emit_call has today.
 void Emitter::emit_native_call(const IrExpr& e) {
     uint32_t argc = 0, named = 0;
     for (const auto& a : e.args) {
@@ -1911,44 +1926,44 @@ void Emitter::emit_call(const IrExpr& e) {
             break;
 
         case IrCallShape::Invalid:
-            break; // inalcanzable: check_call ya lo rechazo
+            break; // unreachable: check_call already rejected it
     }
 }
 
-// Contrapartida de emit_compiled_render on el IR. Sigue siendo la
-// unica excepcion real a "check_* es la unica fuente de diagnosticos": la
-// plantilla en si (su fichero, sus propios {{ }}) no se puede validar sin
-// leerla y compilarla, y eso es superficie de plantillas (fase 3), no algo
-// que check_call pueda anticipar on una expresion. error()/diags_ siguen
-// siendo correctos aqui a proposito.
+// Counterpart of emit_compiled_render over the IR. It remains the one real
+// exception to "check_* is the only source of diagnostics": the template
+// itself (its file, its own {{ }}) cannot be validated without reading and
+// compiling it, and that's template surface (phase 3), not something
+// check_call can anticipate over an expression. error()/diags_ are still
+// correct here on purpose.
 void Emitter::emit_compiled_render(const IrExpr& e) {
-    const std::string& nombre = e.args[0].value->text;
+    const std::string& name = e.args[0].value->text;
 
-    if (nombre.find("..") != std::string::npos ||
-        std::filesystem::path(nombre).is_absolute()) {
-        error(e.args[0].loc, "nombre de plantilla no valido: '" + nombre + "'");
+    if (name.find("..") != std::string::npos ||
+        std::filesystem::path(name).is_absolute()) {
+        error(e.args[0].loc, "invalid template name: '" + name + "'");
         return;
     }
 
-    std::vector<TypedName> claves;
+    std::vector<TypedName> keys;
     for (const auto& a : e.args) {
         if (a.name.empty()) continue;
-        claves.push_back({a.name, a.value->type.base_name()});
+        keys.push_back({a.name, a.value->type.base_name()});
     }
 
-    const std::filesystem::path ruta =
-        std::filesystem::path(templates_->dir) / nombre;
-    std::ifstream f(ruta, std::ios::binary);
+    const std::filesystem::path path =
+        std::filesystem::path(templates_->dir) / name;
+    std::ifstream f(path, std::ios::binary);
     if (!f) {
-        error(e.args[0].loc, "no se encuentra la plantilla '" + nombre + "' en " +
+        error(e.args[0].loc, "template not found: '" + name + "' in " +
                              templates_->dir);
         return;
     }
-    const std::string fuente((std::istreambuf_iterator<char>(f)),
+    const std::string source((std::istreambuf_iterator<char>(f)),
                              std::istreambuf_iterator<char>());
 
     Template tpl;
-    if (!compilar_plantilla(fuente, nombre, templates_->dir, claves, diags_, tpl)) {
+    if (!compile_template(source, name, templates_->dir, keys, diags_, tpl)) {
         failed_ = true;
         return;
     }
@@ -1961,7 +1976,7 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
         chunk_->emit(Op::Const, a.loc, chunk_->add_constant(Value::str(a.name)));
         emit_expr(*a.value);
     }
-    chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(claves.size()));
+    chunk_->emit(Op::MakeDict, e.loc, static_cast<uint32_t>(keys.size()));
 
     const int id = native_id("__render_tpl");
     chunk_->emit(Op::CallNative, e.loc, (static_cast<uint32_t>(id) << 8) | 2u);
@@ -1986,17 +2001,25 @@ void Emitter::emit_stmt(const IrStmt& s) {
             break;
 
         case IrStmtKind::VarDecl:
-            if (s.value) emit_expr(*s.value);
+            if (s.value) {
+                emit_expr(*s.value);
+                // See CoerceInt/CoerceFloat's own comment (bytecode.hpp):
+                // only int/float are ambiguous at runtime (division), so
+                // only those two declared types get a coercion here.
+                if (s.decl_type.kind() == Type::Kind::Int)
+                    chunk_->emit(Op::CoerceInt, s.loc);
+                else if (s.decl_type.kind() == Type::Kind::Float)
+                    chunk_->emit(Op::CoerceFloat, s.loc);
+            }
             else         chunk_->emit(Op::Const, s.loc, chunk_->add_constant(Value::null()));
-            // declare_local() hay que llamarlo aqui tambien, aunque el slot
-            // real ya lo trae s.slot: es lo que mantiene locals_ (y por
-            // tanto el proximo slot que calcule un declare_local posterior
-            // -- el `for` desazucarado, un `catch`, un temporal de ++/--)
-            // sincronizado con el que ya calculo check_stmt. Sin esto, el
-            // primer VarDecl del cuerpo deja locals_ mas corto de lo que
-            // deberia y todo lo que se declare despues cae en la ranura
-            // equivocada -- exactamente el bug que encontro
-            // tests/emit_ir_shadow.cpp antes de este arreglo.
+            // declare_local() has to be called here too, even though s.slot
+            // already carries the real slot: it's what keeps locals_ (and
+            // therefore the next slot a later declare_local computes -- the
+            // desugared `for`, a `catch`, a ++/-- temporary) synchronized
+            // with what check_stmt already computed. Without this, the
+            // body's first VarDecl leaves locals_ shorter than it should be
+            // and everything declared afterward lands in the wrong slot --
+            // exactly the bug tests/emit_ir_shadow.cpp found before this fix.
             declare_local(s.name, s.loc, s.decl_type);
             chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(s.slot));
             break;
@@ -2105,11 +2128,11 @@ void Emitter::emit_stmt(const IrStmt& s) {
             int index = declare_local(" index", s.loc);
             chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(index));
 
-            // `s.slot` ya es la ranura de la variable del bucle -- pero
-            // declare_local hay que llamarlo igual, en el mismo orden, para
-            // que items/count/index caigan en las ranuras que check_stmt ya
-            // calculo (ver el comentario de IrStmt::slot). Se descarta el
-            // valor de vuelta porque ya se conoce.
+            // `s.slot` is already the loop variable's slot -- but
+            // declare_local still has to be called, in the same order, so
+            // that items/count/index land in the slots check_stmt already
+            // computed (see IrStmt::slot's comment). The return value is
+            // discarded because it's already known.
             declare_local(s.name, s.loc, s.decl_type);
             uint32_t var = static_cast<uint32_t>(s.slot);
 
@@ -2155,9 +2178,9 @@ void Emitter::emit_stmt(const IrStmt& s) {
 
             begin_scope();
             if (!s.name.empty()) {
-                // Mismo motivo que en For: declare_local hay que llamarlo
-                // para que la ranura real coincida con la que ya calculo
-                // check_stmt (s.slot); no se resuelve por nombre aqui.
+                // Same reason as in For: declare_local has to be called so
+                // that the real slot matches the one check_stmt already
+                // computed (s.slot); it isn't resolved by name here.
                 declare_local(s.name, s.loc);
                 chunk_->emit(Op::StoreLocal, s.loc, static_cast<uint32_t>(s.slot));
             } else {

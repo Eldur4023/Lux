@@ -12,10 +12,10 @@
 
 namespace lux_script {
 
-void escapar_html(const std::string& in, std::string& out) {
+void escape_html(const std::string& in, std::string& out) {
     // What must not be touched is copied in one go, as in the JSON escaping:
     // the text of a page almost never carries metacharacters.
-    size_t limpio = 0;
+    size_t clean = 0;
     for (size_t i = 0; i < in.size(); ++i) {
         const char* rep = nullptr;
         switch (in[i]) {
@@ -26,23 +26,23 @@ void escapar_html(const std::string& in, std::string& out) {
             case '\'': rep = "&#39;";  break;
             default: continue;
         }
-        out.append(in, limpio, i - limpio);
+        out.append(in, clean, i - clean);
         out += rep;
-        limpio = i + 1;
+        clean = i + 1;
     }
-    out.append(in, limpio, in.size() - limpio);
+    out.append(in, clean, in.size() - clean);
 }
 
 namespace {
 
 // Trims spaces on the left/right according to the {%- and -%} markers.
-void recortar_izq(std::string& t) {
+void trim_before_tag(std::string& t) {
     size_t n = t.size();
     while (n > 0 && (t[n - 1] == ' ' || t[n - 1] == '\t' ||
                      t[n - 1] == '\n' || t[n - 1] == '\r')) --n;
     t.resize(n);
 }
-void recortar_der(size_t& i, const std::string& src) {
+void trim_after_tag(size_t& i, const std::string& src) {
     while (i < src.size() && (src[i] == ' ' || src[i] == '\t' ||
                               src[i] == '\n' || src[i] == '\r')) ++i;
 }
@@ -57,44 +57,44 @@ std::string trim(std::string s) {
 
 // ─── Compiler ────────────────────────────────────────────────────────────────
 
-class Compilador {
+class Compiler {
 public:
-    Compilador(const std::string& dir, DiagnosticBag& diags, Template& out)
+    Compiler(const std::string& dir, DiagnosticBag& diags, Template& out)
         : dir_(dir), diags_(diags), out_(out) {}
 
-    bool compilar(const std::string& fuente, const std::string& file,
+    bool compile(const std::string& source, const std::string& file,
                   const std::vector<TypedName>& data) {
         out_.names = data;
 
         // Inheritance: it climbs the {% extends %} chain collecting blocks.  The
         // child wins, so only the block that was not there yet is recorded.  At
         // the end the ROOT is compiled, with the blocks substituted.
-        std::string raiz = fuente, raiz_fichero = file;
+        std::string root = source, root_file = file;
         for (int n = 0; n <= 16; ++n) {
             std::string parent;
-            if (!padre_de(raiz, raiz_fichero, parent)) break;
+            if (!parent_of(root, root_file, parent)) break;
             if (n == 16) {
-                error(loc_inicio(raiz_fichero), raiz_fichero,
+                error(start_loc(root_file), root_file,
                       "too many chained {% extends %}: is there a cycle?");
                 return false;
             }
-            recoger_bloques(raiz, raiz_fichero);
+            collect_blocks(root, root_file);
             std::string parent_text;
             if (!read_template(parent, parent_text)) {
-                error(loc_inicio(raiz_fichero), raiz_fichero,
+                error(start_loc(root_file), root_file,
                       "base template not found: '" + parent + "'");
                 return false;
             }
-            raiz         = std::move(parent_text);
-            raiz_fichero = parent;
+            root      = std::move(parent_text);
+            root_file = parent;
         }
 
-        cuerpo(raiz, raiz_fichero, 0);
+        body(root, root_file, 0);
         if (!open_.empty()) {
             error(open_.back().loc, file,
                   "missing {% end" + open_.back().kind + " %}");
         }
-        return !fallo_;
+        return !failed_;
     }
 
 private:
@@ -104,20 +104,20 @@ private:
         std::vector<size_t>  patches;  // jumps to the end of the block
         size_t               start = 0;
         // Names this loop shadows, to give them back when it closes.
-        std::vector<std::pair<size_t, std::string>> tapados;
+        std::vector<std::pair<size_t, std::string>> shadowed;
     };
 
     // Shadows an already visible name.  Slots cannot be moved —every compiled
     // chunk indexes by position— so the outer one is renamed to something that
     // is not a valid identifier: it stays unreachable for as long as the loop
     // lasts, which is exactly what shadowing means.
-    void tapar(const std::string& name, std::vector<std::pair<size_t, std::string>>& tapados) {
+    void shadow(const std::string& name, std::vector<std::pair<size_t, std::string>>& shadowed) {
         for (size_t i = out_.names.size(); i-- > 0;) {
             if (out_.names[i].name == name) {
-                tapados.emplace_back(i, out_.names[i].name);
+                shadowed.emplace_back(i, out_.names[i].name);
                 // The marker carries the slot so two shadowed names cannot clash
                 // with each other: the emitter does not allow that either.
-                out_.names[i].name = " tapado" + std::to_string(i);
+                out_.names[i].name = " shadowed" + std::to_string(i);
                 break;
             }
         }
@@ -126,7 +126,7 @@ private:
     const std::string&   dir_;
     DiagnosticBag&       diags_;
     Template&           out_;
-    bool                 fallo_ = false;
+    bool                 failed_ = false;
     std::vector<Open> open_;
     std::vector<std::string> file_stack_;   // to detect include cycles
 
@@ -134,12 +134,12 @@ private:
     std::vector<std::unique_ptr<SourceFile>> files_;
 
     void error(SourceLoc loc, const std::string& file, std::string msg) {
-        fallo_ = true;
+        failed_ = true;
         (void)file;
         diags_.error(loc, std::move(msg));
     }
 
-    const std::string* guardar_nombre(const std::string& f) {
+    const std::string* intern_file_name(const std::string& f) {
         for (const auto& sf : files_)
             if (sf->path == f && sf->text.empty()) return &sf->path;
         files_.push_back(std::make_unique<SourceFile>(SourceFile{f, {}}));
@@ -156,13 +156,13 @@ private:
 
     // Compiles a Lux Script expression with the names visible right now.
     // Returns its index in out_.exprs, or SIZE_MAX if it does not compile.
-    size_t expresion(const std::string& expr_text, SourceLoc loc,
+    size_t expression(const std::string& expr_text, SourceLoc loc,
                      const std::string& file) {
         // The fragment is lexed as if it were a file of its own.  Its errors
         // carry the position INSIDE the fragment, which is no use to anyone: the
         // template location is reported and the reason attached.
         files_.push_back(std::make_unique<SourceFile>(
-            SourceFile{file + " (expresion)", expr_text}));
+            SourceFile{file + " (expression)", expr_text}));
         SourceFile&   sf = *files_.back();
         DiagnosticBag own_diags;
 
@@ -188,15 +188,15 @@ private:
         return out_.exprs.size() - 1;
     }
 
-    void cuerpo(const std::string& src, const std::string& file, int depth);
+    void body(const std::string& src, const std::string& file, int depth);
 
     // Blocks the child (or the grandchild) defines, by name.  They also keep
     // which file they came from, so the error points at the right place.
-    std::map<std::string, std::pair<std::string, std::string>> bloques_;
+    std::map<std::string, std::pair<std::string, std::string>> blocks_;
 
-    SourceLoc loc_inicio(const std::string& file) {
+    SourceLoc start_loc(const std::string& file) {
         SourceLoc l;
-        l.file = guardar_nombre(file);
+        l.file = intern_file_name(file);
         l.line = 1;
         l.col  = 1;
         return l;
@@ -212,19 +212,19 @@ private:
 
     // If the template starts with {% extends "x" %}, returns x.  It has to be
     // first: a template that inherits contributes no text of its own, only blocks.
-    bool padre_de(const std::string& src, const std::string& file,
+    bool parent_of(const std::string& src, const std::string& file,
                   std::string& parent) {
         size_t i = src.find_first_not_of(" \t\r\n");
         if (i == std::string::npos || src.compare(i, 2, "{%") != 0) return false;
-        size_t fin = src.find("%}", i);
-        if (fin == std::string::npos) return false;
-        std::string cont = trim(src.substr(i + 2, fin - i - 2));
-        if (cont.rfind("extends", 0) != 0) return false;
-        parent = trim(cont.substr(7));
+        size_t close_pos = src.find("%}", i);
+        if (close_pos == std::string::npos) return false;
+        std::string inner = trim(src.substr(i + 2, close_pos - i - 2));
+        if (inner.rfind("extends", 0) != 0) return false;
+        parent = trim(inner.substr(7));
         if (parent.size() >= 2 && (parent.front() == 0x22 || parent.front() == 0x27))
             parent = parent.substr(1, parent.size() - 2);
         if (parent.empty()) {
-            error(loc_inicio(file), file, "{% extends %} without a template name");
+            error(start_loc(file), file, "{% extends %} without a template name");
             return false;
         }
         return true;
@@ -236,16 +236,16 @@ private:
         int  level = 1;
         size_t i   = from_;
         while (i < src.size()) {
-            size_t abre = src.find("{%", i);
-            if (abre == std::string::npos) break;
-            size_t fin = src.find("%}", abre);
-            if (fin == std::string::npos) break;
-            std::string cont = trim(src.substr(abre + 2, fin - abre - 2));
-            if (cont.rfind("block", 0) == 0)      ++level;
-            else if (cont.rfind("endblock", 0) == 0) {
-                if (--level == 0) { content_end = abre; return fin + 2; }
+            size_t open_pos = src.find("{%", i);
+            if (open_pos == std::string::npos) break;
+            size_t close_pos = src.find("%}", open_pos);
+            if (close_pos == std::string::npos) break;
+            std::string inner = trim(src.substr(open_pos + 2, close_pos - open_pos - 2));
+            if (inner.rfind("block", 0) == 0)      ++level;
+            else if (inner.rfind("endblock", 0) == 0) {
+                if (--level == 0) { content_end = open_pos; return close_pos + 2; }
             }
-            i = fin + 2;
+            i = close_pos + 2;
         }
         content_end = src.size();
         return std::string::npos;
@@ -253,27 +253,27 @@ private:
 
     // Records the blocks of a child template.  The first one seen wins: it
     // climbs from the most derived, so the lower one shadows the upper.
-    void recoger_bloques(const std::string& src, const std::string& file) {
+    void collect_blocks(const std::string& src, const std::string& file) {
         size_t i = 0;
         while (i < src.size()) {
-            size_t abre = src.find("{%", i);
-            if (abre == std::string::npos) break;
-            size_t fin = src.find("%}", abre);
-            if (fin == std::string::npos) break;
-            std::string cont = trim(src.substr(abre + 2, fin - abre - 2));
-            if (cont.rfind("block", 0) != 0) { i = fin + 2; continue; }
+            size_t open_pos = src.find("{%", i);
+            if (open_pos == std::string::npos) break;
+            size_t close_pos = src.find("%}", open_pos);
+            if (close_pos == std::string::npos) break;
+            std::string inner = trim(src.substr(open_pos + 2, close_pos - open_pos - 2));
+            if (inner.rfind("block", 0) != 0) { i = close_pos + 2; continue; }
 
-            std::string name = trim(cont.substr(5));
-            size_t      cfin   = 0;
-            size_t      tras   = end_of_block(src, fin + 2, cfin);
-            if (tras == std::string::npos) {
-                error(loc_inicio(file), file,
+            std::string name = trim(inner.substr(5));
+            size_t      content_end = 0;
+            size_t      after       = end_of_block(src, close_pos + 2, content_end);
+            if (after == std::string::npos) {
+                error(start_loc(file), file,
                       "missing {% endblock %} for block '" + name + "'");
                 return;
             }
-            if (!name.empty() && !bloques_.count(name))
-                bloques_[name] = {src.substr(fin + 2, cfin - fin - 2), file};
-            i = tras;
+            if (!name.empty() && !blocks_.count(name))
+                blocks_[name] = {src.substr(close_pos + 2, content_end - close_pos - 2), file};
+            i = after;
         }
     }
 
@@ -288,14 +288,14 @@ public:
 } // namespace
 
 // The body is defined outside so {% include %} can recurse.
-void Compilador::cuerpo(const std::string& src, const std::string& file,
+void Compiler::body(const std::string& src, const std::string& file,
                         int depth) {
     size_t i = 0, text_from = 0;
     int    line = 1;
 
-    auto loc_en = [&](size_t pos) {
+    auto loc_at = [&](size_t pos) {
         SourceLoc l;
-        l.file = guardar_nombre(file);
+        l.file = intern_file_name(file);
         int ln = 1, col = 1;
         for (size_t k = 0; k < pos && k < src.size(); ++k) {
             if (src[k] == '\n') { ++ln; col = 1; } else ++col;
@@ -307,41 +307,41 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
     (void)line;
 
     while (i < src.size()) {
-        size_t abre = src.find('{', i);
-        if (abre == std::string::npos || abre + 1 >= src.size()) break;
-        const char type = src[abre + 1];
-        if (type != '{' && type != '%' && type != '#') { i = abre + 1; continue; }
+        size_t open_pos = src.find('{', i);
+        if (open_pos == std::string::npos || open_pos + 1 >= src.size()) break;
+        const char type = src[open_pos + 1];
+        if (type != '{' && type != '%' && type != '#') { i = open_pos + 1; continue; }
 
-        const bool recorta_antes = (abre + 2 < src.size() && src[abre + 2] == '-');
-        const char* cierre_str = (type == '{') ? "}}" : (type == '%') ? "%}" : "#}";
-        size_t cierre = src.find(cierre_str, abre + 2);
-        if (cierre == std::string::npos) {
-            error(loc_en(abre), file, std::string("missing the closing '") +
+        const bool trim_before = (open_pos + 2 < src.size() && src[open_pos + 2] == '-');
+        const char* close_str = (type == '{') ? "}}" : (type == '%') ? "%}" : "#}";
+        size_t close_pos = src.find(close_str, open_pos + 2);
+        if (close_pos == std::string::npos) {
+            error(loc_at(open_pos), file, std::string("missing the closing '") +
                   (type == '{' ? "{{" : type == '%' ? "{%" : "{#") + "'");
             return;
         }
-        const bool recorta_despues = (cierre > abre + 2 && src[cierre - 1] == '-');
+        const bool trim_after = (close_pos > open_pos + 2 && src[close_pos - 1] == '-');
 
-        std::string previo = src.substr(text_from, abre - text_from);
-        if (recorta_antes) recortar_izq(previo);
-        text(std::move(previo));
+        std::string preceding = src.substr(text_from, open_pos - text_from);
+        if (trim_before) trim_before_tag(preceding);
+        text(std::move(preceding));
 
-        size_t ini_cont = abre + 2 + (recorta_antes ? 1 : 0);
-        size_t end_cont = cierre - (recorta_despues ? 1 : 0);
-        std::string content = trim(src.substr(ini_cont, end_cont - ini_cont));
-        const SourceLoc loc = loc_en(abre);
+        size_t content_begin = open_pos + 2 + (trim_before ? 1 : 0);
+        size_t content_stop  = close_pos - (trim_after ? 1 : 0);
+        std::string content = trim(src.substr(content_begin, content_stop - content_begin));
+        const SourceLoc loc = loc_at(open_pos);
 
-        i = cierre + 2;
-        if (recorta_despues) recortar_der(i, src);
+        i = close_pos + 2;
+        if (trim_after) trim_after_tag(i, src);
         text_from = i;
 
-        if (type == '#') continue;                       // comentario
+        if (type == '#') continue;                       // comment
 
-        if (type == '{') {                               // {{ expresion }}
-            bool crudo = false;
+        if (type == '{') {                               // {{ expression }}
+            bool raw = false;
             if (content.size() > 5 &&
                 content.compare(content.size() - 5, 5, "|safe") == 0) {
-                crudo = true;
+                raw = true;
                 content = trim(content.substr(0, content.size() - 5));
             }
             if (content.find('|') != std::string::npos) {
@@ -350,9 +350,9 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
                       "Instead of {{ x|upper }}, write {{ x.upper() }}");
                 continue;
             }
-            size_t k = expresion(content, loc, file);
+            size_t k = expression(content, loc, file);
             if (k == SIZE_MAX) continue;
-            out_.code.push_back({crudo ? Template::Op::WriteRaw
+            out_.code.push_back({raw ? Template::Op::WriteRaw
                                        : Template::Op::Write,
                                  static_cast<uint32_t>(k), 0, 0, 0, loc});
             continue;
@@ -360,15 +360,29 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
 
         // {% tag ... %}
         std::string tag = content.substr(0, content.find_first_of(" \t"));
-        std::string resto    = trim(content.substr(tag.size()));
+        std::string rest    = trim(content.substr(tag.size()));
 
         if (tag == "if") {
-            size_t k = expresion(resto, loc, file);
-            if (k == SIZE_MAX) continue;
-            out_.code.push_back({Template::Op::SaltarSiFalso,
-                                 static_cast<uint32_t>(k), 0, 0, 0, loc});
-            Open ab{"if", loc, {}, out_.code.size() - 1};
-            open_.push_back(std::move(ab));
+            size_t k = expression(rest, loc, file);
+            // Still pushed onto `open_` even when the condition itself
+            // failed to compile (`k == SIZE_MAX`, e.g. an undeclared
+            // variable) -- with `start = SIZE_MAX`, the same sentinel
+            // `else` below already uses for "no pending condition to
+            // patch". Before this, a broken `{% if %}` left NOTHING on
+            // `open_`, so its own `{% endif %}` (or `{% elif %}`/
+            // `{% else %}`) found the stack empty and reported a second,
+            // unrelated "{% endif %} without {% if %}" — real template
+            // code, misdiagnosed as a structural typo — on top of the one
+            // real error that made the condition fail in the first place.
+            // The template is never going to run anyway once ANY error is
+            // reported (diags already has one), so what codegen happens
+            // for the rest of this broken block does not have to be
+            // correct, only structurally balanced enough not to cascade.
+            Open ob{"if", loc, {}, k == SIZE_MAX ? SIZE_MAX : out_.code.size()};
+            if (k != SIZE_MAX)
+                out_.code.push_back({Template::Op::JumpIfFalse,
+                                     static_cast<uint32_t>(k), 0, 0, 0, loc});
+            open_.push_back(std::move(ob));
 
         } else if (tag == "elif" || tag == "else") {
             if (open_.empty() || open_.back().kind != "if") {
@@ -376,20 +390,23 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
                 continue;
             }
             // The previous block jumps to the end of the whole chain.
-            out_.code.push_back({Template::Op::Saltar, 0, 0, 0, 0, loc});
+            out_.code.push_back({Template::Op::Jump, 0, 0, 0, 0, loc});
             open_.back().patches.push_back(out_.code.size() - 1);
-            // And the pending JumpIfFalse lands here.
-            out_.code[open_.back().start].b =
-                static_cast<uint32_t>(out_.code.size());
+            // And the pending JumpIfFalse lands here -- unless the `if` (or
+            // a previous `elif`) never actually emitted one because ITS
+            // condition failed to compile (see the `if` branch above).
+            if (open_.back().start != SIZE_MAX)
+                out_.code[open_.back().start].b =
+                    static_cast<uint32_t>(out_.code.size());
 
             if (tag == "elif") {
-                size_t k = expresion(resto, loc, file);
-                if (k == SIZE_MAX) continue;
-                out_.code.push_back({Template::Op::SaltarSiFalso,
+                size_t k = expression(rest, loc, file);
+                if (k == SIZE_MAX) { open_.back().start = SIZE_MAX; continue; }
+                out_.code.push_back({Template::Op::JumpIfFalse,
                                      static_cast<uint32_t>(k), 0, 0, 0, loc});
                 open_.back().start = out_.code.size() - 1;
             } else {
-                open_.back().start = SIZE_MAX;   // no queda condicion pendiente
+                open_.back().start = SIZE_MAX;   // no condition left pending
             }
 
         } else if (tag == "endif") {
@@ -397,34 +414,34 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
                 error(loc, file, "{% endif %} without {% if %}");
                 continue;
             }
-            Open ab = std::move(open_.back());
+            Open ob = std::move(open_.back());
             open_.pop_back();
-            if (ab.start != SIZE_MAX)
-                out_.code[ab.start].b = static_cast<uint32_t>(out_.code.size());
-            for (size_t p : ab.patches)
+            if (ob.start != SIZE_MAX)
+                out_.code[ob.start].b = static_cast<uint32_t>(out_.code.size());
+            for (size_t p : ob.patches)
                 out_.code[p].b = static_cast<uint32_t>(out_.code.size());
 
         } else if (tag == "for") {
             // for <name> in <expression>
-            size_t en = resto.find(" in ");
-            if (en == std::string::npos) {
+            size_t in_pos = rest.find(" in ");
+            if (in_pos == std::string::npos) {
                 error(loc, file, "expected {% for x in list %}");
                 continue;
             }
-            std::string var   = trim(resto.substr(0, en));
-            std::string list_ = trim(resto.substr(en + 4));
+            std::string var   = trim(rest.substr(0, in_pos));
+            std::string list_ = trim(rest.substr(in_pos + 4));
             if (var.empty()) {
                 error(loc, file, "missing the loop variable name");
                 continue;
             }
-            size_t k = expresion(list_, loc, file);
+            size_t k = expression(list_, loc, file);
             if (k == SIZE_MAX) continue;
 
             // Slots only grow, and the names this loop shadows are recorded to
             // give them back at the {% endfor %}.
-            std::vector<std::pair<size_t, std::string>> tapados;
-            tapar(var, tapados);
-            tapar("loop", tapados);
+            std::vector<std::pair<size_t, std::string>> shadowed;
+            shadow(var, shadowed);
+            shadow("loop", shadowed);
 
             const uint32_t slot = static_cast<uint32_t>(out_.names.size());
             // The loop variable carries no type: it depends on what is inside
@@ -433,31 +450,31 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
             const uint32_t slot_loop = static_cast<uint32_t>(out_.names.size());
             out_.names.push_back({"loop", {}});
 
-            out_.code.push_back({Template::Op::BucleInicio,
+            out_.code.push_back({Template::Op::LoopStart,
                                  static_cast<uint32_t>(k), 0, slot, slot_loop, loc});
-            Open ab{"for", loc, {}, out_.code.size() - 1, std::move(tapados)};
-            open_.push_back(std::move(ab));
+            Open ob{"for", loc, {}, out_.code.size() - 1, std::move(shadowed)};
+            open_.push_back(std::move(ob));
 
         } else if (tag == "endfor") {
             if (open_.empty() || open_.back().kind != "for") {
                 error(loc, file, "{% endfor %} without {% for %}");
                 continue;
             }
-            Open ab = std::move(open_.back());
+            Open ob = std::move(open_.back());
             open_.pop_back();
-            for (const auto& [idx, nom] : ab.tapados) out_.names[idx].name = nom;
-            const auto& ini = out_.code[ab.start];
-            out_.code.push_back({Template::Op::BucleSiguiente, 0,
-                                 static_cast<uint32_t>(ab.start + 1),
-                                 ini.slot, ini.slot_loop, loc});
-            out_.code[ab.start].b = static_cast<uint32_t>(out_.code.size());
+            for (const auto& [idx, old_name] : ob.shadowed) out_.names[idx].name = old_name;
+            const auto& start_instr = out_.code[ob.start];
+            out_.code.push_back({Template::Op::LoopNext, 0,
+                                 static_cast<uint32_t>(ob.start + 1),
+                                 start_instr.slot, start_instr.slot_loop, loc});
+            out_.code[ob.start].b = static_cast<uint32_t>(out_.code.size());
 
         } else if (tag == "include") {
             if (depth > 16) {
                 error(loc, file, "too many nested {% include %}: is there a cycle?");
                 continue;
             }
-            std::string name = trim(resto);
+            std::string name = trim(rest);
             if (name.size() >= 2 && (name.front() == '"' || name.front() == '\''))
                 name = name.substr(1, name.size() - 2);
             std::filesystem::path path = std::filesystem::path(dir_) / name;
@@ -470,25 +487,25 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
                 error(loc, file, "template not found: '" + name + "'");
                 continue;
             }
-            std::string incluido((std::istreambuf_iterator<char>(f)),
+            std::string included((std::istreambuf_iterator<char>(f)),
                                  std::istreambuf_iterator<char>());
-            cuerpo(incluido, name, depth + 1);
+            body(included, name, depth + 1);
 
         } else if (tag == "block") {
             // At the root: if the child defined this block, ITS text is compiled
             // and the one here is skipped; if not, the one here is compiled,
             // which is the default value.
-            const std::string name = trim(resto);
+            const std::string name = trim(rest);
             size_t content_end = 0;
-            size_t tras = end_of_block(src, i, content_end);
-            if (tras == std::string::npos) {
+            size_t after = end_of_block(src, i, content_end);
+            if (after == std::string::npos) {
                 error(loc, file, "missing {% endblock %} for block '" + name + "'");
                 return;
             }
-            auto it = bloques_.find(name);
-            if (it != bloques_.end()) {
-                cuerpo(it->second.first, it->second.second, depth + 1);
-                i = tras;
+            auto it = blocks_.find(name);
+            if (it != blocks_.end()) {
+                body(it->second.first, it->second.second, depth + 1);
+                i = after;
                 text_from = i;
             }
             // With no replacement, reading carries on normally: the default
@@ -501,7 +518,7 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
             error(loc, file, "{% extends %} must be the first thing in the template");
 
         } else if (tag == "macro" || tag == "endmacro") {
-            error(loc, file, "{% " + tag + " %} no existe en Lux Script: "
+            error(loc, file, "{% " + tag + " %} does not exist in Lux Script: "
                                 "to reuse, use {% include %} or a function from the .lux");
         } else {
             error(loc, file, "unknown tag: {% " + tag + " %}");
@@ -511,17 +528,17 @@ void Compilador::cuerpo(const std::string& src, const std::string& file,
     if (text_from < src.size()) text(src.substr(text_from));
 }
 
-bool compilar_plantilla(const std::string& fuente, const std::string& file,
+bool compile_template(const std::string& source, const std::string& file,
                         const std::string& dir,
                         const std::vector<TypedName>& data,
                         DiagnosticBag& diags, Template& out) {
-    Compilador c(dir, diags, out);
-    return c.compilar(fuente, file, data);
+    Compiler c(dir, diags, out);
+    return c.compile(source, file, data);
 }
 
-// ─── Renderizado ─────────────────────────────────────────────────────────────
+// ─── Rendering ───────────────────────────────────────────────────────────────
 
-bool render_plantilla(const Template& p, std::vector<Value> values,
+bool render_template(const Template& p, std::vector<Value> values,
                       NativeCtx& ctx, const FunctionTable* fns,
                       std::string& out, std::string& error) {
     // One slot per name: the input data already arrives, the rest are loop
@@ -535,7 +552,7 @@ bool render_plantilla(const Template& p, std::vector<Value> values,
 
     thread_local VM vm;
 
-    auto evaluar = [&](uint32_t idx, Value& out) -> bool {
+    auto evaluate = [&](uint32_t idx, Value& out) -> bool {
         VM::Result r = vm.start(p.exprs[idx], values, ctx, fns);
         if (r.status != VM::Status::Done) {
             error = r.error;
@@ -545,7 +562,7 @@ bool render_plantilla(const Template& p, std::vector<Value> values,
         return true;
     };
 
-    auto poner_loop = [&](uint32_t slot_loop, size_t i, size_t n) {
+    auto set_loop = [&](uint32_t slot_loop, size_t i, size_t n) {
         Value::Dict d;
         d.reserve(5);
         d["index"]  = Value::integer(static_cast<long long>(i + 1));
@@ -567,31 +584,31 @@ bool render_plantilla(const Template& p, std::vector<Value> values,
 
             case Template::Op::Write: {
                 Value v;
-                if (!evaluar(in.a, v)) return false;
-                escapar_html(v.to_string(), out);
+                if (!evaluate(in.a, v)) return false;
+                escape_html(v.to_string(), out);
                 ++pc;
                 break;
             }
             case Template::Op::WriteRaw: {
                 Value v;
-                if (!evaluar(in.a, v)) return false;
+                if (!evaluate(in.a, v)) return false;
                 out += v.to_string();
                 ++pc;
                 break;
             }
-            case Template::Op::SaltarSiFalso: {
+            case Template::Op::JumpIfFalse: {
                 Value v;
-                if (!evaluar(in.a, v)) return false;
+                if (!evaluate(in.a, v)) return false;
                 pc = v.truthy() ? pc + 1 : in.b;
                 break;
             }
-            case Template::Op::Saltar:
+            case Template::Op::Jump:
                 pc = in.b;
                 break;
 
-            case Template::Op::BucleInicio: {
+            case Template::Op::LoopStart: {
                 Value v;
-                if (!evaluar(in.a, v)) return false;
+                if (!evaluate(in.a, v)) return false;
                 if (!v.is_list()) {
                     error = std::string("{% for %} needs a list, not ") +
                             v.type_name();
@@ -601,16 +618,16 @@ bool render_plantilla(const Template& p, std::vector<Value> values,
                 if (list_->as_list().empty()) { pc = in.b; break; }
                 loops.push_back({list_, 0});
                 values[in.slot] = list_->as_list()[0];
-                poner_loop(in.slot_loop, 0, list_->as_list().size());
+                set_loop(in.slot_loop, 0, list_->as_list().size());
                 ++pc;
                 break;
             }
-            case Template::Op::BucleSiguiente: {
+            case Template::Op::LoopNext: {
                 Frame& m = loops.back();
                 const auto& l = m.list_->as_list();
                 if (++m.i < l.size()) {
                     values[in.slot] = l[m.i];
-                    poner_loop(in.slot_loop, m.i, l.size());
+                    set_loop(in.slot_loop, m.i, l.size());
                     pc = in.b;
                 } else {
                     loops.pop_back();

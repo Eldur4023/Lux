@@ -35,7 +35,7 @@ get endpoint("/one/:id", int id):
 
 get endpoint("/search", string q):
     List<Json> rows = await sqlite.query("select id from accounts where name = ?", q)
-    return { "encontrados": len(rows) }
+    return { "found": len(rows) }
 
 get endpoint("/balances"):
     List<Json> rows = await sqlite.query("select balance from accounts where name = ?", "ana")
@@ -52,8 +52,8 @@ post endpoint("/undo"):
     await sqlite.begin()
     await sqlite.exec("update accounts set balance = 0 where name = ?", "ana")
     await sqlite.rollback()
-    return { "deshecho": true }
+    return { "undone": true }
 
 get endpoint("/bad"):
-    Json r = await sqlite.query("select * from no_existe")
+    Json r = await sqlite.query("select * from no_such_table")
     return r

@@ -27,8 +27,9 @@ struct HttpParser::ParseContext {
     // well-formed request that is simply too big, not a malformed one.
     bool body_too_large = false;
 
-    // Back-pointer to the owning parser's OnComplete (stable address)
-    OnComplete* on_complete = nullptr;
+    // Back-pointer to the owning parser's callbacks (stable address)
+    OnComplete*        on_complete         = nullptr;
+    OnHeadersComplete* on_headers_complete = nullptr;
 };
 
 // ── llhttp callbacks ───────────────────────────────────────────────────────
@@ -53,9 +54,24 @@ static void commit_header(HttpParser::ParseContext* c) {
     auto it = c->current.headers.find(key);
     if (it != c->current.headers.end()) {
         // RFC 7230 §3.2.2: duplicate headers may be combined with ", ".
-        // set-cookie is the sole exception — each value must stay on its own line.
-        // In practice set-cookie appears in responses, not requests, but guard anyway.
-        const char* sep = (key == "set-cookie") ? "\n" : ", ";
+        // Two exceptions:
+        //  - set-cookie: each value must stay on its own line (in practice
+        //    it appears in responses, not requests, but guard anyway).
+        //  - cookie: RFC 6265bis §5.4 and RFC 7540 §8.1.2.5 both allow a
+        //    client to send it as SEVERAL header fields (HTTP/2 encourages
+        //    exactly this, splitting on ';' for better HPACK compression),
+        //    and both specify joining them back with "; " -- Cookie's OWN
+        //    value syntax already uses "; " to separate cookie-pairs, so
+        //    joining with ", " (correct for headers where comma has no
+        //    special meaning) instead glues the last pair of one header
+        //    field to the first pair of the next with a comma in between:
+        //    `Cookie: a=1` + `Cookie: b=2` became "a=1, b=2", which
+        //    parse_cookie_header() (cookies.hpp) — splitting on ';', not
+        //    ',' — then reads as ONE cookie named "a" with the value
+        //    "1, b=2", silently losing "b" entirely.
+        const char* sep = (key == "set-cookie") ? "\n"
+                         : (key == "cookie")     ? "; "
+                                                  : ", ";
         it->second += sep;
         it->second += c->last_value;
     } else {
@@ -99,6 +115,12 @@ static int cb_on_headers_complete(llhttp_t* p) {
     int major = llhttp_get_http_major(p);
     int minor = llhttp_get_http_minor(p);
     c->current.version = (major == 1 && minor == 0) ? "HTTP/1.0" : "HTTP/1.1";
+
+    // Headers are done; the body (if any) starts next. Let the connection
+    // layer swap the Slowloris header timer for the request timer HERE,
+    // not once the body has also fully arrived (see OnHeadersComplete's
+    // comment in http_parser.hpp).
+    if (c->on_headers_complete && *c->on_headers_complete) (*c->on_headers_complete)();
     return HPE_OK;
 }
 
@@ -129,7 +151,23 @@ static int cb_on_message_complete(llhttp_t* p) {
 
     (*c->on_complete)(std::move(c->current));
 
-    // Reset per-message state (keep parser alive for keep-alive)
+    // Reset per-message state (keep parser alive for keep-alive).
+    //
+    // Chunked trailers (RFC 7230 §4.1.2) run through the SAME
+    // on_header_field/on_header_value callbacks as the real headers, but
+    // arrive AFTER on_headers_complete already fired for this message —
+    // there is no later "new field" callback in this message to commit the
+    // last trailer via commit_header()'s value_pending check, so a
+    // single-trailer message left last_field/last_value/value_pending set
+    // here. Without clearing them, the NEXT request parsed on this
+    // keep-alive connection would see cb_on_header_field's "previous
+    // pair is complete" branch fire on ITS first header and commit the
+    // stale trailer — from a request that already finished — into the new
+    // request's header map. Trailers are not exposed to handlers at all,
+    // so discarding rather than committing them is correct either way.
+    c->last_field.clear();
+    c->last_value.clear();
+    c->value_pending = false;
     c->current      = {};
     c->header_count = 0;
 
@@ -141,13 +179,15 @@ static int cb_on_message_complete(llhttp_t* p) {
 
 // ── HttpParser ─────────────────────────────────────────────────────────────
 
-HttpParser::HttpParser(OnComplete on_complete)
+HttpParser::HttpParser(OnComplete on_complete, OnHeadersComplete on_headers_complete)
     : on_complete_(std::move(on_complete))
+    , on_headers_complete_(std::move(on_headers_complete))
     , ctx_(std::make_unique<ParseContext>())
     , parser_(std::make_unique<llhttp_t>())
     , settings_(std::make_unique<llhttp_settings_t>())
 {
-    ctx_->on_complete = &on_complete_;
+    ctx_->on_complete         = &on_complete_;
+    ctx_->on_headers_complete = &on_headers_complete_;
 
     llhttp_settings_init(settings_.get());
     settings_->on_url              = cb_on_url;

@@ -33,6 +33,7 @@ const char* tok_name(Tok t) {
         case Tok::KwPut:    return "put";
         case Tok::KwPatch:  return "patch";
         case Tok::KwDelete: return "delete";
+        case Tok::KwOptions: return "options";
         case Tok::KwAny:    return "any";
         case Tok::KwSse:    return "sse";
         case Tok::KwWs:     return "ws";
@@ -105,7 +106,8 @@ Tok keyword_or_ident(std::string_view s) {
         {"enum", Tok::KwEnum},
 
         {"get", Tok::KwGet}, {"post", Tok::KwPost}, {"put", Tok::KwPut},
-        {"patch", Tok::KwPatch}, {"delete", Tok::KwDelete}, {"any", Tok::KwAny},
+        {"patch", Tok::KwPatch}, {"delete", Tok::KwDelete}, {"options", Tok::KwOptions},
+        {"any", Tok::KwAny},
         {"sse", Tok::KwSse}, {"ws", Tok::KwWs},
 
         {"if", Tok::KwIf}, {"else", Tok::KwElse}, {"elif", Tok::KwElif}, {"while", Tok::KwWhile},

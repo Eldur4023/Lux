@@ -24,7 +24,7 @@ enum class Tok {
     KwOrigins, KwValidate, KwStatic, KwSpa, KwEnum,
 
     // Metodos de path
-    KwGet, KwPost, KwPut, KwPatch, KwDelete, KwAny, KwSse, KwWs,
+    KwGet, KwPost, KwPut, KwPatch, KwDelete, KwOptions, KwAny, KwSse, KwWs,
 
     // Sentencias
     KwIf, KwElse, KwElif, KwWhile, KwFor, KwIn, KwReturn, KwRequire,
