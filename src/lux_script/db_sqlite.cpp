@@ -67,13 +67,13 @@ public:
         char* msg = nullptr;
         sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
-        // synchronous=FULL (el valor por defecto) fsyncea en cada commit --
-        // medido: 2.78ms/commit, contra 0.04ms/commit con NORMAL. En WAL,
-        // NORMAL sigue siendo seguro ante cualquier caida del proceso o de la
-        // aplicacion (el WAL queda consistente); solo se pueden perder los
-        // ultimos commits ante una perdida de energia o un panico del kernel
-        // -- es la recomendacion propia de SQLite para journal_mode=WAL, no
-        // una relajacion improvisada.
+        // synchronous=FULL (the default) fsyncs on every commit -- measured:
+        // 2.78ms/commit, versus 0.04ms/commit with NORMAL. In WAL, NORMAL is
+        // still safe against any crash of the process or the application
+        // (the WAL stays consistent); only the last few commits can be lost
+        // in the event of a power loss or a kernel panic -- this is SQLite's
+        // own recommendation for journal_mode=WAL, not an improvised
+        // relaxation.
         sqlite3_exec(db, "PRAGMA synchronous=NORMAL", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
         sqlite3_exec(db, "PRAGMA foreign_keys=ON", nullptr, nullptr, &msg);
@@ -89,8 +89,8 @@ public:
     bool query(size_t worker, const std::string& sql, const std::vector<Value>& args,
                Value& out, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        bool          cacheada = false;
-        if (!prepare(worker, sql, args, &stmt, &cacheada, error)) return false;
+        bool          cached = false;
+        if (!prepare(worker, sql, args, &stmt, &cached, error)) return false;
 
         Value::List rows;
         int cols = sqlite3_column_count(stmt);
@@ -100,7 +100,7 @@ public:
             if (rc == SQLITE_DONE) break;
             if (rc != SQLITE_ROW) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
-                release(stmt, cacheada);
+                release(stmt, cached);
                 return false;
             }
             Value::Dict row;
@@ -118,7 +118,7 @@ public:
             rows.push_back(Value::dict(std::move(row)));
         }
 
-        release(stmt, cacheada);
+        release(stmt, cached);
         out = Value::list(std::move(rows));
         return true;
     }
@@ -126,16 +126,16 @@ public:
     bool exec(size_t worker, const std::string& sql, const std::vector<Value>& args,
               long long& affected, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        bool          cacheada = false;
-        if (!prepare(worker, sql, args, &stmt, &cacheada, error)) return false;
+        bool          cached = false;
+        if (!prepare(worker, sql, args, &stmt, &cached, error)) return false;
 
         int rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
             error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
-            release(stmt, cacheada);
+            release(stmt, cached);
             return false;
         }
-        release(stmt, cacheada);
+        release(stmt, cached);
         affected = sqlite3_changes(conns_[worker]);
         return true;
     }
@@ -159,9 +159,9 @@ public:
     // Returns the statement to where it came from.  A cached one is reset —it
     // has to be: in WAL mode a half-walked statement keeps its read snapshot
     // open— and a one-off one is destroyed.
-    static void release(sqlite3_stmt* stmt, bool cacheada) {
+    static void release(sqlite3_stmt* stmt, bool cached) {
         if (!stmt) return;
-        if (cacheada) { sqlite3_reset(stmt); sqlite3_clear_bindings(stmt); }
+        if (cached) { sqlite3_reset(stmt); sqlite3_clear_bindings(stmt); }
         else          sqlite3_finalize(stmt);
     }
 
@@ -175,7 +175,7 @@ private:
     // With the cap full, a new query is prepared and destroyed as before: one
     // already inside is never evicted.  That way, whoever builds SQL by hand
     // cannot blow up the memory or evict the good ones.
-    static constexpr size_t kMaxSentencias = 128;
+    static constexpr size_t kMaxCachedStatements = 128;
 
     std::string           file_;
     int                   busy_timeout_ = 5000;
@@ -185,13 +185,13 @@ private:
     // Parameters ALWAYS go through bind, never concatenated: that is what makes
     // SQL injection impossible from Lux Script.
     bool prepare(size_t worker, const std::string& sql, const std::vector<Value>& args,
-                 sqlite3_stmt** out, bool* cacheada, std::string& error) {
+                 sqlite3_stmt** out, bool* cached, std::string& error) {
         sqlite3* db = conns_[worker];
         auto&    table = cache_[worker];
 
         if (auto it = table.find(sql); it != table.end()) {
             *out      = it->second;
-            *cacheada = true;
+            *cached = true;
             sqlite3_reset(*out);
             sqlite3_clear_bindings(*out);
         } else {
@@ -199,15 +199,15 @@ private:
                 error = std::string("sqlite: ") + sqlite3_errmsg(db);
                 return false;
             }
-            *cacheada = table.size() < kMaxSentencias;
-            if (*cacheada) table.emplace(sql, *out);
+            *cached = table.size() < kMaxCachedStatements;
+            if (*cached) table.emplace(sql, *out);
         }
 
         int expected = sqlite3_bind_parameter_count(*out);
         if (expected != static_cast<int>(args.size())) {
             error = "sqlite: the query has " + std::to_string(expected) +
                     " parameter(s) but " + std::to_string(args.size()) + " were passed";
-            release(*out, *cacheada);
+            release(*out, *cached);
             *out = nullptr;
             return false;
         }
@@ -228,7 +228,7 @@ private:
             if (rc != SQLITE_OK) {
                 error = std::string("sqlite: while binding parameter ") +
                         std::to_string(idx) + ": " + sqlite3_errmsg(db);
-                release(*out, *cacheada);
+                release(*out, *cached);
                 *out = nullptr;
                 return false;
             }

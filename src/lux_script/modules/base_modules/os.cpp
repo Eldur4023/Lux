@@ -163,7 +163,7 @@ Value fn_os_path_abs(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // outcome the script decides about" reasoning as getenv() above, and
 // consistent with the project's existing precedent for "not found" (a DB
 // query with no matching row already comes back as an empty List, not a
-// thrown error -- see GUIDE.md's "no encontrado" pattern) rather than every
+// thrown error -- see GUIDE.md's "not found" pattern) rather than every
 // absence being a hard failure. A genuine system error (permission denied on
 // a path that DOES exist, for instance) still goes through `error`.
 Value fn_os_read_file(NativeCtx&, std::vector<Value>& args, std::string& error) {

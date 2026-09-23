@@ -21,15 +21,15 @@ Type Type::from_declared(const TypeRef& t) {
     } else if (t.name == "Json") {
         result = Type::json();
     } else if (t.name == "List") {
-        // El elemento no lo usa hoy ningun sitio (Local::type solo guarda
-        // "List"), pero se conserva para cuando el IR de la fase 1 lo
-        // necesite de verdad -- Json como placeholder de "no se especifico".
+        // No place uses the element today (Local::type only stores "List"),
+        // but it's preserved for when phase 1's IR actually needs it --
+        // Json as a placeholder for "not specified".
         Type elem = t.args.empty() ? Type::json() : Type::from_declared(t.args[0]);
         result = Type::list_of(std::move(elem));
     } else if (t.name == "Dict") {
-        // args[0] es la clave (siempre string, ver §8 de la gramatica: no se
-        // conserva, dict_of() solo lleva el tipo del valor). args[1] es el
-        // valor.
+        // args[0] is the key (always string, see §8 of the grammar: it's
+        // not preserved, dict_of() only carries the value's type). args[1]
+        // is the value.
         Type value = t.args.size() >= 2 ? Type::from_declared(t.args[1]) : Type::json();
         result = Type::dict_of(std::move(value));
     } else {
