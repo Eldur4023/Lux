@@ -1,15 +1,15 @@
-// Prueba de concepto: ¿cuánto se gana compilando la lógica de Lux Script a
-// C++ nativo en vez de interpretarla en la VM de bytecode?
+// Proof of concept: how much do we gain by compiling Lux Script logic to
+// native C++ instead of interpreting it in the bytecode VM?
 //
-// Esto NO es un transpilador. Es fib()/cuenta_primos() escritas a mano en C++,
-// copiando EXACTAMENTE la lógica de bench/lux/app.lux (mismos nombres, mismo
-// algoritmo, mismos limites de validacion), servidas por el HTTP mas simple
-// que se pudo escribir sin dependencias (sockets crudos, sin epoll, sin
-// keep-alive) para que el numero mida "coste de ejecutar la logica" y no
-// "cuanto de bueno es mi servidor HTTP de juguete". No compite con Gin/Fastify
-// como framework -- compite con lux_script::VM como motor de ejecucion.
+// This is NOT a transpiler. It's fib()/cuenta_primos() hand-written in C++,
+// copying EXACTLY the logic of bench/lux/app.lux (same names, same
+// algorithm, same validation limits), served by the simplest HTTP server
+// that could be written with no dependencies (raw sockets, no epoll, no
+// keep-alive) so the number measures "cost of executing the logic" and not
+// "how good my toy HTTP server is". It doesn't compete with Gin/Fastify
+// as a framework -- it competes with lux_script::VM as an execution engine.
 //
-// Ver experiments/native_poc/RESULTADOS.md para la comparacion y la lectura.
+// See experiments/native_poc/RESULTS.md for the comparison and the write-up.
 
 #include <arpa/inet.h>
 #include <cstdint>
@@ -21,7 +21,7 @@
 #include <thread>
 #include <unistd.h>
 
-// ---- logica copiada 1:1 de bench/lux/app.lux (fib / cuenta_primos) ----
+// ---- logic copied 1:1 from bench/lux/app.lux (fib / cuenta_primos) ----
 
 static int64_t fib(int64_t n) {
     if (n < 2) return n;
@@ -47,7 +47,7 @@ static int64_t cuenta_primos(int64_t limite) {
     return contador;
 }
 
-// ---- servidor HTTP minimo (sin framework, sin keep-alive) ----
+// ---- minimal HTTP server (no framework, no keep-alive) ----
 
 static void send_all(int fd, const std::string& s) {
     size_t sent = 0;
@@ -79,7 +79,7 @@ static void handle_client(int fd) {
     if (n <= 0) { close(fd); return; }
     buf[n] = 0;
 
-    // Parseo minimo de la primera linea: "GET /compute/fib/28 HTTP/1.1"
+    // Minimal parsing of the first line: "GET /compute/fib/28 HTTP/1.1"
     std::string req(buf);
     size_t sp1 = req.find(' ');
     size_t sp2 = req.find(' ', sp1 + 1);

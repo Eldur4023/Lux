@@ -139,14 +139,14 @@ inside the context that defines them, and using one out of place is a compile er
 IDENT ::= ( letter | "_" ) { letter | digit | "_" }
 ```
 
-`letter` includes Unicode: `contraseña`, `título`, `año` are valid identifiers — the lexer
+`letter` includes Unicode: `café`, `naïve`, `Übung` are valid identifiers — the lexer
 does not force you to transliterate names into ASCII to write them in your own language.
 
 ```lux
-class User:
+class Menu:
     string  name
-    string? contraseña
-    int     año_de_alta
+    string? café
+    int     naïve_score
 ```
 
 ---
