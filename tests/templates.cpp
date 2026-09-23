@@ -33,7 +33,7 @@ static std::string pintar(const std::string& fuente,
                           std::vector<Value> values, std::string& err) {
     lux_script::DiagnosticBag diags;
     Template p;
-    if (!lux_script::compilar_plantilla(fuente, "test.html", dir_tpl, names, diags, p)) {
+    if (!lux_script::compile_template(fuente, "test.html", dir_tpl, names, diags, p)) {
         err = diags.items().empty() ? "error without a message" : diags.items().front().message;
         return {};
     }
@@ -42,7 +42,7 @@ static std::string pintar(const std::string& fuente,
     lux_script::NativeCtx  ctx{req, res};
 
     std::string out;
-    if (!lux_script::render_plantilla(p, std::move(values), ctx, nullptr, out, err))
+    if (!lux_script::render_template(p, std::move(values), ctx, nullptr, out, err))
         return {};
     return out;
 }
@@ -212,7 +212,7 @@ int main() {
         fails_to_compile("missing endblock", "{% block x %}unclosed", {},
                    "missing {% endblock %}");
         fails_to_compile("macro does not exist", "{% macro m() %}{% endmacro %}", {},
-                   "no existe en Lux Script");
+                   "does not exist in Lux Script");
 
         dir_tpl = ".";
         fs::remove_all(d);

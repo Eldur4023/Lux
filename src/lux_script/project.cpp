@@ -287,13 +287,13 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         }
 
         Template tpl_c;
-        if (!compilar_plantilla(fuente, name, tpl_dir, keys, diags, tpl_c)) return {};
+        if (!compile_template(fuente, name, tpl_dir, keys, diags, tpl_c)) return {};
 
         lux::Request  req_falsa;
         lux::Response res_falsa;
         NativeCtx        ctx{req_falsa, res_falsa};
         std::string      html, err;
-        if (!render_plantilla(tpl_c, std::move(values), ctx, nullptr, html, err)) {
+        if (!render_template(tpl_c, std::move(values), ctx, nullptr, html, err)) {
             diags.error(e.loc, "al renderizar '" + name + "': " + err);
             return {};
         }

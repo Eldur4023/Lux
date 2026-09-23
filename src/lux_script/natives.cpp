@@ -78,7 +78,7 @@ Value fn_render_tpl(NativeCtx& ctx, std::vector<Value>& args, std::string& error
     }
 
     std::string out;
-    if (!render_plantilla(p, std::move(values), ctx, ctx.functions, out, error))
+    if (!render_template(p, std::move(values), ctx, ctx.functions, out, error))
         return Value::null();
 
     ctx.res.header("Content-Type", "text/html; charset=utf-8").send(std::move(out));
@@ -581,7 +581,7 @@ void clamp_range(long long len, long long& start, long long& end) {
 // C++ function called from the VM's own opcode dispatch loop, so there is
 // no "suspend and let the driver resume us later" available here the way a
 // real route handler has. A NESTED, re-entrant VM::start() is the answer:
-// the same idea render_plantilla() (template.cpp) uses to let a template
+// the same idea render_template() (template.cpp) uses to let a template
 // expression call a user function.
 //
 // A FRESH VM per call, not a shared/thread_local one: VM::start() clears

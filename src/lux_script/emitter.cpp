@@ -1948,7 +1948,7 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
                              std::istreambuf_iterator<char>());
 
     Template tpl;
-    if (!compilar_plantilla(fuente, nombre, templates_->dir, claves, diags_, tpl)) {
+    if (!compile_template(fuente, nombre, templates_->dir, claves, diags_, tpl)) {
         failed_ = true;
         return;
     }
