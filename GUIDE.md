@@ -60,6 +60,7 @@ The argument decides what gets compiled, with no surprises:
 | `--check` | Compile and exit, without starting |
 | `--port N` | Override the port from the `app:` block |
 | `--no-watch` | Do not watch for changes |
+| `--native` | Compile routes and functions to C++ as well (needs `g++`; see [How it works inside](#22-how-it-works-inside)) |
 | `--verbose` | Log every incoming request to the console. It costs ~25% of the throughput, so it is off by default |
 | `--autotest` | Walk the endpoints on startup and on every reload |
 | `--autotest=all` | Also include POST/PUT/PATCH/DELETE |
@@ -487,10 +488,8 @@ message just names the outer field (`"episodes: expected List"`), not which part
 episode or subfield was the problem, matching a plain wrong-typed field's message shape.
 
 A field can be a scalar, another class, or a `List` of either — not a `List<List<...>>`, not a
-`Dict` (nobody has needed one yet). `--native` does not compile a class with a field like this
-today: a route using one of these classes stays on bytecode, silently and correctly, the same
-way an `await`-less database call or any other not-yet-native-representable shape already does
-— see `lux app.lux --native --check`'s own report of what did and did not compile.
+`Dict` (nobody has needed one yet). `--native` compiles code using these classes too, holding
+their instances the way bytecode does (a `Dict` of fields).
 
 ---
 
@@ -1459,6 +1458,33 @@ If the new version does not compile, it is not published.
 loop thread, which would take down every connection on that core. The counter resets on every
 suspension, so a legitimate SSE loop can live for hours.
 
+### `--native`
+
+With `--native`, routes and functions are also translated to C++, compiled with `g++` into a
+`.so` (cached in `.lux-native/`, rebuilt only when the code changes) and loaded. The result is
+the same program, not a different dialect: what the compiler can type ahead of time becomes
+plain C++ (`int`, `double`, `std::string`, typed lists), and whatever is only known at run
+time — a database row, `7 / 2`, `0 or 5`, a `List` a `sort()` changes — goes through the same
+functions bytecode uses (`call_method()`, the `+` of the VM, the template renderer), so the
+results, the errors and their messages match. `await`, `try`, `session`, `jwt`, `render()`,
+`File` uploads and module calls all compile.
+
+A route or function that cannot be translated stays on bytecode, which is never an error.
+`--native --check` says which, and why:
+
+```
+$ lux app.lux --native --check
+lux: --native: 3 function(s), 47 route(s) compiled to native code
+lux:   GET /api/series -> native (async)
+lux:   POST /api/downloads -> bytecode (parameter req: a class with List or class fields)
+lux:   fn parse_ts -> bytecode (line 40: a declaration)
+```
+
+What stays on bytecode today: `ws`/`sse` routes, a constructor with a body, a function using
+`session`/`jwt` (a route can), and anything that calls one of those. A runtime error in a
+native route reports the route's own line in `"at"`, where bytecode reports the line inside the
+function that failed.
+
 ## 23. Native modules
 
 Beyond `sqlite`/`postgres`/`mysql`, `import` reaches the compiled-in modules below. A call is
@@ -1473,9 +1499,8 @@ Functions marked **await** do real I/O or CPU work and run on the I/O pool, neve
 loop: `await` is mandatory. Everything else is synchronous and fast.
 
 A function's return type is known to the compiler, so a method on its result is checked like
-one on a variable (`hash.sha256(s).uppercase()` does not compile). With `--native`, a route
-that calls modules compiles to native code too; only a user function or method that calls one
-stays in bytecode.
+one on a variable (`hash.sha256(s).uppercase()` does not compile). With `--native`, module
+calls compile to native code, in routes and functions alike.
 
 `csv`, `pdf` and `proc` hand out a handle (an `int`) for an object that outlives the call. A
 handle is random — a route cannot reach someone else's document by guessing — and one nobody

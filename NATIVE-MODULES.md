@@ -161,6 +161,9 @@ with one line changed: `builtin_module_function_at(id)` instead of `native_at(id
 
 ### 3.4 Why every module call has type `Json`, and why that is not a shortcut
 
+> Superseded: module functions now declare a return type (the `>` of their signature) and
+> `--native` compiles their calls (§6). What follows is how the first cut stayed correct.
+
 `hash.sha256()` always returns a `string`, in reality — but its `IrExpr::type` is set to
 `Type::json()`, not `Type::primitive(Kind::String)`. This is deliberate, not a shortcut taken
 for lack of time: `Comprobador::tipo_provable()` (`native_gen.cpp`, the analysis `--native`
@@ -427,12 +430,10 @@ the archive's now-unresolved symbols.
   module's own timeout), but no longer the event-loop thread serving every OTHER connection on
   that core. A failure is raised at the `await` (`VM::resume_error`), exactly like a
   synchronous function's — one error model, caught by `try` like any runtime error; the database
-  modules raise the same way. With `--native`, a module call inside a route compiles too: the generated code calls the same
-  `BuiltinModuleFn::call()` with a `NativeCtx` over the route's request/response (an awaited one
-  on the I/O pool) and converts the result to the type the signature declares.
-- **Module calls compile to native only inside routes.** A module function takes the request
-  context, which a standalone user function does not have, so one that calls a module stays in
-  bytecode.
+  modules raise the same way. With `--native`, a module call compiles too: the generated code
+  calls the same `BuiltinModuleFn::call()` with the request's `NativeCtx` (a route's own; for a
+  function, the one its caller set, `current_native_ctx()`), an awaited one on the I/O pool,
+  and converts the result to the type the signature declares.
 - **Handles are released by idle time, not per request.** `csv`/`pdf`/`proc` handles are
   random and dropped after 10 minutes (an hour for `proc`) unused — a leftover handle does not
   live for good, but it is not freed the moment its request ends either.
