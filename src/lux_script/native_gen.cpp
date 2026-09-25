@@ -2905,12 +2905,6 @@ std::string error_runtime_prelude() {
         "    g_lux_native_error = std::move(msg);\n"
         "    throw LuxNativeError{};\n"
         "}\n"
-        // A failed database call raises, as in bytecode (db_failed, db.hpp).
-        "static lux_script::Value lux_db_ok(lux_script::Value v) {\n"
-        "    std::string m;\n"
-        "    if (lux_script::db_failed(v, m)) lux_native_fail(std::move(m));\n"
-        "    return v;\n"
-        "}\n"
         "extern \"C\" const char* lux_native_error_message() {\n"
         "    return g_lux_native_error.c_str();\n"
         "}\n"
@@ -3076,6 +3070,12 @@ std::string route_runtime_prelude() {
     // tenga pinta de numero decimal, para que --native nunca acepte (o
     // rechace) un valor que bytecode habria tratado distinto.
     return
+        // A failed database call raises, as in bytecode (db_failed, db.hpp).
+        "inline lux_script::Value lux_db_ok(lux_script::Value v) {\n"
+        "    std::string m;\n"
+        "    if (lux_script::db_failed(v, m)) lux_native_fail(std::move(m));\n"
+        "    return v;\n"
+        "}\n"
         "inline bool lux_route_coerce_int(const std::string& t, int64_t& out) {\n"
         "    try {\n"
         "        size_t pos = 0;\n"

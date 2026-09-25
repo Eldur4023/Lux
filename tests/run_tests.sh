@@ -67,6 +67,17 @@ compiles() {
     fi
 }
 
+# native_compiles <name> <file> <routes>: --native really compiles at least
+# <routes> routes of it. A g++ failure falls back to bytecode silently and
+# every test still passes (same results), so only this notices.
+native_compiles() {
+    local name="$1" fich="$2" want="$3" got
+    got=$(cd "$TMP" && "$LUX" --native --check "$fich" 2>&1)
+    local n
+    n=$(printf '%s' "$got" | sed -n 's/.* \([0-9]*\) route(s) compiled to native code.*/\1/p')
+    if [ -n "$n" ] && [ "$n" -ge "$want" ] && ! printf '%s' "$got" | grep -q "could not be compiled"; then ok "$name"
+    else fail "$name" ">= $want native routes, no g++ failure" "$(printf '%s' "$got" | grep -E 'compiled to native|could not|error' | head -3)"; fi
+}
 
 # ─── Suites ──────────────────────────────────────────────────────────────────
 
@@ -471,6 +482,9 @@ check "unknown path falls back to index.html (spa)" GET /whatever/nope 200 '<htm
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
 compiles    "example/ app compiles"     "$HERE/../example"
+native_compiles "--native compiles the sqlite suite"   "$HERE/cases/sqlite.lux"   23
+native_compiles "--native compiles the postgres suite" "$HERE/cases/postgres.lux" 21
+native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"    16
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"
 fails_to_compile "object out of place" "$HERE/cases/bad/sse.lux"      "only exists inside a route sse"
