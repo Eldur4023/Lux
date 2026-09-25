@@ -507,7 +507,14 @@ public:
     // NativeCtx (lux_dyn_global). render() compiles its template in the
     // emitter, so it is not one of them.
     std::optional<Type> nativa_dinamica(const IrExpr& e) const {
-        if (e.call_index < 0 || e.call_name == "render") return std::nullopt;
+        if (e.call_index < 0) return std::nullopt;
+        // render(name, k=v, ...): its template, compiled by build_routes,
+        // through __render_tpl (Generador, lux_template).
+        if (e.call_name == "render") {
+            if (!ruta_ok_render(e)) return std::nullopt;
+            dinamicas_.insert(&e);
+            return Type::json();
+        }
         const NativeDef& d = native_at(e.call_index);
         if (!d.fn || d.is_async) return std::nullopt;
         const std::string n = d.name;
@@ -516,6 +523,12 @@ public:
             if (!a.value || !a.name.empty() || !es_valor_json(*a.value)) return std::nullopt;
         dinamicas_.insert(&e);
         return std::string(d.name) == "range" ? Type::list_of(Type::json()) : Type::json();
+    }
+    bool ruta_ok_render(const IrExpr& e) const {
+        if (e.args.empty() || !e.args[0].value || e.args[0].value->kind != IrExprKind::StringLit) return false;
+        for (size_t i = 1; i < e.args.size(); ++i)
+            if (!e.args[i].value || e.args[i].name.empty() || !es_valor_json(*e.args[i].value)) return false;
+        return true;
     }
     bool dinamica(const IrExpr& e) const { return dinamicas_.count(&e) > 0; }
     // session.*/jwt.*: the route loads them (begin_auth) and writes the
@@ -1724,6 +1737,16 @@ public:
                     if (e.call_shape == IrCallShape::BuiltinMethodCall)
                         return "lux_dyn_method(" + ctx + ", " + valor_json(*e.object) + ", " +
                                literal_string(e.call_name) + ", " + args + ")";
+                    if (e.call_shape == IrCallShape::BuiltinGlobalCall && e.call_name == "render") {
+                        // Same key emit_compiled_render (emitter.cpp) files it under.
+                        std::string key = e.args[0].value->text + "|", datos = "LuxD{}";
+                        for (size_t i = 1; i < e.args.size(); ++i) {
+                            key += e.args[i].name + ":" + e.args[i].value->type.base_name() + ",";
+                            datos += ".add(" + literal_string(e.args[i].name) + ", " + valor_json(*e.args[i].value) + ")";
+                        }
+                        return "lux_dyn_global(" + ctx + ", " + std::to_string(native_id("__render_tpl")) +
+                               ", LuxL{}.add(lux_template(" + literal_string(key) + ")).add(" + datos + ".done()).items())";
+                    }
                     return "lux_dyn_global(" + ctx + ", " + std::to_string(e.call_index) + ", " + args + ")";
                 }
                 // ClassName(args...): el UNICO constructor de la clase C++
@@ -3599,10 +3622,20 @@ std::string route_runtime_prelude() {
         "static decltype(lux_script::NativeCtx::functions) g_lux_functions = nullptr;\n"
         "static decltype(lux_script::NativeCtx::templates) g_lux_templates = nullptr;\n"
         "static const lux_script::AuthConfig* g_lux_auth = nullptr;\n"
-        "extern \"C\" void lux_native_bind(const void* f, const void* t, const void* a) {\n"
+        "static const std::map<std::string, size_t>* g_lux_template_keys = nullptr;\n"
+        "extern \"C\" void lux_native_bind(const void* f, const void* t, const void* a, const void* k) {\n"
         "    g_lux_functions = static_cast<decltype(g_lux_functions)>(f);\n"
         "    g_lux_templates = static_cast<decltype(g_lux_templates)>(t);\n"
         "    g_lux_auth = static_cast<const lux_script::AuthConfig*>(a);\n"
+        "    g_lux_template_keys = static_cast<const std::map<std::string, size_t>*>(k);\n"
+        "}\n"
+        // render(): the template build_routes compiled for this call.
+        "inline Value lux_template(const char* key) {\n"
+        "    if (g_lux_template_keys) {\n"
+        "        auto it = g_lux_template_keys->find(key);\n"
+        "        if (it != g_lux_template_keys->end()) return Value::integer(static_cast<long long>(it->second));\n"
+        "    }\n"
+        "    lux_native_fail(\"render(): template not compiled\");\n"
         "}\n"
         "inline lux_script::NativeCtx lux_route_ctx(lux::Request& req, lux::Response& res) {\n"
         "    lux_script::NativeCtx c{req, res};\n"

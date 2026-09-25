@@ -34,6 +34,7 @@ struct Module {
     // Every render() in the source has its own, compiled against the specific
     // keys that call passes it.
     std::vector<Template> templates;
+    std::map<std::string, size_t> template_keys;   // TemplateCtx::by_key
 
     // Signatures of those same functions -- kept only so it can be offered
     // to compile_native() without rebuilding it; the rest of the module does

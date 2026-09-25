@@ -512,6 +512,12 @@ check "a real file in a subdirectory"      GET /css/style.css 200 'body{color:re
 check "another real file at the root"      GET /test.txt      200 'plain file'
 check "unknown path falls back to index.html (spa)" GET /whatever/nope 200 '<html>index</html>'
 
+echo "== templates =="
+next_server "$HERE/cases/render.lux" || exit 1
+check "render() fills a template"   GET /greet 200 '<h1>Hi</h1>'
+check "render() escapes its values" GET /greet 200 '<li>Ana &lt;b&gt;</li><li>Bob</li>'
+check "render() evaluates in it"    GET /greet 200 '<p>2 names</p>'
+
 echo "== --native semantics (native_edges.lux) =="
 next_server "$HERE/cases/native_edges.lux" /mixed || exit 1
 check "a list shared by two variables"      GET /values 200 '"b":[1,2,3]'
@@ -532,6 +538,7 @@ native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"  
 native_compiles "--native compiles module calls"      "$HERE/cases/modules.lux"  76
 native_compiles "--native survives its edge cases"    "$HERE/cases/native_edges.lux" 5
 native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  8
+native_compiles "--native compiles render()"          "$HERE/cases/render.lux"   2
 native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 48
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"

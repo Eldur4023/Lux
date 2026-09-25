@@ -1,5 +1,6 @@
 #include <lux_script/native_build.hpp>
 #include <lux_script/native_gen.hpp>
+#include <lux_script/template.hpp>
 
 #include <dlfcn.h>
 
@@ -241,7 +242,11 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // una ruta si puede construir instancias y llamar a metodos (aunque
         // esta primera fase de rutas no llegue a generar ninguno de esos
         // casos -- ver el comentario de RutaNativa).
-        Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports, nullptr, enums);
+        // A template context so render() checks; the templates themselves
+        // are compiled by build_routes (TemplateCtx::by_key).
+        std::vector<Template> plantillas;
+        TemplateCtx           tctx{prog.app.templates_dir, &plantillas};
+        Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports, &tctx, enums);
         IrBlock  body;
         if (!emitter.check_route(r, descartable, diags_ir, &body)) {
             if (informe) informe->rutas[i] = "not representable yet";

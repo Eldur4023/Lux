@@ -1,0 +1,12 @@
+# render() from a route, in bytecode and --native alike (the native one
+# finds the template build_routes compiled for it).
+app:
+    port 8000
+    templates "./templates"
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+get endpoint("/greet", string who = "Ana <b>"):
+    List<string> names = [who, "Bob"]
+    return render("greet.html", title="Hi", names=names, count=len(names))

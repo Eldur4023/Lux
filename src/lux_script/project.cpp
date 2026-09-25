@@ -1734,7 +1734,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
     // Context the emitters need to compile the templates they find in a
     // render().
-    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates};
+    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates, &mod.template_keys};
 
     for (size_t ridx = 0; ridx < mod.program.routes.size(); ++ridx) {
         const auto& r = mod.program.routes[ridx];
@@ -1972,6 +1972,17 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         // con Handler (ver types.hpp), asi que se registra directa, sin
         // ningun envoltorio: envolverla en otra corrutina que la
         // co_await-ara solo anadiria un frame sin necesidad.
+        // A native route's render() finds its template by key (see
+        // TemplateCtx::by_key): emitting the route compiles them, with the
+        // same diagnostics bytecode gives; the chunk itself is dropped.
+        const bool es_nativa = mod.native &&
+            ((ridx < mod.native->rutas_async_por_indice.size() && mod.native->rutas_async_por_indice[ridx]) ||
+             (ridx < mod.native->rutas_por_indice.size() && mod.native->rutas_por_indice[ridx]));
+        if (es_nativa) {
+            Chunk   scratch;
+            Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
+            if (!emitter.emit_route(r, scratch)) continue;
+        }
         if (mod.native && ridx < mod.native->rutas_async_por_indice.size() &&
             mod.native->rutas_async_por_indice[ridx]) {
             ++mod.vm_routes;
@@ -2276,7 +2287,8 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.session_secure  = mod->program.app.session_secure;
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
-        if (mod->native && mod->native->bind) mod->native->bind(&mod->functions, &mod->templates, &mod->auth);
+        if (mod->native && mod->native->bind)
+            mod->native->bind(&mod->functions, &mod->templates, &mod->auth, &mod->template_keys);
 
         if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, enums, diags);
         if (diags.empty()) build_error_handlers(*mod, fns, sigs, enums, diags);

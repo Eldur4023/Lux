@@ -1935,6 +1935,11 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
     }
     const uint32_t idx = static_cast<uint32_t>(templates_->table->size());
     templates_->table->push_back(std::move(tpl));
+    if (templates_->by_key) {
+        std::string key = name + "|";
+        for (const auto& k : keys) key += k.name + ":" + k.type + ",";
+        templates_->by_key->emplace(std::move(key), idx);
+    }
 
     chunk_->emit(Op::Const, e.loc, chunk_->add_constant(Value::integer(idx)));
     for (const auto& a : e.args) {
