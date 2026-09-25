@@ -29,6 +29,9 @@ curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$ECHO_PORT/echo" || {
     red "the echo server did not answer"; cat "$TMP/echo.log"; exit 1; }
 ok "echo server starts"
 
+python3 "$HERE/smtp_sink.py" 8898 "$TMP/mail.json" > "$TMP/smtp.log" 2>&1 &
+EXTRA_PIDS="$EXTRA_PIDS $!"
+
 cd "$HERE/.."
 start_server "$HERE/cases/http.lux" /get_basic || exit 1
 ok "lux server starts and connects"
@@ -56,6 +59,25 @@ check "invalid url"          GET /bad_url            200 '"error":"http.get(): u
 check "connection refused"   GET /connection_refused 200 '"error":"http.get()'
 check "public_only refuses a private address" GET /public_only 200 '"blocked":{"error":"http.get(): the address is not public (public_only)"},"allowed_status":200'
 check "timeout_ms"           GET /timeout            200 '"error":"http.get(): Timeout'
+
+echo "== mail =="
+check "mail.send delivers" GET /mail_send 200 '"r":true'
+mail_check=$(python3 -c "
+import json, email, sys
+m = json.load(open(sys.argv[1]))
+assert m['from'] == '<tests@lux.local>', m['from']
+assert m['rcpt'] == ['<ana@example.com>', '<bob@example.com>', '<hidden@example.com>'], m['rcpt']
+msg = email.message_from_string(m['data'])
+assert 'hidden' not in m['data'].split('\r\n\r\n')[0], 'bcc leaked into the headers'
+assert msg['Bcc'] is None and 'evil' not in str(msg.keys()), 'header injection'
+assert str(email.header.make_header(email.header.decode_header(msg['Subject']))).startswith('Café'), msg['Subject']
+parts = {p.get_content_type(): p.get_payload(decode=True).decode() for p in msg.walk() if not p.is_multipart()}
+assert parts == {'text/plain': 'plain body', 'text/html': '<b>html body</b>'}, parts
+assert msg['Reply-To'] == 'help@example.com'
+print('ok')" "$TMP/mail.json" 2>&1 | tail -1)
+if [ "$mail_check" = "ok" ]; then ok "the message is well formed, bcc hidden, no header injection"
+else fail "the message is well formed, bcc hidden, no header injection" "ok" "$mail_check"; fi
+check "mail.send without a recipient" GET /mail_no_rcpt 200 '"error":"mail.send(): no recipient'
 
 echo "== url_encode (RFC 3986, no network) =="
 check "space becomes %20, not +"        GET /url_encode 200 '"space":"%20"'

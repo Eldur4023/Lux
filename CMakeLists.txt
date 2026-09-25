@@ -153,7 +153,8 @@ set(LUX_MODULE_EXCLUDE "" CACHE STRING
 set(_lux_module_exclude
     ${LUX_MODULE_EXCLUDE}
     "src/lux_script/modules/base_modules/pdf.cpp"
-    "src/lux_script/modules/base_modules/http.cpp")
+    "src/lux_script/modules/base_modules/http.cpp"
+    "src/lux_script/modules/base_modules/mail.cpp")
 foreach(_excluded ${_lux_module_exclude})
     list(REMOVE_ITEM LUX_MODULE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${_excluded})
 endforeach()
@@ -304,7 +305,8 @@ if(LUX_HTTP)
         pkg_check_modules(LUX_CURL QUIET libcurl)
     endif()
     if(LUX_CURL_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp)
+        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp
+                                          src/lux_script/modules/base_modules/mail.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_HTTP)
         target_include_directories(lux_script PRIVATE ${LUX_CURL_INCLUDE_DIRS})
         target_link_libraries(lux_script PRIVATE ${LUX_CURL_LIBRARIES})

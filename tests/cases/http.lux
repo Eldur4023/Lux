@@ -8,6 +8,14 @@
 # the suite still proves the real thing -- an actual TCP connection, an
 # actual HTTP/1.1 request/response cycle through libcurl, not a mock.
 import http
+import mail
+
+app:
+    mail:
+        host "127.0.0.1"
+        port 8898
+        tls  "none"
+        from "Lux Tests <tests@lux.local>"
 
 get endpoint("/get_basic"):
     Json r = await http.get("http://127.0.0.1:8899/echo?x=1")
@@ -74,3 +82,11 @@ get endpoint("/url_encode"):
         "unreserved_untouched": http.url_encode("AZaz09-_.~"),
         "full_query_value": http.url_encode("hello world & more =test")
     }
+
+get endpoint("/mail_send"):
+    Json r = await mail.send({ "to": ["Ana <ana@example.com>", "bob@example.com"], "bcc": "hidden@example.com", "subject": "Café\r\nBcc: evil@example.com", "text": "plain body", "html": "<b>html body</b>", "reply_to": "help@example.com" })
+    return { "r": r }
+
+get endpoint("/mail_no_rcpt"):
+    Json r = await mail.send({ "subject": "x", "text": "y" })
+    return r
