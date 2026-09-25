@@ -1621,7 +1621,7 @@ public:
                 // Parenthesized: co_await binds looser than `.`, so `return
                 // await db.query(...)` became `co_await X.to_json_text()` --
                 // a g++ error that sent the WHOLE module back to bytecode.
-                return "(co_await " + llamada_db(*e.lhs) + ")";
+                return "lux_db_ok(co_await " + llamada_db(*e.lhs) + ")";
 
             default:
                 return ""; // inalcanzable: Comprobador ya lo descarto antes de llegar aqui
@@ -1692,8 +1692,8 @@ public:
         registrar(b.slot, b.name);
         const std::string par = "__par_" + std::to_string(a.slot);
         return "auto " + par + " = co_await lux::when_both(" + llamada_db(*a.value->lhs) + ", " +
-               llamada_db(*b.value->lhs) + "); Value " + nombre_cpp(a.name) + " = std::move(" +
-               par + ".first); Value " + nombre_cpp(b.name) + " = std::move(" + par + ".second);";
+               llamada_db(*b.value->lhs) + "); Value " + nombre_cpp(a.name) + " = lux_db_ok(std::move(" +
+               par + ".first)); Value " + nombre_cpp(b.name) + " = lux_db_ok(std::move(" + par + ".second));";
     }
 
     std::string block(const IrBlock& b, int indent) {
@@ -2904,6 +2904,12 @@ std::string error_runtime_prelude() {
         "[[noreturn]] static void lux_native_fail(std::string msg) {\n"
         "    g_lux_native_error = std::move(msg);\n"
         "    throw LuxNativeError{};\n"
+        "}\n"
+        // A failed database call raises, as in bytecode (db_failed, db.hpp).
+        "static lux_script::Value lux_db_ok(lux_script::Value v) {\n"
+        "    std::string m;\n"
+        "    if (lux_script::db_failed(v, m)) lux_native_fail(std::move(m));\n"
+        "    return v;\n"
         "}\n"
         "extern \"C\" const char* lux_native_error_message() {\n"
         "    return g_lux_native_error.c_str();\n"

@@ -109,8 +109,8 @@ check "balances after rollback" GET  /balances           200 '"balance":70'
 # design decision.  What is checked is that the message is useful and that
 # the server stays up.
 echo "== engine errors =="
-check "missing table"  GET /bad_table          200 "no_existe"
-check "too few parameters"  GET /too_few_params 200 "were passed"
+check "missing table"  GET /bad_table          500 "no_existe"
+check "too few parameters"  GET /too_few_params 500 "were passed"
 
 # The bind buffers used to live in the driver, which is a single one shared by
 # the N pool workers: the real race is already caught with ThreadSanitizer, but

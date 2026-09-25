@@ -60,6 +60,10 @@ public:
     // `await` expression.
     Result resume(Value awaited, NativeCtx& ctx);
 
+    // Continues after a suspension by raising `message` where the `await`
+    // was: a `try` around it catches it, like any other runtime error.
+    Result resume_error(std::string message, SourceLoc loc, NativeCtx& ctx);
+
     // Step cap per handler: cuts an infinite loop in a .lux instead of pinning
     // an event loop thread, which would take down every connection on that
     // core.  It resets on every suspension, because a legitimate SSE loop can
@@ -88,6 +92,7 @@ private:
     const NativeDispatch* native_    = nullptr;
 
     Result execute(NativeCtx& ctx);
+    Result unwind(Result r, NativeCtx& ctx);   // delivers an error to the nearest catch
     Result run_until_error(NativeCtx& ctx);
 
     void  push(Value v) { stack_.push_back(std::move(v)); }

@@ -265,7 +265,7 @@ check "transaction"         POST /transfer      200 '"ok":true'
 check "balances after commit"  GET  /balances          200 '"balance":70'
 check "rollback"            POST /undo         200 '"undone":true'
 check "balances after rollback" GET /balances          200 '"balance":70'
-check "engine error"     GET  /bad            200 'no such table'
+check "engine error"     GET  /bad            500 'no such table'
 
 echo "== native modules =="
 next_server "$HERE/cases/modules.lux" || exit 1
@@ -341,7 +341,7 @@ check "os file round-trip cleans up" GET /os/file_roundtrip       200 '"removed"
 check "os.read_file missing is null, not an error" GET /os/missing_file 200 '"content_is_null":true'
 check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
 check "os.run exit status"         GET /os/run_echo               200 '"status":0'
-check "os.run missing command errors" GET /os/run_missing         200 '"error":"os.run(): could not start'
+check "os.run missing command errors" GET /os/run_missing         500 '"error":"os.run(): could not start'
 
 check "os.is_dir/is_file tell a directory from a file" GET /os/stat 200 '"dir_is_dir":true,"dir_is_file":false,"file_is_dir":false,"file_is_file":true'
 check "os.file_size reads a real file's size"          GET /os/stat 200 '"size":5'
@@ -355,14 +355,14 @@ check "os.remove_dir on a non-empty dir is rejected"     GET /os/remove_dir_none
 check "os.remove_dir(true) removes a non-empty tree"     GET /os/remove_dir_recursive 200 '"removed":true,"exists_after":false'
 check "os.remove_dir on a file is rejected"              GET /os/remove_dir_on_a_file_rejected 500 "is not a directory"
 check "os.copy_file copies without touching the source"  GET /os/copy_file 200 '"copied":true,"src_content":"copy me","dst_content":"copy me"'
-check "os.copy_file onto an existing file is rejected"   GET /os/copy_file_overwrite_rejected 200 '"error":"os.copy_file()'
+check "os.copy_file onto an existing file is rejected"   GET /os/copy_file_overwrite_rejected 500 '"error":"os.copy_file()'
 check "os.copy_file(overwrite=true) replaces the destination" GET /os/copy_file_overwrite_allowed 200 '"copied":true,"dst_content":"new"'
 check "os.move renames a file"                           GET /os/move_file 200 '"moved":true,"src_gone":true,"dst_content":"moving"'
 check "os.move moves a whole directory tree"             GET /os/move_dir 200 '"moved":true,"src_gone":true,"content":"nested"'
-check "os.move on a missing source is rejected"          GET /os/move_missing_source_rejected 200 'does not exist'
+check "os.move on a missing source is rejected"          GET /os/move_missing_source_rejected 500 'does not exist'
 
 check "os.run input/cwd/env"         GET /os/run_options 200 '"stdin":"fed through stdin","cwd":"/tmp\n","env":"set\n"'
-check "os.run timeout_ms"             GET /os/run_options 200 '"timeout":{"error":"os.run(): '"'"'sleep'"'"' timed out after 100ms"}'
+check "a failed await is catchable (os.run timeout_ms)" GET /os/run_options 200 '"timeout":"os.run(): '"'"'sleep'"'"' timed out after 100ms"'
 check "os.append_file/glob/list_dir(recursive)" GET /os/files_more 200 '"appended":"one+two","glob":['
 check "os.list_dir recursive is relative" GET /os/files_more 200 '"tree":["a.txt","b.JPG","sub","sub/c.txt"]'
 check "os.mime/path_ext/temp_file"    GET /os/files_more 200 '"mime":"image/jpeg","mime_unknown":"application/octet-stream","ext":".gz","tmp_ok":true'
@@ -409,7 +409,7 @@ check "proc.start/read/wait a real command end to end" GET /proc/echo_full      
 check "proc.start with a bad command is a hard error"  GET /proc/missing_command  500 'proc.start(): could not start'
 check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
 check "proc.kill + wait leaves it not alive"           GET /proc/kill_and_wait    200 '"still_alive":false'
-check "proc.read without stdout: pipe is a soft error" GET /proc/read_without_pipe 200 '"error":"proc.read(): this process was not started with stdout'
+check "proc.read without stdout: pipe is an error" GET /proc/read_without_pipe 500 '"error":"proc.read(): this process was not started with stdout'
 check "proc.alive on an unknown handle errors"         GET /proc/unknown_handle   500 'proc: unknown handle'
 
 echo "== Range support on send_file() (RFC 7233) =="

@@ -847,13 +847,22 @@ request to take that connection from the pool would inherit the state.
 
 ### Errors
 
-An engine error does not blow up the handler: it arrives as a dictionary with `error`.
+A failed statement raises an error at its `await`, like any other runtime error: uncaught, the
+request ends with `500 {"error": "no such table: does_not_exist", "at": "app.lux:2:16"}`; `try`
+catches it.
 
 ```lux
-get endpoint("/bad"):
-    Json r = await sqlite.query("select * from does_not_exist")
-    return r          # { "error": "no such table: does_not_exist" }
+post endpoint("/users"):
+    try:
+        await sqlite.exec("insert into users (email) values (?)", form("email"))
+    catch e:
+        return { "error": "that email is already registered" }.status(409)
+    return { "ok": true }.status(201)
 ```
+
+Inside a transaction, a failed statement also aborts the transaction: anything but `rollback()`
+after it raises too, and `commit()` rolls back instead. A handler that ends with a transaction
+still open has it rolled back.
 
 ### Why it does not block
 
@@ -1461,8 +1470,20 @@ hash.sha256(): argument 1 must be a string, not int
 ```
 
 Functions marked **await** do real I/O or CPU work and run on the I/O pool, never on the event
-loop: `await` is mandatory, and a failure comes back as `{"error": message}` instead of failing
-the handler. Everything else is synchronous and fast.
+loop: `await` is mandatory. Everything else is synchronous and fast.
+
+A module function that fails raises an error — awaited or not, the same as a database call. Left
+alone it ends the handler with a `500 {"error": message, "at": "file:line:col"}`; `try` catches
+it where there is something better to do:
+
+```lux
+try:
+    Json r = await http.get(url, null, { "timeout_ms": 3000 })
+    return r["body"]
+catch e:
+    log.warn(e.message)
+    return { "cached": true, "items": state.get("last_items", []) }
+```
 
 ### hash
 
@@ -1667,8 +1688,7 @@ post endpoint("/contact"):
                                "subject": "Contact: " + form("subject"), "text": form("message") })
 ```
 
-**await** `send({to, cc, bcc, reply_to, from, subject, text, html})` → `true`, or
-`{"error": ...}`. `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
+**await** `send({to, cc, bcc, reply_to, from, subject, text, html})` → `true` (a failure raises). `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
 the mail carries both. Every header value is stripped of line breaks, so a form field cannot
 add a header, and `bcc` never appears in the message. Built with the `http` module (libcurl).
 

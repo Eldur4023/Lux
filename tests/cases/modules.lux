@@ -118,7 +118,11 @@ get endpoint("/os/run_options"):
     Json piped = await os.run("cat", [], { "input": "fed through stdin" })
     Json where = await os.run("pwd", [], { "cwd": "/tmp" })
     Json env = await os.run("sh", ["-c", "echo $LUX_T"], { "env": { "LUX_T": "set" } })
-    Json slow = await os.run("sleep", ["5"], { "timeout_ms": 100 })
+    string slow = ""
+    try:
+        await os.run("sleep", ["5"], { "timeout_ms": 100 })
+    catch e:
+        slow = e.message
     return { "stdin": piped["stdout"], "cwd": where["stdout"], "env": env["stdout"], "timeout": slow }
 
 get endpoint("/os/files_more"):

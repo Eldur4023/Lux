@@ -113,8 +113,13 @@ Value error_value(const std::string& message) {
 
 // Runs and, if something fails inside a `try`, jumps to its `catch` and goes on.
 // The error is delivered as one more value, on top of the stack.
-VM::Result VM::execute(NativeCtx& ctx) {
-    Result r = run_until_error(ctx);
+VM::Result VM::execute(NativeCtx& ctx) { return unwind(run_until_error(ctx), ctx); }
+
+VM::Result VM::resume_error(std::string message, SourceLoc loc, NativeCtx& ctx) {
+    return unwind(fail(std::move(message), loc), ctx);
+}
+
+VM::Result VM::unwind(Result r, NativeCtx& ctx) {
     while (r.status == Status::Error) {
         // The frame's pc already points at the next instruction, so the one
         // that failed is the previous one.  An error climbs the frames until it
@@ -547,6 +552,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 r.await_id        = static_cast<int>(in.operand >> 8);
                 r.await_is_module = in.op == Op::CallAsyncModule;
                 r.await_args      = pop_args(static_cast<int>(in.operand & 0xFF));
+                r.error_loc       = in.loc;   // where a failed await is reported
                 return r;
             }
 

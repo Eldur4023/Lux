@@ -425,12 +425,9 @@ the archive's now-unresolved symbols.
   uses, and resumes the handler on its own event loop thread when it finishes. A slow/hung
   remote server or child process still ties up a pool worker for the duration (bounded by each
   module's own timeout), but no longer the event-loop thread serving every OTHER connection on
-  that core. Same error convention `await <db-module>.*` already established: a failure comes
-  back as `{"error": message}` data, never a hard `fail()` of the handler — deliberately
-  different from calling the SAME function synchronously (a plain, non-`is_async` builtin, where
-  a non-empty `error` still means `fail()`), because `is_async` is an exclusive, checked-at-
-  compile-time calling convention: a given function is reached through exactly one of the two
-  paths, never both. No native (`--native`) codegen yet for either path (next bullet still
+  that core. A failure is raised at the `await` (`VM::resume_error`), exactly like a
+  synchronous function's — one error model, caught by `try` like any runtime error; the database
+  modules raise the same way. No native (`--native`) codegen yet for either path (next bullet still
   applies) — `await os.run(...)`/`await http.get(...)` fall back to bytecode like any other
   `BuiltinModuleCall` today.
 - **No native (`--native`) codegen for any module function yet.** Deliberate and safe (§3.4),

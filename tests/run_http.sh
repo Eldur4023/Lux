@@ -53,12 +53,12 @@ check "404 from the remote server" GET /status_404 200 '"status":404'
 check "500 from the remote server" GET /status_500 200 '"status":500'
 
 echo "== error paths =="
-# A failed await-ed call is data, {"error": ...}, not a failed handler
-# (GUIDE.md, native modules).
-check "invalid url"          GET /bad_url            200 '"error":"http.get(): url must start with'
-check "connection refused"   GET /connection_refused 200 '"error":"http.get()'
-check "public_only refuses a private address" GET /public_only 200 '"blocked":{"error":"http.get(): the address is not public (public_only)"},"allowed_status":200'
-check "timeout_ms"           GET /timeout            200 '"error":"http.get(): Timeout'
+# A failed call raises, like any runtime error: uncaught it is a 500 with
+# the message; `try` catches it.
+check "invalid url"          GET /bad_url            500 '"error":"http.get(): url must start with'
+check "connection refused"   GET /connection_refused 500 '"error":"http.get()'
+check "public_only refuses a private address" GET /public_only 200 '"blocked":"http.get(): the address is not public (public_only)","allowed_status":200'
+check "timeout_ms"           GET /timeout            500 '"error":"http.get(): Timeout'
 
 echo "== mail =="
 check "mail.send delivers" GET /mail_send 200 '"r":true'
@@ -77,7 +77,7 @@ assert msg['Reply-To'] == 'help@example.com'
 print('ok')" "$TMP/mail.json" 2>&1 | tail -1)
 if [ "$mail_check" = "ok" ]; then ok "the message is well formed, bcc hidden, no header injection"
 else fail "the message is well formed, bcc hidden, no header injection" "ok" "$mail_check"; fi
-check "mail.send without a recipient" GET /mail_no_rcpt 200 '"error":"mail.send(): no recipient'
+check "mail.send without a recipient" GET /mail_no_rcpt 500 '"error":"mail.send(): no recipient'
 
 echo "== url_encode (RFC 3986, no network) =="
 check "space becomes %20, not +"        GET /url_encode 200 '"space":"%20"'

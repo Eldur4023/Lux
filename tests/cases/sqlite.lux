@@ -215,3 +215,21 @@ get endpoint("/iso_count"):
 get endpoint("/bad_index"):
     List<Json> rows = await sqlite.query("select * from no_such_table")
     return rows[0]
+
+# A failed statement raises at its await; try catches it, and the
+# transaction it happened in is aborted until rolled back.
+get endpoint("/caught_in_tx"):
+    await sqlite.begin()
+    string caught = ""
+    try:
+        await sqlite.exec("insert into no_such_table values (1)")
+    catch e:
+        caught = e.message
+    string after = ""
+    try:
+        await sqlite.query("select 1")
+    catch e:
+        after = e.message
+    await sqlite.rollback()
+    List<Json> ok = await sqlite.query("select 1 as one")
+    return { "caught": caught, "after": after, "then": ok[0]["one"] }

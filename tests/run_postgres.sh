@@ -94,7 +94,7 @@ check "insert and affected rows" POST /add/probing  201 '"rows":1'
 check "returning id"             POST /add_id/other   201 '"id"'
 check "delete"                   POST /delete_row/99999    200 '"rows":0'
 # postgres has no reliable last_id: the driver says so instead of making one up.
-check "last_id says it is unavailable" POST /last_id 200 'is not available'
+check "last_id says it is unavailable" POST /last_id 500 'is not available'
 
 echo "== transactions =="
 check "commit"               POST /transfer       200 '"ok":true'
@@ -103,9 +103,9 @@ check "begin without error"      POST /undo_verbose  200 '"begin":true'
 check "balances after rollback" GET  /balances           200 '"balance":70'
 
 echo "== errors =="
-check "missing table"    GET /bad_table          200 "no_existe"
-check "too few placeholders"    GET /too_few_placeholders 200 "were passed"
-check "mixed ? and \$1"        GET /mixed              200 "mixes"
+check "missing table"    GET /bad_table          500 "no_existe"
+check "too few placeholders"    GET /too_few_placeholders 500 "were passed"
+check "mixed ? and \$1"        GET /mixed              500 "mixes"
 
 # A 200 is not enough: one request answering with ANOTHER's row is exactly
 # the shape of the shared-bind failure already caught in mysql -- there it only

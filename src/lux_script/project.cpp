@@ -418,8 +418,8 @@ bool is_db_await(int id) {
 // Resolves a database suspension.
 //
 // The first argument is always the module name, which the emitter pushes.
-// An engine failure does not blow up the handler: it arrives as a value with
-// `error`, which the .lux can inspect or ignore.
+// A failure comes back as {"error": ...} (db_failed, db.hpp) and drive_vm
+// raises it at the `await`.
 //
 // Thin adapter over lux_script::await_db() (db.hpp/db.cpp) — the real
 // logic (resolving the driver/pool, deciding the pinned worker, invoking
@@ -482,23 +482,12 @@ lux::Task<Value> run_db(const VM::Result& r, int op, lux::Request& req,
 // memory-safe under that same contract, just worth calling out since
 // nothing else in the type system enforces it.
 //
-// Same error convention await_db() already established (see run_db()
-// above): a failure comes back as `{"error": message}` data the .lux can
-// inspect, never a hard fail() of the handler -- unlike this exact function
-// called SYNCHRONOUSLY (Op::CallBuiltinModule, vm.cpp), where a non-empty
-// `error` still means fail(). That is a deliberate difference, not an
-// inconsistency: is_async is an exclusive, checked-at-compile-time calling
-// convention (Emitter::check_call rejects both "is_async without await" and
-// "await on a plain function"), so a given function is reached through
-// exactly one of the two paths, never both, and each keeps the error
-// convention its callers already expect from that path (sqlite.query()'s
-// vs. a plain builtin's).
+// A failure is left in `error`, and drive_vm raises it at the `await`.
 lux::Task<Value> run_builtin_module_async(const VM::Result& r, lux::Request& req,
-                                            NativeCtx& ctx) {
+                                            NativeCtx& ctx, std::string& error) {
     const BuiltinModuleFn& fn = builtin_module_function_at(r.await_id);
     std::vector<Value> args = r.await_args;
     Value       out;
-    std::string error;
     // io_blocking_pool(), not the default blocking_pool(): this is an
     // is_async native module call (os.run(), http.*, a file read/write),
     // blocked on a subprocess or a socket for as long as its own timeout
@@ -507,7 +496,6 @@ lux::Task<Value> run_builtin_module_async(const VM::Result& r, lux::Request& req
     co_await lux::BlockingAwaitable{req.loop, [&] {
         out = fn.call(ctx, args, error);
     }, &lux::io_blocking_pool()};
-    if (!error.empty()) co_return db_error(error);
     co_return out;
 }
 
@@ -529,9 +517,10 @@ lux::Task<void> rollback_pending(NativeCtx& ctx, lux::Request& req) {
 lux::Task<bool> drive_vm(VM& vm, VM::Result& result, lux::Request& req, NativeCtx& ctx,
                          lux::WSConnection* ws = nullptr) {
     while (result.status == VM::Status::Suspended) {
-        Value produced = Value::null();
+        Value       produced = Value::null();
+        std::string failed;   // a module or database call that failed: raised at the await
         if (result.await_is_module) {
-            produced = co_await run_builtin_module_async(result, req, ctx);
+            produced = co_await run_builtin_module_async(result, req, ctx, failed);
         }
         else if (ws && result.await_id == async_ws_recv_id()) {
             // The message enters the VM as the result of the `await`; null
@@ -549,6 +538,7 @@ lux::Task<bool> drive_vm(VM& vm, VM::Result& result, lux::Request& req, NativeCt
         }
         else if (is_db_await(result.await_id)) {
             produced = co_await run_db(result, result.await_id, req, ctx);
+            db_failed(produced, failed);
         }
         else if (result.await_id == async_sleep_id()) {
             long long ms = result.await_args.empty() ? 0 : result.await_args[0].as_int();
@@ -562,7 +552,8 @@ lux::Task<bool> drive_vm(VM& vm, VM::Result& result, lux::Request& req, NativeCt
                 co_return false;
             }
         }
-        result = vm.resume(std::move(produced), ctx);
+        result = failed.empty() ? vm.resume(std::move(produced), ctx)
+                                : vm.resume_error(std::move(failed), result.error_loc, ctx);
     }
     co_return true;
 }

@@ -181,6 +181,18 @@ private:
     std::map<std::string, Slot> slots_;
 };
 
+// A database call that failed comes back from await_db() as {"error": msg}
+// -- never ambiguous, since a successful one is a List (query), an int
+// (exec, last_id) or a bool (begin/commit/rollback), never a Dict. The
+// drivers turn it into a raised error (catchable with try) right away.
+inline bool db_failed(const Value& v, std::string& message) {
+    if (!v.is_dict()) return false;
+    auto it = v.as_dict().find("error");
+    if (it == v.as_dict().end()) return false;
+    message = it->second.to_string();
+    return true;
+}
+
 // ─── Bridge with the engine coroutines ───────────────────────────────────────
 //
 // Suspends the handler, does the work in the pool and resumes it ON ITS OWN

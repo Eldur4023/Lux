@@ -85,8 +85,11 @@ check "begin without error"      POST /undo_verbose  200 '"begin":true'
 check "balances after rollback" GET  /balances           200 '"balance":70'
 
 echo "== errors =="
-check "missing table" GET /bad_table          200 "no_existe"
-check "too few parameters" GET /too_few_params 200 "were passed"
+check "missing table" GET /bad_table          500 "no_existe"
+check "too few parameters" GET /too_few_params 500 "were passed"
+check "a failed statement is catchable"   GET /caught_in_tx 200 '"caught":"sqlite: no such table: no_such_table"'
+check "and aborts its transaction"        GET /caught_in_tx 200 '"after":"transaction aborted by an earlier failed statement'
+check "rollback() leaves it usable again" GET /caught_in_tx 200 '"then":1'
 
 echo "== concurrency (pool 8) =="
 # The statement cache is per worker.  Here it is checked that N workers using

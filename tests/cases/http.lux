@@ -54,7 +54,11 @@ get endpoint("/status_500"):
     return r
 
 get endpoint("/public_only"):
-    Json blocked = await http.get("http://127.0.0.1:8899/echo", null, { "public_only": true })
+    string blocked = ""
+    try:
+        await http.get("http://127.0.0.1:8899/echo", null, { "public_only": true })
+    catch e:
+        blocked = e.message
     Json allowed = await http.get("http://127.0.0.1:8899/echo", null, { "public_only": false })
     return { "blocked": blocked, "allowed_status": allowed["status"] }
 
