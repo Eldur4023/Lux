@@ -299,6 +299,21 @@ check "text.distance"                   GET /text/basic 200 '"dist":3'
 check "state.incr with a TTL counts in a fixed window" GET /state/ttl 200 '"a":1,"b":2,"after_window":1'
 check "state.set with a TTL expires"   GET /state/ttl   200 '"before":"abc","expired":null,"default":"none"'
 check "state set/get/incr/decr/remove" GET /state/plain 200 '"k":{"x":1},"n":-2,"removed":true,"gone":null'
+check "net.ip_in v4/v6/lists"    GET /net/basic 200 '"in":true,"out":false,"list":true,"v6net":true,"v4_in_v6":false,"bad":false'
+check "net.is_private"           GET /net/basic 200 '"priv":true,"meta":true,"pub":false,"ula":true'
+check "net.ip_version"           GET /net/basic 200 '"v4":4,"v6":6,"none":null'
+check "zip.create writes the archive" GET /zip/create 200 '"n":2'
+zip_path=$(curl -sS "http://127.0.0.1:$PORT/zip/create" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+zip_check=$(python3 -c "
+import zipfile, sys
+z = zipfile.ZipFile(sys.argv[1])
+assert z.testzip() is None
+assert z.namelist() == ['a.txt', 'evil/b.bin'], z.namelist()
+assert z.read('a.txt') == b'hello zip'
+print('ok')" "$zip_path" 2>&1 | tail -1)
+rm -rf "$(dirname "$zip_path")"
+if [ "$zip_check" = "ok" ]; then ok "zip archive is valid, names are sanitised"
+else fail "zip archive is valid, names are sanitised" "ok" "$zip_check"; fi
 check "csv.parse/columns/rows"     GET /csv/basic                 200 '"name":"ana","age":30,"city":"madrid"'
 check "csv row_count"              GET /csv/basic                 200 '"row_count":3'
 check "csv.read + List.filter"     GET /csv/read_and_aggregate 200 '"madrid":[{"name":"ana","age":30,"city":"madrid"},{"name":"cleo","age":35,"city":"madrid"}]'
