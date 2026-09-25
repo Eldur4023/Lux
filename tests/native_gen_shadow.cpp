@@ -120,7 +120,11 @@ int main() {
     // fase exige que fib/cuenta_primos SI se puedan generar -- si alguna no
     // se pudiera, seria una regresion del generador, no un resultado
     // aceptable que silenciar.
-    std::string codigo = "#include <cstdint>\n#include <string>\n\n" + error_runtime_prelude() + "\n";
+    // lux_truthy() lives in string_runtime_prelude(), which needs Value;
+    // this standalone build only needs the scalar overloads.
+    std::string codigo = "#include <cstdint>\n#include <string>\n\n" + error_runtime_prelude() + "\n"
+                         "inline bool lux_truthy(bool b) { return b; }\n"
+                         "inline bool lux_truthy(int64_t i) { return i != 0; }\n";
     for (size_t i = 0; i < prog.functions.size(); ++i) {
         auto f = generar_funcion_nativa(prog.functions[i], cuerpos[i], por_indice, firmas,
                                         TablaClases{}, TablaRoles{});
