@@ -36,32 +36,8 @@ struct CsvTable {
 // any single request and every event-loop thread can reach it (GUIDE.md
 // §22: "N threads: event loop + its own VM").
 
-class HandleTable {
-public:
-    int put(CsvTable t) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        int id = next_id_++;
-        tables_.emplace(id, std::move(t));
-        return id;
-    }
-    CsvTable* get(int id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = tables_.find(id);
-        return it == tables_.end() ? nullptr : &it->second;
-    }
-    bool close(int id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return tables_.erase(id) > 0;
-    }
-
-private:
-    std::mutex                       mutex_;
-    std::unordered_map<int, CsvTable> tables_;
-    int                                next_id_ = 1;
-};
-
-HandleTable& handles() {
-    static HandleTable h;
+HandleTable<CsvTable>& handles() {
+    static HandleTable<CsvTable> h;
     return h;
 }
 

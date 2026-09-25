@@ -10,80 +10,15 @@
 #
 # Exits with 0 if everything passes.
 
-set -u
-
-LUX="${1:-$HOME/lux-build/lux}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
-TMP="$(mktemp -d)"
 PORT=${LUX_TEST_PORT:-8790}
-SRV=""
+source "$(dirname "$0")/lib.sh"
 # For the `os` module's file-I/O tests (cases/modules.lux): a writable
-# scratch dir the server can see via os.getenv(), cleaned up by the same
-# trap that removes $TMP itself -- no test-only directory left behind.
+# scratch dir the server can see via os.getenv(), removed with $TMP.
 export LUX_TEST_TMP="$TMP"
+trap 'kill_wait $SRV; rm -rf "$TMP"; rm -f "$HERE/cases/tests-suite.db"*' EXIT
 
-passed=0
-failed=0
-
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-red()  { printf '\033[31m%s\033[0m\n' "$*"; }
-green() { printf '\033[32m%s\033[0m\n' "$*"; }
-
-ok()   { passed=$((passed + 1)); printf '  ok    %s\n' "$1"; }
-fail() {
-    failed=$((failed + 1))
-    red "  FAIL $1"
-    printf '        expected: %s\n        got: %s\n' "$2" "$3"
-}
-
-# Starts a server with the given .lux and waits for it to answer.
-# Each suite uses its own port: with SO_REUSEPORT two processes share a
-# port and the kernel splits connections between them, which would skew everything.
-start_server() {
-    stop_server
-    PORT=$((PORT + 1))
-    "$LUX" --no-watch --port "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
-    SRV=$!
-    for _ in $(seq 1 60); do
-        if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/__ping__" 2>/dev/null; then
-            return 0
-        fi
-        kill -0 "$SRV" 2>/dev/null || { red "the server died on startup:"; cat "$TMP/srv.log"; return 1; }
-        sleep 0.2
-    done
-    red "the server did not answer"; cat "$TMP/srv.log"; return 1
-}
-
-stop_server() {
-    [ -n "$SRV" ] && kill -9 "$SRV" 2>/dev/null
-    # Wait ONLY for that pid: a bare `wait` would also wait for the
-    # server and hang the suite.
-    wait "$SRV" 2>/dev/null
-    SRV=""
-}
-
-# check <name> <method> <path> <expected-code> [expected-substring] [data]
-check() {
-    local name="$1" method="$2" path="$3" want_code="$4" needle="${5:-}" data="${6:-}"
-    local args=(-sS --max-time 10 -X "$method" -o "$TMP/body" -w '%{http_code}')
-    [ -n "$data" ] && args+=(-H 'Content-Type: application/json' -d "$data")
-
-    local got
-    got=$(curl "${args[@]}" "http://127.0.0.1:$PORT$path" 2>/dev/null)
-    local body
-    body=$(cat "$TMP/body" 2>/dev/null)
-
-    if [ "$got" != "$want_code" ]; then
-        fail "$name" "code $want_code" "code $got — $body"
-        return
-    fi
-    if [ -n "$needle" ] && ! grep -qF "$needle" "$TMP/body"; then
-        fail "$name" "to contain '$needle'" "$body"
-        return
-    fi
-    ok "$name"
-}
+# Every suite gets a fresh port (see start_server in lib.sh).
+next_server() { PORT=$((PORT + 1)); start_server "$1"; }
 
 # check_mp <name> <path> <expected-code> <expected-substring> -- <curl -F flags...>
 # Separate from check(): a multipart body is not a string you can pass
@@ -132,13 +67,11 @@ compiles() {
     fi
 }
 
-cleanup() { stop_server; rm -rf "$TMP"; rm -f "$HERE/cases/tests-suite.db"*; }
-trap cleanup EXIT
 
 # ─── Suites ──────────────────────────────────────────────────────────────────
 
 echo "== language =="
-start_server "$HERE/cases/language.lux" || exit 1
+next_server "$HERE/cases/language.lux" || exit 1
 check "arithmetic"          GET /arithmetic       200 '"sum":7'
 check "strings"             GET /strings          200 '"upper":"HELLO"'
 check "multiline without margin" GET /multiline     200 '"sql":"SELECT id\nFROM posts"'
@@ -226,7 +159,7 @@ check "class validate: rule using an enum, valid" POST /enum_order 200 '"status"
 check "class validate: rule using an enum, invalid" POST /enum_order 422 'status: invalid' '{"status":"BOGUS"}'
 
 echo "== routes and parameters =="
-start_server "$HERE/cases/routes.lux" || exit 1
+next_server "$HERE/cases/routes.lux" || exit 1
 check "path parameter"   GET /echo/42           200 '"id":42'
 check "query with default"   GET /pagina           200 '"page":1'
 check "query explicita"     GET '/pagina?page=7'  200 '"page":7'
@@ -244,7 +177,7 @@ check "404 handler"       GET /tampoco          404 '"path":"/tampoco"'
 # and it only shows up when the two live on the same route -- testing query and
 # multipart separately, as the rest of the suite did, never caught it.
 echo "== parameter binding =="
-start_server "$HERE/cases/params.lux" || exit 1
+next_server "$HERE/cases/params.lux" || exit 1
 
 check "missing query param with no default is a 422, not the type's zero" \
     GET /query 422 '"q: required"'
@@ -279,7 +212,7 @@ check_mp "multipart: mistyped scalar gives 400" /mp/bad 400 'invalid parameter' 
     -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "n=no-es-un-number"
 
 echo "== classes and validation =="
-start_server "$HERE/cases/classes.lux" || exit 1
+next_server "$HERE/cases/classes.lux" || exit 1
 check "valid body"       POST /add 201 '"creado":"Ana"' '{"name":"Ana","age":30}'
 check "field required"   POST /add 422 'age: required' '{"name":"Ana"}'
 check "wrong type"     POST /add 422 'expected int' '{"name":"Ana","age":"30"}'
@@ -305,7 +238,7 @@ check "class field: POST body rejects a missing field INSIDE a nested element" P
 check "class field: POST body rejects the list itself being the wrong shape" POST /nested/ingest 422 'episodes: expected List' '{"name":"S1","episodes":"not-a-list"}'
 
 echo "== session and jwt =="
-start_server "$HERE/cases/session.lux" || exit 1
+next_server "$HERE/cases/session.lux" || exit 1
 check "no session"          GET /whoami           200 '"user":null'
 check "protected area"      GET /admin/panel      403
 check "forged cookie"  GET /whoami           200 '"user":null'
@@ -314,7 +247,7 @@ check "invalid jwt"        GET /api/me           401
 
 echo "== database =="
 rm -f "$HERE/cases/tests-suite.db"*
-start_server "$HERE/cases/data.lux" || exit 1
+next_server "$HERE/cases/data.lux" || exit 1
 check "create table"         GET  /create           200 '"ok":true'
 check "insert"            POST /add/ana        201 '"id":1'
 check "insert another"       POST /add/bob        201 '"id":2'
@@ -329,7 +262,7 @@ check "balances after rollback" GET /balances          200 '"balance":70'
 check "engine error"     GET  /bad            200 'no such table'
 
 echo "== native modules =="
-start_server "$HERE/cases/modules.lux" || exit 1
+next_server "$HERE/cases/modules.lux" || exit 1
 check "hash.sha256"       GET /hash/test              200 '"sha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"'
 check "hash.hmac_sha256"  GET /hmac/mykey/mymsg       200 '"mac":"131b7d67f083953569aa6d777328a10cf618900e9d261397d750ec30df3c9654"'
 check "hash.random_hex length" GET /random/8         200
@@ -404,7 +337,9 @@ check "proc.read without stdout: pipe is a soft error" GET /proc/read_without_pi
 check "proc.alive on an unknown handle errors"         GET /proc/unknown_handle   500 'proc: unknown handle'
 
 echo "== Range support on send_file() (RFC 7233) =="
-start_server "$HERE/cases/range.lux" || exit 1
+next_server "$HERE/cases/range.lux" || exit 1
+check "rooted send_file serves a file inside root" GET /rooted/range_fixture.bin 200 '0123456789'
+check "rooted send_file refuses a name above root"  GET /rooted/..%2F..%2F..      403 'Forbidden'
 
 # check() only inspects status + body; Range needs a request header AND a
 # response header (Content-Range/Accept-Ranges) neither of that checks, so
@@ -446,7 +381,7 @@ check_range "unparseable Range is ignored -- whole file" "not-a-range" 200 "" "0
 check_range "multi-range is ignored (unsupported) -- whole file" "bytes=0-9,20-29" 200 "" "0123456789"
 
 echo "== static mount at the root (static \"/\" -> ...) =="
-start_server "$HERE/cases/static.lux" || exit 1
+next_server "$HERE/cases/static.lux" || exit 1
 check "GET / serves index.html"            GET /              200 '<html>index</html>'
 check "a real file by its own name"        GET /index.html    200 '<html>index</html>'
 check "a real file in a subdirectory"      GET /css/style.css 200 'body{color:red}'
@@ -455,6 +390,7 @@ check "unknown path falls back to index.html (spa)" GET /whatever/nope 200 '<htm
 
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
+compiles    "example/ app compiles"     "$HERE/../example"
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"
 fails_to_compile "object out of place" "$HERE/cases/bad/sse.lux"      "only exists inside a route sse"
@@ -473,10 +409,4 @@ fails_to_compile "'Response' as a return type" "$HERE/cases/bad/response_type.lu
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
-echo
-if [ "$failed" -eq 0 ]; then
-    green "$passed tests, all passing"
-    exit 0
-fi
-red "$passed passed, $failed failed"
-exit 1
+summary

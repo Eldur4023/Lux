@@ -1,5 +1,6 @@
 #include <lux_script/crypto.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdint>
@@ -133,64 +134,44 @@ int decode_char(char c) {
 }
 } // namespace
 
-std::string base64url_encode(std::string_view raw) {
+namespace {
+// One encoder for both alphabets: the url variant (JWT, session cookies)
+// drops the '=' padding, the standard one (sqlite BLOBs, PDF export) keeps it.
+std::string encode_b64(std::string_view raw, const char* alphabet, bool pad) {
     std::string out;
     out.reserve((raw.size() + 2) / 3 * 4);
-
-    size_t i = 0;
-    for (; i + 2 < raw.size(); i += 3) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8) |
-                      uint32_t(uint8_t(raw[i + 2]));
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += kAlphabet[(v >> 6) & 0x3F];
-        out += kAlphabet[v & 0x3F];
-    }
-    if (i + 1 == raw.size()) {
+    for (size_t i = 0; i < raw.size(); i += 3) {
+        size_t   n = std::min<size_t>(3, raw.size() - i);
         uint32_t v = uint32_t(uint8_t(raw[i])) << 16;
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-    } else if (i + 2 == raw.size()) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8);
-        out += kAlphabet[(v >> 18) & 0x3F];
-        out += kAlphabet[(v >> 12) & 0x3F];
-        out += kAlphabet[(v >> 6) & 0x3F];
+        if (n > 1) v |= uint32_t(uint8_t(raw[i + 1])) << 8;
+        if (n > 2) v |= uint32_t(uint8_t(raw[i + 2]));
+        for (size_t k = 0; k < 4; ++k) {
+            if (k <= n) out += alphabet[(v >> (18 - 6 * k)) & 0x3F];
+            else if (pad) out += '=';
+        }
+    }
+    return out;
+}
+} // namespace
+
+std::string hex_encode(std::string_view raw) {
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.reserve(raw.size() * 2);
+    for (unsigned char c : raw) {
+        out += kHex[c >> 4];
+        out += kHex[c & 0xF];
     }
     return out;
 }
 
-std::string base64_encode(std::string_view raw) {
-    static const char kStd[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((raw.size() + 2) / 3 * 4);
+std::string base64url_encode(std::string_view raw) {
+    return encode_b64(raw, kAlphabet, false);
+}
 
-    size_t i = 0;
-    for (; i + 2 < raw.size(); i += 3) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8) |
-                      uint32_t(uint8_t(raw[i + 2]));
-        out += kStd[(v >> 18) & 0x3F];
-        out += kStd[(v >> 12) & 0x3F];
-        out += kStd[(v >> 6) & 0x3F];
-        out += kStd[v & 0x3F];
-    }
-    if (i + 1 == raw.size()) {
-        uint32_t v = uint32_t(uint8_t(raw[i])) << 16;
-        out += kStd[(v >> 18) & 0x3F];
-        out += kStd[(v >> 12) & 0x3F];
-        out += "==";
-    } else if (i + 2 == raw.size()) {
-        uint32_t v = (uint32_t(uint8_t(raw[i])) << 16) |
-                     (uint32_t(uint8_t(raw[i + 1])) << 8);
-        out += kStd[(v >> 18) & 0x3F];
-        out += kStd[(v >> 12) & 0x3F];
-        out += kStd[(v >> 6) & 0x3F];
-        out += '=';
-    }
-    return out;
+std::string base64_encode(std::string_view raw) {
+    return encode_b64(raw,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/", true);
 }
 
 bool base64url_decode(std::string_view text, std::string& out) {

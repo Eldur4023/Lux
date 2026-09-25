@@ -92,6 +92,12 @@ private:
 
     void  push(Value v) { stack_.push_back(std::move(v)); }
     Value pop()         { Value v = std::move(stack_.back()); stack_.pop_back(); return v; }
+    // The top `n` values, in push order (the first argument first).
+    std::vector<Value> pop_args(int n) {
+        std::vector<Value> out(static_cast<size_t>(n));
+        for (int i = n; i-- > 0;) out[static_cast<size_t>(i)] = pop();
+        return out;
+    }
 };
 
 } // namespace lux_script

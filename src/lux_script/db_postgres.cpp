@@ -199,15 +199,7 @@ public:
             if (!pass.empty()) conninfo_ += " password=" + pass;
         }
 
-        auto p = options.find("pool");
-        if (p != options.end()) {
-            long n = std::strtol(p->second.c_str(), nullptr, 10);
-            if (n < 1 || n > 64) {
-                error = "postgres: 'pool' must be between 1 and 64";
-                return false;
-            }
-            set_pool_size(static_cast<size_t>(n));
-        }
+        if (!read_pool(options, error)) return false;
         conns_.assign(pool_size(), nullptr);
         return true;
     }
@@ -295,9 +287,8 @@ private:
             store.push_back(v.is_bool() ? (v.as_bool() ? "true" : "false") : v.to_string());
             ptrs.push_back(store.back().c_str());
         }
-        // store may have reallocated: the pointers are rebuilt.
-        for (size_t i = 0, j = 0; i < args.size(); ++i)
-            if (!args[i].is_null()) { ptrs[i] = store[i].c_str(); ++j; }
+        // No pointer fix-up needed: `store` was reserved up front, so it never
+        // reallocates and every c_str() taken above stays valid.
 
         PGresult* res = PQexecParams(c, sql_pg.c_str(), static_cast<int>(args.size()),
                                      nullptr, ptrs.data(), nullptr, nullptr, 0);

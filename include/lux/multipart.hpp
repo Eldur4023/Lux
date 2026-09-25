@@ -72,7 +72,6 @@ parse_multipart(const Request& req) {
 
     // RFC 2046 §5.1.1: delimiter = "--" + boundary
     const std::string delim     = "--" + boundary_val;
-    const std::string final_delim = delim + "--";
     const std::string& body     = req.body;
 
     // ── 2. Find the first delimiter ──────────────────────────────────────────

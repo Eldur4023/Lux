@@ -1,6 +1,8 @@
 #pragma once
 #include <map>
 #include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -95,7 +97,6 @@ public:
     bool activate(const std::string& name,
                   const std::map<std::string, std::string>& options,
                   std::string& error);
-    bool is_active(const std::string& name) const;
 
     // Resolves `<module>.<function>` to its BuiltinModuleFn, or nullptr.
     // Used at COMPILE time (Emitter::check_call) to validate the call and
@@ -203,5 +204,34 @@ struct ModuleRegistrar {
             return std::make_unique<ClassName>();                             \
         });                                                                   \
     }
+
+// Integer handles for module objects that outlive a request (csv tables, pdf
+// documents). Mutex-protected: every event-loop thread can reach them.
+// Objects live behind unique_ptr so their address never moves.
+template <class T>
+class HandleTable {
+public:
+    int put(std::unique_ptr<T> v) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int id = next_id_++;
+        items_.emplace(id, std::move(v));
+        return id;
+    }
+    int put(T v) { return put(std::make_unique<T>(std::move(v))); }
+    T* get(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = items_.find(id);
+        return it == items_.end() ? nullptr : it->second.get();
+    }
+    bool close(int id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return items_.erase(id) > 0;
+    }
+
+private:
+    std::mutex                                  mutex_;
+    std::unordered_map<int, std::unique_ptr<T>> items_;
+    int                                         next_id_ = 1;
+};
 
 } // namespace lux_script

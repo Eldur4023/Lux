@@ -2839,7 +2839,7 @@ std::string error_runtime_prelude() {
         // no un error) y mismo mensaje EXACTO cuando ni eso analiza.
         "static int64_t lux_str_to_int(const std::string& s) {\n"
         "    try { return std::stoll(s); }\n"
-        "    catch (...) { lux_native_fail(\"int(): '\" + s + \"' no es un numero\"); }\n"
+        "    catch (...) { lux_native_fail(\"int(): '\" + s + \"' is not a number\"); }\n"
         "}\n";
 }
 

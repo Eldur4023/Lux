@@ -234,9 +234,6 @@ int main(int argc, char** argv) {
     // the loops are still alive; otherwise a worker finishing late —SQLite can
     // sit up to 5 s in its busy handler— posts to an already destroyed loop.
     app.on_before_stop([] { lux_script::DbRegistry::instance().shutdown(); });
-    app.set_templates(cfg.templates_dir);
-    if (!cfg.name.empty()) app.api_info(cfg.name, cfg.version.empty() ? "0.1.0"
-                                                                     : cfg.version);
     for (const auto& m : cfg.statics) app.serve_static(m.url_prefix, m.fs_root, m.spa);
     // /openapi.json and /docs are served from the live module, not from a copy
     // frozen at startup: that way a hot reload updates the documentation too.

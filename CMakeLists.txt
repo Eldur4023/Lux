@@ -352,52 +352,45 @@ lux_link_script(crypto_check)
 # not an instrumented version of it.
 enable_testing()
 
+# In-process test linked against lux_script: tests/<name>.cpp -> test_<name>.
+function(lux_script_test name)
+    add_executable(test_${name} tests/${name}.cpp)
+    lux_link_script(test_${name})
+    add_test(NAME ${name} COMMAND test_${name})
+endfunction()
+
 # Templates are tested separately and in process: compiling and rendering do not
 # go through the socket, so the regression script cannot reach them.
-add_executable(test_templates tests/templates.cpp)
-lux_link_script(test_templates)
-add_test(NAME templates COMMAND test_templates)
+lux_script_test(templates)
 
 # --native phase 1: compares Emitter::check_expr/
 # check_call against the real compilation, expression by expression. It lives
 # here, not in tests/run_tests.sh, because it calls the library directly
 # instead of the binary: it is a test of an internal piece not wired up yet.
-add_executable(test_check_expr_shadow tests/check_expr_shadow.cpp)
-lux_link_script(test_check_expr_shadow)
-add_test(NAME check_expr_shadow COMMAND test_check_expr_shadow)
+lux_script_test(check_expr_shadow)
 
-add_executable(test_check_stmt_shadow tests/check_stmt_shadow.cpp)
-lux_link_script(test_check_stmt_shadow)
-add_test(NAME check_stmt_shadow COMMAND test_check_stmt_shadow)
+lux_script_test(check_stmt_shadow)
 
 # The other half of phase 1: not just that check_expr/check_stmt reproduce
 # the same diagnostics (above), but that the emitter consuming the IR
 # produces bytecode that BEHAVES the same when actually run on the VM.
-add_executable(test_emit_ir_shadow tests/emit_ir_shadow.cpp)
-lux_link_script(test_emit_ir_shadow)
-add_test(NAME emit_ir_shadow COMMAND test_emit_ir_shadow)
+lux_script_test(emit_ir_shadow)
 
 # --native phase 2: generates real C++ from the IR, compiles it with the
 # system compiler (invokes `g++` as a subprocess) and compares its execution
 # against the VM -- the phase's acceptance criterion.
-add_executable(test_native_gen_shadow tests/native_gen_shadow.cpp)
-lux_link_script(test_native_gen_shadow)
-add_test(NAME native_gen_shadow COMMAND test_native_gen_shadow)
+lux_script_test(native_gen_shadow)
 
 # The other half: compile_native() for real (invokes g++, dlopen, dlsym) and
 # dispatch inside the VM (VM::start with the native table wired up) give the
 # same result as bytecode -- see the comment in tests/native_build_shadow.cpp.
-add_executable(test_native_build_shadow tests/native_build_shadow.cpp)
-lux_link_script(test_native_build_shadow)
-add_test(NAME native_build_shadow COMMAND test_native_build_shadow)
+lux_script_test(native_build_shadow)
 
 # User classes: generates the C++ for a class and its methods directly
 # (without going through compile_native(), which today has nothing to offer
 # a class-only program -- see the comment in tests/native_class_shadow.cpp)
 # and compares its execution against the VM.
-add_executable(test_native_class_shadow tests/native_class_shadow.cpp)
-lux_link_script(test_native_class_shadow)
-add_test(NAME native_class_shadow COMMAND test_native_class_shadow)
+lux_script_test(native_class_shadow)
 
 # Phase 4: one HTTP route compiled to native, end to end, through the real
 # compile() (parsing, build_routes, compile_native) -- not a Program built by
@@ -405,8 +398,7 @@ add_test(NAME native_class_shadow COMMAND test_native_class_shadow)
 # find <lux/response.hpp> and link liblux_script.a: same macros
 # native_build.cpp already uses (see the comment on LUX_NATIVE_INCLUDE_DIR
 # on the lux_script target), so there is no need to repeat them here.
-add_executable(test_native_route_shadow tests/native_route_shadow.cpp)
-lux_link_script(test_native_route_shadow)
+lux_script_test(native_route_shadow)
 # Same reason as lux-bin above, and the same kind of symptom found the same
 # way (by testing for real, not guessed beforehand): state.incr()/state.get()
 # (phase 5.9) resolve against SharedState::instance(), a function-local
@@ -416,7 +408,6 @@ lux_link_script(test_native_route_shadow)
 # incremented DIFFERENT counters -- this test caught it (sequence 1,2,1,1,2
 # instead of 1,2,3,3,3) before this comment was written.
 target_link_options(test_native_route_shadow PRIVATE -rdynamic)
-add_test(NAME native_route_shadow COMMAND test_native_route_shadow)
 
 # The postgres placeholder translator is a pure function: it is tested without a
 # server by including the driver's .cpp, to test THE code and not a copy.

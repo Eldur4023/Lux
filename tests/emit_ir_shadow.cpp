@@ -11,6 +11,7 @@
 // just that it compiles clean -- necessary before considering wiring the new
 // emitter into any real entry point.
 #include <lux_script/diagnostic.hpp>
+#include "parse_program.hpp"
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
 #include <lux_script/natives.hpp>
@@ -28,16 +29,6 @@
 using namespace lux_script;
 
 static int failures = 0;
-
-static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBag& diags,
-                          Program& out) {
-    file.path = "<test>";
-    file.text = src;
-    Lexer  lexer(file, diags);
-    Parser parser(lexer.tokenize(), diags);
-    parser.parse_into(out);
-    return diags.empty();
-}
 
 static std::string run(const Chunk& chunk, std::vector<Value> args,
                             const FunctionTable* fns, std::string& summary) {

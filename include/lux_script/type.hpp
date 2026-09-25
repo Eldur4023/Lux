@@ -81,14 +81,6 @@ public:
     // the key those tables use. "" if is_unknown().
     std::string base_name() const;
 
-    // Copy with the `?` suffix set or cleared; the rest of the type doesn't
-    // change.
-    Type with_optional(bool opt) const {
-        Type t = *this;
-        t.optional_ = opt;
-        return t;
-    }
-
     // Equality deliberately ignores spelling_: `int` and `long` are the
     // SAME type (§7), and that's what should decide whether something
     // type-checks, not which word was written.
@@ -98,7 +90,6 @@ public:
         if (kind_ == Kind::List || kind_ == Kind::Dict) return *elem_ == *other.elem_;
         return true;
     }
-    bool operator!=(const Type& other) const { return !(*this == other); }
 
     // Full descriptive notation: "int", "List<string>", "Dict<string,Json>",
     // "MyClass", "int?"... For new messages (the IR, the native backend).

@@ -1,5 +1,6 @@
 #pragma once
 #include <condition_variable>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <memory>
@@ -100,6 +101,19 @@ public:
     void   set_pool_size(size_t n) { pool_size_ = n; }
 
 protected:
+    // The optional `pool N` key every driver accepts (1..64 workers).
+    bool read_pool(const std::map<std::string, std::string>& options, std::string& error) {
+        auto p = options.find("pool");
+        if (p == options.end()) return true;
+        long n = std::strtol(p->second.c_str(), nullptr, 10);
+        if (n < 1 || n > 64) {
+            error = std::string(name()) + ": 'pool' must be between 1 and 64";
+            return false;
+        }
+        set_pool_size(static_cast<size_t>(n));
+        return true;
+    }
+
     size_t pool_size_ = 4;
 };
 
@@ -176,6 +190,9 @@ struct DbAwaitable {
 // of silent divergence that already caused two critical fixes in this
 // phase). run_db() is now a thin adapter over this.
 enum class DbOp { Query, Exec, LastId, Begin, Commit, Rollback };
+
+// {"error": msg} -- how every engine failure reaches the .lux, as a normal value.
+Value db_error(const std::string& msg);
 
 // `pinned_workers`/`last_exec_workers`: the same map (module -> worker)
 // NativeCtx already carries for a bytecode request today -- the caller

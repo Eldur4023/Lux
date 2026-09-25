@@ -6,6 +6,7 @@
 // sistema, lo ejecuta, y compara su salida contra la misma funcion
 // corriendo en el VM.
 #include <lux_script/diagnostic.hpp>
+#include "parse_program.hpp"
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
 #include <lux_script/native_gen.hpp>
@@ -26,16 +27,6 @@
 using namespace lux_script;
 
 static int fallos = 0;
-
-static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBag& diags,
-                          Program& out) {
-    file.path = "<prueba>";
-    file.text = src;
-    Lexer  lexer(file, diags);
-    Parser parser(lexer.tokenize(), diags);
-    parser.parse_into(out);
-    return diags.empty();
-}
 
 static long long ejecutar_vm(const Chunk& chunk, long long arg, const FunctionTable* fns) {
     lux::Request  req;

@@ -84,8 +84,8 @@ int main() {
 
     std::printf("== errors ==\n");
     bad("mixing the two styles", "select * from t where a = $1 and b = ?", 2, "mixes");
-    bad("too many arguments", "select * from t where id = ?", 2, "1 marcador");
-    bad("too few arguments", "select * from t where a = ? and b = ?", 1, "2 marcador");
+    bad("too many arguments", "select * from t where id = ?", 2, "1 '?' placeholder");
+    bad("too few arguments", "select * from t where a = ? and b = ?", 1, "2 '?' placeholder");
 
     std::printf("\n%s\n", failures ? "THERE ARE FAILURES" : "all passing");
     return failures ? 1 : 0;

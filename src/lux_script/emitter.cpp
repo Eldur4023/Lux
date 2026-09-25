@@ -32,10 +32,17 @@ int Emitter::declare_local(const std::string& name, SourceLoc loc, Type type) {
 
 const Type& Emitter::local_type(const std::string& name) const {
     static const Type kNone = Type::unknown();
-    for (int i = static_cast<int>(locals_.size()) - 1; i >= 0; --i)
-        if (locals_[static_cast<size_t>(i)].name == name)
-            return locals_[static_cast<size_t>(i)].type;
-    return kNone;
+    int i = resolve_local(name);
+    return i < 0 ? kNone : locals_[static_cast<size_t>(i)].type;
+}
+
+// Fresh per-body state: every entry point compiles one standalone chunk.
+void Emitter::reset(Chunk& out, std::string method) {
+    chunk_        = &out;
+    route_method_ = std::move(method);
+    locals_.clear();
+    loops_.clear();
+    scope_depth_  = 0;
 }
 
 int Emitter::resolve_local(const std::string& name) const {
@@ -158,11 +165,7 @@ bool Emitter::emit_condition(const Expr& e, const std::vector<TypedName>& names,
 
 IrExprPtr Emitter::check_condition(const Expr& e, const std::vector<TypedName>& names,
                                    Chunk& out, DiagnosticBag& shadow) {
-    chunk_        = &out;
-    route_method_ = {};
-    locals_.clear();
-    loops_.clear();
-    scope_depth_ = 0;
+    reset(out, {});
 
     for (const auto& n : names) declare_local(n.name, e.loc, Type::from_legacy_name(n.type));
 
@@ -178,11 +181,7 @@ IrExprPtr Emitter::check_condition(const Expr& e, const std::vector<TypedName>& 
 bool Emitter::check_route(const RouteDecl& route, Chunk& out, DiagnosticBag& shadow,
                           IrBlock* out_body) {
     size_t before   = shadow.size();
-    chunk_          = &out;
-    route_method_   = route.method;
-    locals_.clear();
-    loops_.clear();
-    scope_depth_ = 0;
+    reset(out, route.method);
 
     for (const auto& p : route.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
 
@@ -198,10 +197,9 @@ bool Emitter::check_route(const RouteDecl& route, Chunk& out, DiagnosticBag& sha
 
     IrBlock body = check_block(route.body, shadow);
     if (out_body) {
-        out_body->clear();
-        out_body->reserve(guards.size() + body.size());
-        for (auto& g : guards) out_body->push_back(std::move(g));
-        for (auto& s : body)   out_body->push_back(std::move(s));
+        guards.insert(guards.end(), std::make_move_iterator(body.begin()),
+                      std::make_move_iterator(body.end()));
+        *out_body = std::move(guards);
     }
     return shadow.size() == before;
 }
@@ -209,11 +207,7 @@ bool Emitter::check_route(const RouteDecl& route, Chunk& out, DiagnosticBag& sha
 bool Emitter::check_function(const FnDecl& fn, Chunk& out, DiagnosticBag& shadow,
                              IrBlock* out_body) {
     size_t before = shadow.size();
-    chunk_        = &out;
-    route_method_ = "FN";
-    locals_.clear();
-    loops_.clear();
-    scope_depth_ = 0;
+    reset(out, "FN");
 
     for (const auto& p : fn.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
     IrBlock body = check_block(fn.body, shadow);
@@ -224,11 +218,7 @@ bool Emitter::check_function(const FnDecl& fn, Chunk& out, DiagnosticBag& shadow
 bool Emitter::check_method(const std::string& cls, const FnDecl& m, Chunk& out,
                            DiagnosticBag& shadow, IrBlock* out_body) {
     size_t before = shadow.size();
-    chunk_        = &out;
-    route_method_ = "FN";
-    locals_.clear();
-    loops_.clear();
-    scope_depth_ = 0;
+    reset(out, "FN");
 
     declare_local("this", m.loc, Type::class_ref(cls));
     for (const auto& p : m.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
@@ -241,11 +231,7 @@ bool Emitter::check_ctor(const std::string& cls, const std::vector<std::string>&
                          const CtorDecl& ct, Chunk& out, DiagnosticBag& shadow,
                          IrBlock* out_body) {
     size_t before = shadow.size();
-    chunk_        = &out;
-    route_method_ = "FN";
-    locals_.clear();
-    loops_.clear();
-    scope_depth_ = 0;
+    reset(out, "FN");
 
     for (const auto& p : ct.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
     declare_local("this", ct.loc, Type::class_ref(cls));
@@ -265,11 +251,7 @@ bool Emitter::check_ctor(const std::string& cls, const std::vector<std::string>&
 bool Emitter::check_error_handler(const ErrorDecl& decl, Chunk& out, DiagnosticBag& shadow,
                                   IrBlock* out_body) {
     size_t before = shadow.size();
-    chunk_        = &out;
-    route_method_ = "ERROR";
-    locals_.clear();
-    loops_.clear();
-    scope_depth_ = 0;
+    reset(out, "ERROR");
 
     IrBlock body = check_block(decl.body, shadow);
     if (out_body) *out_body = std::move(body);
@@ -1043,6 +1025,19 @@ bool Emitter::looks_like_direct_request_data(const Expr& e) {
     return false;
 }
 
+// Checks every argument of a call that only takes positional ones, appending
+// them to `out`; a named one is an error with `named_msg`.
+bool Emitter::check_positional(const Expr& e, std::vector<IrArg>& out, DiagnosticBag& shadow,
+                               const std::string& named_msg) const {
+    for (const auto& a : e.args) {
+        if (!a.name.empty()) { shadow.error(a.loc, named_msg); return false; }
+        IrExprPtr v = check_expr(*a.value, shadow);
+        if (!v) return false;
+        out.push_back({{}, std::move(v), a.loc});
+    }
+    return true;
+}
+
 IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow) const {
     if (!e.object) { shadow.error(e.loc, "call without a target"); return nullptr; }
 
@@ -1107,18 +1102,10 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         r->call_name  = obj;
         r->call_index = BuiltinModuleRegistry::instance().id_of(obj, member);
 
-        size_t argc = 0;
-        for (const auto& a : e.args) {
-            if (!a.name.empty()) {
-                shadow.error(a.loc, "'" + obj + "." + member +
-                             "()' does not accept named arguments");
-                return nullptr;
-            }
-            IrExprPtr v = check_expr(*a.value, shadow);
-            if (!v) return nullptr;
-            r->args.push_back({std::string(), std::move(v), a.loc});
-            ++argc;
-        }
+        if (!check_positional(e, r->args, shadow,
+                              "'" + obj + "." + member + "()' does not accept named arguments"))
+            return nullptr;
+        size_t argc = e.args.size();
         if (argc < static_cast<size_t>(fn->min_args)) {
             shadow.error(e.loc, "'" + obj + "." + member + "()' expects at least " +
                          std::to_string(fn->min_args) + " argument(s)");
@@ -1222,17 +1209,8 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                 }
             }
 
-            size_t argc = 1;
-            for (const auto& a : e.args) {
-                if (!a.name.empty()) {
-                    shadow.error(a.loc, "queries do not accept named arguments");
-                    return nullptr;
-                }
-                IrExprPtr v = check_expr(*a.value, shadow);
-                if (!v) return nullptr;
-                r->args.push_back({{}, std::move(v), a.loc});
-                ++argc;
-            }
+            if (!check_positional(e, r->args, shadow, "queries do not accept named arguments")) return nullptr;
+            size_t argc = 1 + e.args.size();
             if (argc < static_cast<size_t>(mdef.min_args)) {
                 shadow.error(e.loc, "'" + obj + "." + e.object->text +
                              "()' expects at least the SQL query");
@@ -1269,17 +1247,8 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                 IrExprPtr r = make_call(IrCallShape::UserFunctionCall);
                 r->call_index = static_cast<int>(sig.index);
 
-                size_t given = 0;
-                for (const auto& a : e.args) {
-                    if (!a.name.empty()) {
-                        shadow.error(a.loc, "a user function does not accept named arguments");
-                        return nullptr;
-                    }
-                    IrExprPtr v = check_expr(*a.value, shadow);
-                    if (!v) return nullptr;
-                    r->args.push_back({{}, std::move(v), a.loc});
-                    ++given;
-                }
+                if (!check_positional(e, r->args, shadow, "a user function does not accept named arguments")) return nullptr;
+                size_t given = e.args.size();
 
                 if (given < sig.required || given > sig.defaults.size()) {
                     std::string expected = std::to_string(sig.required);
@@ -1303,17 +1272,8 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             if (classes_ && ct != classes_->end()) {
                 IrExprPtr r = make_call(IrCallShape::ConstructorCall);
 
-                size_t argc = 0;
-                for (const auto& a : e.args) {
-                    if (!a.name.empty()) {
-                        shadow.error(a.loc, "a constructor does not accept named arguments");
-                        return nullptr;
-                    }
-                    IrExprPtr v = check_expr(*a.value, shadow);
-                    if (!v) return nullptr;
-                    r->args.push_back({{}, std::move(v), a.loc});
-                    ++argc;
-                }
+                if (!check_positional(e, r->args, shadow, "a constructor does not accept named arguments")) return nullptr;
+                size_t argc = e.args.size();
                 auto found = ct->second.ctors.find(argc);
                 if (found == ct->second.ctors.end()) {
                     std::string options;
@@ -1364,17 +1324,8 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
                 r->object     = std::move(receiver);
                 r->call_index = static_cast<int>(sig.index);
 
-                size_t given = 0;
-                for (const auto& a : e.args) {
-                    if (!a.name.empty()) {
-                        shadow.error(a.loc, "a method does not accept named arguments");
-                        return nullptr;
-                    }
-                    IrExprPtr v = check_expr(*a.value, shadow);
-                    if (!v) return nullptr;
-                    r->args.push_back({{}, std::move(v), a.loc});
-                    ++given;
-                }
+                if (!check_positional(e, r->args, shadow, "a method does not accept named arguments")) return nullptr;
+                size_t given = e.args.size();
                 if (given < sig.required || given > sig.defaults.size()) {
                     shadow.error(e.loc, "'" + recv_name + "." + e.object->text +
                                  "()' expects " + std::to_string(sig.required) +
@@ -1951,19 +1902,15 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
         keys.push_back({a.name, a.value->type.base_name()});
     }
 
-    const std::filesystem::path path =
-        std::filesystem::path(templates_->dir) / name;
-    std::ifstream f(path, std::ios::binary);
-    if (!f) {
+    auto source = read_whole_file(std::filesystem::path(templates_->dir) / name);
+    if (!source) {
         error(e.args[0].loc, "template not found: '" + name + "' in " +
                              templates_->dir);
         return;
     }
-    const std::string source((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
 
     Template tpl;
-    if (!compile_template(source, name, templates_->dir, keys, diags_, tpl)) {
+    if (!compile_template(*source, name, templates_->dir, keys, diags_, tpl)) {
         failed_ = true;
         return;
     }

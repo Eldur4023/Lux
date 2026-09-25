@@ -72,11 +72,6 @@ bool BuiltinModuleRegistry::activate(const std::string& name,
     return true;
 }
 
-bool BuiltinModuleRegistry::is_active(const std::string& name) const {
-    auto it = slots_.find(name);
-    return it != slots_.end() && it->second.activated;
-}
-
 const BuiltinModuleFn* BuiltinModuleRegistry::find(const std::string& module,
                                                   const std::string& function) const {
     auto it = slots_.find(module);

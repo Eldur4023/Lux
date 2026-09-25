@@ -126,15 +126,7 @@ public:
         }
         file_ = it->second;
 
-        auto p = options.find("pool");
-        if (p != options.end()) {
-            long n = std::strtol(p->second.c_str(), nullptr, 10);
-            if (n < 1 || n > 64) {
-                error = "sqlite: 'pool' must be between 1 and 64";
-                return false;
-            }
-            set_pool_size(static_cast<size_t>(n));
-        }
+        if (!read_pool(options, error)) return false;
 
         auto t = options.find("timeout_ms");
         if (t != options.end()) busy_timeout_ = std::atoi(t->second.c_str());

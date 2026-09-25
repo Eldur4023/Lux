@@ -61,15 +61,7 @@ public:
             return false;
         }
 
-        auto p = options.find("pool");
-        if (p != options.end()) {
-            long n = std::strtol(p->second.c_str(), nullptr, 10);
-            if (n < 1 || n > 64) {
-                error = "mysql: 'pool' must be between 1 and 64";
-                return false;
-            }
-            set_pool_size(static_cast<size_t>(n));
-        }
+        if (!read_pool(options, error)) return false;
         conns_.assign(pool_size(), nullptr);
         return true;
     }

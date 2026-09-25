@@ -15,9 +15,9 @@ app:
     name      "Lux Notes"
     version   "1.0.0"
     port      8080
-    templates "./example/templates"
+    templates "./templates"
 
-    static "/static" -> "./example/public"
+    static "/static" -> "./public"
 
     docs
     health
@@ -27,7 +27,7 @@ app:
         max_age 86400
 
     sqlite:
-        file "./example/notes.db"
+        file "./notes.db"
         pool 4
 
 enum Status:

@@ -8,7 +8,6 @@ using namespace lux;
 int main() {
     App app;
     app.use(lux::logger());
-    app.set_templates("./templates");
 
     app.get("/json", [](Response& res) {
         res.json_text(R"({"ok":true,"engine":"lux-2.0"})");

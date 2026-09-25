@@ -47,12 +47,7 @@ void trim_after_tag(size_t& i, const std::string& src) {
                               src[i] == '\n' || src[i] == '\r')) ++i;
 }
 
-std::string trim(std::string s) {
-    size_t a = s.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos) return {};
-    size_t b = s.find_last_not_of(" \t\r\n");
-    return s.substr(a, b - a + 1);
-}
+std::string trim(std::string s) { return trim_ascii_ws(s); }
 
 
 // ─── Compiler ────────────────────────────────────────────────────────────────
@@ -74,14 +69,14 @@ public:
             std::string parent;
             if (!parent_of(root, root_file, parent)) break;
             if (n == 16) {
-                error(start_loc(root_file), root_file,
+                error(start_loc(root_file),
                       "too many chained {% extends %}: is there a cycle?");
                 return false;
             }
             collect_blocks(root, root_file);
             std::string parent_text;
             if (!read_template(parent, parent_text)) {
-                error(start_loc(root_file), root_file,
+                error(start_loc(root_file),
                       "base template not found: '" + parent + "'");
                 return false;
             }
@@ -91,7 +86,7 @@ public:
 
         body(root, root_file, 0);
         if (!open_.empty()) {
-            error(open_.back().loc, file,
+            error(open_.back().loc,
                   "missing {% end" + open_.back().kind + " %}");
         }
         return !failed_;
@@ -133,9 +128,8 @@ private:
     // The files are kept alive because SourceLoc points at their path.
     std::vector<std::unique_ptr<SourceFile>> files_;
 
-    void error(SourceLoc loc, const std::string& file, std::string msg) {
+    void error(SourceLoc loc, std::string msg) {
         failed_ = true;
-        (void)file;
         diags_.error(loc, std::move(msg));
     }
 
@@ -170,16 +164,16 @@ private:
         Parser  ps(lx.tokenize(), own_diags);
         ExprPtr e = ps.parse_single_expression();
         if (!e || !own_diags.empty()) {
-            error(loc, file, "in the template expression: " +
+            error(loc, "in the template expression: " +
                   (own_diags.empty() ? std::string("invalid expression")
                                    : own_diags.items().front().message));
             return SIZE_MAX;
         }
 
         Chunk   ch;
-        Emitter em(own_diags, fns_, classes_, imports_);
+        Emitter em(own_diags);
         if (!em.emit_condition(*e, out_.names, ch) || !own_diags.empty()) {
-            error(loc, file, "in the template expression: " +
+            error(loc, "in the template expression: " +
                   (own_diags.empty() ? std::string("cannot be compiled")
                                    : own_diags.items().front().message));
             return SIZE_MAX;
@@ -204,9 +198,9 @@ private:
 
     bool read_template(const std::string& name, std::string& out) {
         if (name.empty() || name.find("..") != std::string::npos) return false;
-        std::ifstream f(std::filesystem::path(dir_) / name, std::ios::binary);
-        if (!f) return false;
-        out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        auto text = read_whole_file(std::filesystem::path(dir_) / name);
+        if (!text) return false;
+        out = std::move(*text);
         return true;
     }
 
@@ -224,7 +218,7 @@ private:
         if (parent.size() >= 2 && (parent.front() == 0x22 || parent.front() == 0x27))
             parent = parent.substr(1, parent.size() - 2);
         if (parent.empty()) {
-            error(start_loc(file), file, "{% extends %} without a template name");
+            error(start_loc(file), "{% extends %} without a template name");
             return false;
         }
         return true;
@@ -267,7 +261,7 @@ private:
             size_t      content_end = 0;
             size_t      after       = end_of_block(src, close_pos + 2, content_end);
             if (after == std::string::npos) {
-                error(start_loc(file), file,
+                error(start_loc(file),
                       "missing {% endblock %} for block '" + name + "'");
                 return;
             }
@@ -276,13 +270,6 @@ private:
             i = after;
         }
     }
-
-public:
-    // Module compilation context, so the expressions can call user functions
-    // and build their classes.
-    const FunctionSigs*          fns_     = nullptr;
-    const ClassSigs*             classes_  = nullptr;
-    const std::set<std::string>* imports_ = nullptr;
 };
 
 } // namespace
@@ -291,7 +278,6 @@ public:
 void Compiler::body(const std::string& src, const std::string& file,
                         int depth) {
     size_t i = 0, text_from = 0;
-    int    line = 1;
 
     auto loc_at = [&](size_t pos) {
         SourceLoc l;
@@ -304,7 +290,6 @@ void Compiler::body(const std::string& src, const std::string& file,
         l.col = col;
         return l;
     };
-    (void)line;
 
     while (i < src.size()) {
         size_t open_pos = src.find('{', i);
@@ -316,7 +301,7 @@ void Compiler::body(const std::string& src, const std::string& file,
         const char* close_str = (type == '{') ? "}}" : (type == '%') ? "%}" : "#}";
         size_t close_pos = src.find(close_str, open_pos + 2);
         if (close_pos == std::string::npos) {
-            error(loc_at(open_pos), file, std::string("missing the closing '") +
+            error(loc_at(open_pos), std::string("missing the closing '") +
                   (type == '{' ? "{{" : type == '%' ? "{%" : "{#") + "'");
             return;
         }
@@ -345,7 +330,7 @@ void Compiler::body(const std::string& src, const std::string& file,
                 content = trim(content.substr(0, content.size() - 5));
             }
             if (content.find('|') != std::string::npos) {
-                error(loc, file,
+                error(loc,
                       "Jinja2 filters do not exist here: they are Lux Script methods. "
                       "Instead of {{ x|upper }}, write {{ x.upper() }}");
                 continue;
@@ -386,7 +371,7 @@ void Compiler::body(const std::string& src, const std::string& file,
 
         } else if (tag == "elif" || tag == "else") {
             if (open_.empty() || open_.back().kind != "if") {
-                error(loc, file, "{% " + tag + " %} without {% if %}");
+                error(loc, "{% " + tag + " %} without {% if %}");
                 continue;
             }
             // The previous block jumps to the end of the whole chain.
@@ -411,7 +396,7 @@ void Compiler::body(const std::string& src, const std::string& file,
 
         } else if (tag == "endif") {
             if (open_.empty() || open_.back().kind != "if") {
-                error(loc, file, "{% endif %} without {% if %}");
+                error(loc, "{% endif %} without {% if %}");
                 continue;
             }
             Open ob = std::move(open_.back());
@@ -425,13 +410,13 @@ void Compiler::body(const std::string& src, const std::string& file,
             // for <name> in <expression>
             size_t in_pos = rest.find(" in ");
             if (in_pos == std::string::npos) {
-                error(loc, file, "expected {% for x in list %}");
+                error(loc, "expected {% for x in list %}");
                 continue;
             }
             std::string var   = trim(rest.substr(0, in_pos));
             std::string list_ = trim(rest.substr(in_pos + 4));
             if (var.empty()) {
-                error(loc, file, "missing the loop variable name");
+                error(loc, "missing the loop variable name");
                 continue;
             }
             size_t k = expression(list_, loc, file);
@@ -457,7 +442,7 @@ void Compiler::body(const std::string& src, const std::string& file,
 
         } else if (tag == "endfor") {
             if (open_.empty() || open_.back().kind != "for") {
-                error(loc, file, "{% endfor %} without {% for %}");
+                error(loc, "{% endfor %} without {% for %}");
                 continue;
             }
             Open ob = std::move(open_.back());
@@ -471,7 +456,7 @@ void Compiler::body(const std::string& src, const std::string& file,
 
         } else if (tag == "include") {
             if (depth > 16) {
-                error(loc, file, "too many nested {% include %}: is there a cycle?");
+                error(loc, "too many nested {% include %}: is there a cycle?");
                 continue;
             }
             std::string name = trim(rest);
@@ -479,17 +464,15 @@ void Compiler::body(const std::string& src, const std::string& file,
                 name = name.substr(1, name.size() - 2);
             std::filesystem::path path = std::filesystem::path(dir_) / name;
             if (name.empty() || name.find("..") != std::string::npos) {
-                error(loc, file, "invalid template name in {% include %}");
+                error(loc, "invalid template name in {% include %}");
                 continue;
             }
-            std::ifstream f(path, std::ios::binary);
-            if (!f) {
-                error(loc, file, "template not found: '" + name + "'");
+            auto included = read_whole_file(path);
+            if (!included) {
+                error(loc, "template not found: '" + name + "'");
                 continue;
             }
-            std::string included((std::istreambuf_iterator<char>(f)),
-                                 std::istreambuf_iterator<char>());
-            body(included, name, depth + 1);
+            body(*included, name, depth + 1);
 
         } else if (tag == "block") {
             // At the root: if the child defined this block, ITS text is compiled
@@ -499,7 +482,7 @@ void Compiler::body(const std::string& src, const std::string& file,
             size_t content_end = 0;
             size_t after = end_of_block(src, i, content_end);
             if (after == std::string::npos) {
-                error(loc, file, "missing {% endblock %} for block '" + name + "'");
+                error(loc, "missing {% endblock %} for block '" + name + "'");
                 return;
             }
             auto it = blocks_.find(name);
@@ -515,13 +498,13 @@ void Compiler::body(const std::string& src, const std::string& file,
             // Closes a block whose default content has just been compiled.
 
         } else if (tag == "extends") {
-            error(loc, file, "{% extends %} must be the first thing in the template");
+            error(loc, "{% extends %} must be the first thing in the template");
 
         } else if (tag == "macro" || tag == "endmacro") {
-            error(loc, file, "{% " + tag + " %} does not exist in Lux Script: "
+            error(loc, "{% " + tag + " %} does not exist in Lux Script: "
                                 "to reuse, use {% include %} or a function from the .lux");
         } else {
-            error(loc, file, "unknown tag: {% " + tag + " %}");
+            error(loc, "unknown tag: {% " + tag + " %}");
         }
     }
 

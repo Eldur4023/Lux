@@ -151,15 +151,13 @@ void DbRegistry::shutdown() {
         if (slot.pool) slot.pool->stop();
 }
 
-// ─── Puente compartido bytecode/--native ─────────────────────────────────────
+// ─── Bridge shared by bytecode and --native ──────────────────────────────────
 
-namespace {
 Value db_error(const std::string& msg) {
     Value::Dict d;
     d["error"] = Value::str(msg);
     return Value::dict(std::move(d));
 }
-} // namespace
 
 lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLoop* loop,
                             const std::string& sql, std::vector<Value> params,

@@ -2,7 +2,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <lux_script/value.hpp>
-#include <lux_script/bytecode.hpp>
 
 #include <cmath>
 #include <sstream>
@@ -130,51 +129,6 @@ void sanitize_utf8(const std::string& in, std::string& out) {
     }
 }
 
-// The escaping loop, no surrounding quotes: shared by escape_json's rare
-// invalid-UTF-8 fallback below, which already knows its input is clean
-// (sanitize_utf8 just ran) and needs no byte to be inspected for anything
-// but escaping.
-void escape_body(const std::string& in, std::string& out) {
-    const char*  p = in.data();
-    const size_t n = in.size();
-    size_t i = 0, clean = 0;
-
-    while (i < n) {
-        while (i + 8 <= n) {
-            uint64_t w;
-            std::memcpy(&w, p + i, 8);
-            if (block_needs_escape(w)) break;
-            i += 8;
-        }
-        unsigned char c = 0;
-        bool present = false;
-        for (; i < n; ++i) {
-            c = static_cast<unsigned char>(p[i]);
-            if (c < 0x20 || c == '"' || c == '\\' ||
-                c == '<' || c == '>' || c == '&') { present = true; break; }
-        }
-        if (!present) break;
-
-        out.append(in, clean, i - clean);
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case 0x08: out += "\\b"; break;
-            case 0x0C: out += "\\f"; break;
-            case 0x0A: out += "\\n"; break;
-            case 0x0D: out += "\\r"; break;
-            case 0x09: out += "\\t"; break;
-            default: {
-                char buf[8];
-                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                out += buf;
-            }
-        }
-        clean = ++i;
-    }
-    out.append(in, clean, n - clean);
-}
-
 // UTF-8 validation and JSON escaping, fused into ONE pass instead of the
 // two separate scans (utf8_valid() then escape_valid()) this used to be.
 // Correct because it is safe, not because it is clever: every byte that
@@ -206,8 +160,10 @@ void escape_body(const std::string& in, std::string& out) {
 // doc comment: "so that the JSON will be safe to embed inside HTML"), and a
 // JSON parser reads < and a literal '<' as the identical byte -- this
 // changes nothing about what the JSON decodes to on the other end.
-void escape_json(const std::string& in, std::string& out) {
-    out.push_back('"');
+// The escaping loop without the surrounding quotes. Invalid UTF-8 is rare:
+// the remainder is sanitized (U+FFFD) and run through this same loop again,
+// which then never hits the invalid branch.
+void escape_body(const std::string& in, std::string& out) {
     const auto* u = reinterpret_cast<const unsigned char*>(in.data());
     const size_t n = in.size();
     size_t i = 0, clean = 0;
@@ -243,7 +199,6 @@ void escape_json(const std::string& in, std::string& out) {
                 std::string rest;
                 sanitize_utf8(in.substr(i), rest);
                 escape_body(rest, out);
-                out.push_back('"');
                 return;
             }
             i += l;   // a valid multi-byte sequence is copied through as-is,
@@ -268,6 +223,11 @@ void escape_json(const std::string& in, std::string& out) {
         clean = ++i;
     }
     out.append(in, clean, n - clean);
+}
+
+void escape_json(const std::string& in, std::string& out) {
+    out.push_back('"');
+    escape_body(in, out);
     out.push_back('"');
 }
 
@@ -381,54 +341,5 @@ bool Value::less_than(const Value& o, bool& ok) const {
     return false;
 }
 
-const char* op_name(Op op) {
-    switch (op) {
-        case Op::Const:            return "CONST";
-        case Op::LoadLocal:        return "LOAD_LOCAL";
-        case Op::StoreLocal:       return "STORE_LOCAL";
-        case Op::Pop:              return "POP";
-        case Op::Add:              return "ADD";
-        case Op::Sub:              return "SUB";
-        case Op::Mul:              return "MUL";
-        case Op::Div:              return "DIV";
-        case Op::Mod:              return "MOD";
-        case Op::Neg:              return "NEG";
-        case Op::Eq:               return "EQ";
-        case Op::Ne:               return "NE";
-        case Op::Lt:               return "LT";
-        case Op::Le:               return "LE";
-        case Op::Gt:               return "GT";
-        case Op::Ge:               return "GE";
-        case Op::Not:              return "NOT";
-        case Op::ConcatN:          return "CONCAT_N";
-        case Op::AddInt:           return "ADD_INT";
-        case Op::SubInt:           return "SUB_INT";
-        case Op::MulInt:           return "MUL_INT";
-        case Op::LtInt:            return "LT_INT";
-        case Op::LeInt:            return "LE_INT";
-        case Op::GtInt:            return "GT_INT";
-        case Op::GeInt:            return "GE_INT";
-        case Op::Jump:             return "JUMP";
-        case Op::JumpIfFalse:      return "JUMP_IF_FALSE";
-        case Op::JumpIfFalsePeek:  return "JUMP_IF_FALSE_PEEK";
-        case Op::JumpIfTruePeek:   return "JUMP_IF_TRUE_PEEK";
-        case Op::MakeList:         return "MAKE_LIST";
-        case Op::MakeDict:         return "MAKE_DICT";
-        case Op::GetIndex:         return "GET_INDEX";
-        case Op::SetIndex:         return "SET_INDEX";
-        case Op::IterList:         return "ITER_LIST";
-        case Op::GetMember:        return "GET_MEMBER";
-        case Op::SetMember:        return "SET_MEMBER";
-        case Op::CallFunction:     return "CALL_FUNCTION";
-        case Op::CallMethod:       return "CALL_METHOD";
-        case Op::CallNative:       return "CALL_NATIVE";
-        case Op::CallBuiltinModule: return "CALL_BUILTIN_MODULE";
-        case Op::CallAsync:        return "CALL_ASYNC";
-        case Op::CallAsyncModule:  return "CALL_ASYNC_MODULE";
-        case Op::Return:           return "RETURN";
-        case Op::ReturnNull:       return "RETURN_NULL";
-    }
-    return "?";
-}
 
 } // namespace lux_script

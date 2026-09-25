@@ -1,5 +1,6 @@
 #include <lux_script/value.hpp>
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <string>
@@ -22,29 +23,25 @@ class Parser {
 public:
     explicit Parser(std::string_view t) : t_(t) {}
 
-    bool documento(Value& out) {
-        espacios();
+    bool document(Value& out) {
+        skip_ws();
         if (!value(out, 0)) return false;
-        espacios();
+        skip_ws();
         return i_ == t_.size();
     }
 
 private:
     // Without a cap, a document with thousands of nested brackets takes the
     // thread stack down before anyone can complain.
-    static constexpr int kMaxProfundidad = 200;
+    static constexpr int kMaxDepth = 200;
 
     std::string_view t_;
     size_t           i_ = 0;
 
-    static bool digito(char c) { return c >= '0' && c <= '9'; }
+    static bool is_digit(char c) { return c >= '0' && c <= '9'; }
 
-    void espacios() {
-        while (i_ < t_.size()) {
-            const char c = t_[i_];
-            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ++i_;
-            else break;
-        }
+    void skip_ws() {
+        i_ = std::min(t_.size(), t_.find_first_not_of(" \t\n\r", i_));
     }
 
     bool literal(std::string_view lit) {
@@ -54,8 +51,8 @@ private:
         return true;
     }
 
-    bool value(Value& out, int prof) {
-        if (prof > kMaxProfundidad || i_ >= t_.size()) return false;
+    bool value(Value& out, int depth) {
+        if (depth > kMaxDepth || i_ >= t_.size()) return false;
         switch (t_[i_]) {
             case 'n':
                 if (!literal("null")) return false;
@@ -75,27 +72,27 @@ private:
                 out = Value::str(std::move(s));
                 return true;
             }
-            case '[': return list_(out, prof);
-            case '{': return object(out, prof);
+            case '[': return list_(out, depth);
+            case '{': return object(out, depth);
             default:  return number(out);
         }
     }
 
-    bool list_(Value& out, int prof) {
+    bool list_(Value& out, int depth) {
         ++i_;                                   // '['
         Value::List l;
-        espacios();
+        skip_ws();
         if (i_ < t_.size() && t_[i_] == ']') {
             ++i_;
             out = Value::list(std::move(l));
             return true;
         }
         for (;;) {
-            espacios();
+            skip_ws();
             Value v;
-            if (!value(v, prof + 1)) return false;
+            if (!value(v, depth + 1)) return false;
             l.push_back(std::move(v));
-            espacios();
+            skip_ws();
             if (i_ >= t_.size()) return false;
             if (t_[i_] == ',') { ++i_; continue; }
             if (t_[i_] == ']') { ++i_; break; }
@@ -105,28 +102,28 @@ private:
         return true;
     }
 
-    bool object(Value& out, int prof) {
+    bool object(Value& out, int depth) {
         ++i_;                                   // '{'
         Value::Dict d;
-        espacios();
+        skip_ws();
         if (i_ < t_.size() && t_[i_] == '}') {
             ++i_;
             out = Value::dict(std::move(d));
             return true;
         }
         for (;;) {
-            espacios();
+            skip_ws();
             if (i_ >= t_.size() || t_[i_] != '"') return false;
             std::string k;
             if (!string_value(k)) return false;
-            espacios();
+            skip_ws();
             if (i_ >= t_.size() || t_[i_] != ':') return false;
             ++i_;
-            espacios();
+            skip_ws();
             Value v;
-            if (!value(v, prof + 1)) return false;
+            if (!value(v, depth + 1)) return false;
             d[k] = std::move(v);
-            espacios();
+            skip_ws();
             if (i_ >= t_.size()) return false;
             if (t_[i_] == ',') { ++i_; continue; }
             if (t_[i_] == '}') { ++i_; break; }
@@ -136,36 +133,13 @@ private:
         return true;
     }
 
-    // A code point to UTF-8.
-    static void utf8(uint32_t cp, std::string& out) {
-        if (cp < 0x80) {
-            out.push_back(static_cast<char>(cp));
-        } else if (cp < 0x800) {
-            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        } else if (cp < 0x10000) {
-            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        } else {
-            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-        }
-    }
-
+    // Exactly four hex digits (from_chars rejects signs/whitespace for an
+    // unsigned type, so "+1ab" never slips through).
     bool hex4(uint32_t& cp) {
         if (i_ + 4 > t_.size()) return false;
-        cp = 0;
-        for (int k = 0; k < 4; ++k) {
-            const char c = t_[i_ + k];
-            cp <<= 4;
-            if      (c >= '0' && c <= '9') cp |= static_cast<uint32_t>(c - '0');
-            else if (c >= 'a' && c <= 'f') cp |= static_cast<uint32_t>(c - 'a' + 10);
-            else if (c >= 'A' && c <= 'F') cp |= static_cast<uint32_t>(c - 'A' + 10);
-            else return false;
-        }
+        const char* p = t_.data() + i_;
+        auto [end, ec] = std::from_chars(p, p + 4, cp, 16);
+        if (ec != std::errc{} || end != p + 4) return false;
         i_ += 4;
         return true;
     }
@@ -214,14 +188,14 @@ private:
                         if (i_ + 1 >= t_.size() || t_[i_] != '\\' || t_[i_ + 1] != 'u')
                             return false;
                         i_ += 2;
-                        uint32_t bajo = 0;
-                        if (!hex4(bajo)) return false;
-                        if (bajo < 0xDC00 || bajo > 0xDFFF) return false;
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (bajo - 0xDC00);
+                        uint32_t low = 0;
+                        if (!hex4(low)) return false;
+                        if (low < 0xDC00 || low > 0xDFFF) return false;
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
                     } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
                         return false;
                     }
-                    utf8(cp, out);
+                    out += utf8_encode(cp);
                     break;
                 }
                 default: return false;
@@ -237,7 +211,7 @@ private:
         if (t_[i_] == '0') {
             ++i_;
         } else if (t_[i_] >= '1' && t_[i_] <= '9') {
-            while (i_ < t_.size() && digito(t_[i_])) ++i_;
+            while (i_ < t_.size() && is_digit(t_[i_])) ++i_;
         } else {
             return false;
         }
@@ -246,15 +220,15 @@ private:
         if (i_ < t_.size() && t_[i_] == '.') {
             real = true;
             ++i_;
-            if (i_ >= t_.size() || !digito(t_[i_])) return false;
-            while (i_ < t_.size() && digito(t_[i_])) ++i_;
+            if (i_ >= t_.size() || !is_digit(t_[i_])) return false;
+            while (i_ < t_.size() && is_digit(t_[i_])) ++i_;
         }
         if (i_ < t_.size() && (t_[i_] == 'e' || t_[i_] == 'E')) {
             real = true;
             ++i_;
             if (i_ < t_.size() && (t_[i_] == '+' || t_[i_] == '-')) ++i_;
-            if (i_ >= t_.size() || !digito(t_[i_])) return false;
-            while (i_ < t_.size() && digito(t_[i_])) ++i_;
+            if (i_ >= t_.size() || !is_digit(t_[i_])) return false;
+            while (i_ < t_.size() && is_digit(t_[i_])) ++i_;
         }
 
         const char* p = t_.data() + start;
@@ -280,7 +254,7 @@ private:
 
 bool Value::parse_json(std::string_view text, Value& out) {
     Parser p(text);
-    return p.documento(out);
+    return p.document(out);
 }
 
 } // namespace lux_script

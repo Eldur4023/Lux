@@ -32,7 +32,6 @@ public:
     size_t size() const { return items_.size(); }
     const std::vector<Diagnostic>& items() const { return items_; }
 
-    void clear() { items_.clear(); }
 
     // Formats every diagnostic with file:line:column, the line of code and a
     // cursor under the exact position.  `files` is used to recover the text of

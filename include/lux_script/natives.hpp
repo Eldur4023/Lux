@@ -208,6 +208,5 @@ std::vector<std::string>& last_validation_messages();
 // looks at it.
 std::string& last_internal_error();
 const NativeDef& native_at(int id);
-int              native_count();
 
 } // namespace lux_script

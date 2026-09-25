@@ -73,8 +73,6 @@ public:
     // Resume after a pause.  Safe to call when not paused.
     void resume();
 
-    void reset();
-
 private:
     OnComplete                       on_complete_;
     OnHeadersComplete                on_headers_complete_;

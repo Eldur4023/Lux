@@ -21,6 +21,7 @@
 // theoretical, cost, and the worker-pool/await generalization it flagged as
 // the clearest next phase.
 #include <lux_script/builtin_module.hpp>
+#include <lux/percent_encoding.hpp>
 
 #include <curl/curl.h>
 
@@ -249,41 +250,24 @@ Value fn_http_post(NativeCtx&, std::vector<Value>& args, std::string& error)  { 
 Value fn_http_put(NativeCtx&, std::vector<Value>& args, std::string& error)   { return do_body_verb("put", args, error); }
 Value fn_http_patch(NativeCtx&, std::vector<Value>& args, std::string& error) { return do_body_verb("patch", args, error); }
 
-// RFC 3986 percent-encoding -- the same escaping curl_easy_escape() and
-// JavaScript's encodeURIComponent() do, NOT
-// application/x-www-form-urlencoded (space as '+', not '%20'): the two
-// are easy to conflate, but only the RFC 3986 form is safe to splice into
-// a query string's VALUE (`?q=` + url_encode(text)) without also having
-// to know whether the remote server's parser treats a literal '+' there
-// as a space or as itself. Pure text transformation, no network involved
-// and no throwaway CURL* handle needed just to call curl_easy_escape() on
-// it -- a lookup-free byte loop is simpler and exactly as correct.
+// lux::percent_encode() (lux/percent_encoding.hpp, shared with cookie
+// encoding) -- the same escaping curl_easy_escape() and JavaScript's
+// encodeURIComponent() do, NOT application/x-www-form-urlencoded (space as
+// '+', not '%20'): the two are easy to conflate, but only the RFC 3986 form
+// is safe to splice into a query string's VALUE (`?q=` + url_encode(text))
+// without also having to know whether the remote server's parser treats a
+// literal '+' there as a space or as itself. Pure text transformation, no
+// network involved and no throwaway CURL* handle needed just to call
+// curl_easy_escape() on it.
 //
-// Operates on raw bytes, not codepoints: `unsigned char c : s` walks a
-// UTF-8 string's individual encoded bytes, each of which is already
-// outside the unreserved set (all of UTF-8's multi-byte encoding uses
-// bytes >= 0x80) and gets escaped on its own -- "á" (UTF-8 C3 A1) comes
-// out as "%C3%A1", two escapes, matching what curl_easy_escape() and
-// encodeURIComponent() both do with the same input.
+// Operates on raw bytes, not codepoints: each of a UTF-8 string's encoded
+// bytes is already outside the unreserved set (all of UTF-8's multi-byte
+// encoding uses bytes >= 0x80) and gets escaped on its own -- "á" (UTF-8 C3
+// A1) comes out as "%C3%A1", two escapes, matching what curl_easy_escape()
+// and encodeURIComponent() both do with the same input.
 Value fn_http_url_encode(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "http.url_encode() expects a string"; return Value::null(); }
-    static const char kHex[] = "0123456789ABCDEF";
-    const std::string& s = args[0].as_str();
-    std::string out;
-    out.reserve(s.size());
-    for (unsigned char c : s) {
-        bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                          (c >= '0' && c <= '9') ||
-                          c == '-' || c == '_' || c == '.' || c == '~';
-        if (unreserved) {
-            out += static_cast<char>(c);
-        } else {
-            out += '%';
-            out += kHex[c >> 4];
-            out += kHex[c & 0x0F];
-        }
-    }
-    return Value::str(std::move(out));
+    return Value::str(lux::percent_encode(args[0].as_str()));
 }
 
 class HttpModule : public BuiltinModule {

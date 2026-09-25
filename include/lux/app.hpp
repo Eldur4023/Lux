@@ -82,15 +82,6 @@ public:
         return *this;
     }
 
-    // Directory where the templates are looked up (default: "./templates")
-    App& set_templates(std::string dir) { templates_dir_ = std::move(dir); return *this; }
-
-    // Override the title and version shown in /docs and /openapi.json.
-    App& api_info(std::string title, std::string version = "0.1.0") {
-        api_title_   = std::move(title);
-        api_version_ = std::move(version);
-        return *this;
-    }
 
 
     // ── WebSocket ────────────────────────────────────────────────────────────
@@ -372,11 +363,8 @@ private:
     ErrorHandler                              catchall_error_handler_;
     std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;
     AsyncErrorHandler                          catchall_async_error_handler_;
-    std::string                               templates_dir_ = "./templates";
     std::function<void()>                     before_stop_;
 
-    std::string                               api_title_       = "Lux API";
-    std::string                               api_version_     = "0.1.0";
     int                                       max_connections_ = 10'000;
 
 

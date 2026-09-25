@@ -8,6 +8,7 @@
 #include <lux/core/event_loop.hpp>
 #include "cancel.hpp"
 #include "cookies.hpp"
+#include "percent_encoding.hpp"
 
 namespace lux {
 
@@ -30,9 +31,6 @@ public:
 
     // Pointer to the event loop for scheduling tasks
     core::EventLoop* loop = nullptr;
-
-    // Raw socket fd — used by res.sse(req) and WebSocket upgrade.
-    int _conn_fd = -1;
 
     // Single write on the connection socket.  Returns bytes written, or -1
     // with errno set (EAGAIN when the kernel buffer is full, EBADF after
@@ -115,64 +113,14 @@ public:
         auto ct = header("content-type");
         if (!ct || ct->find("application/x-www-form-urlencoded") == std::string::npos)
             return {};
-        return parse_form_encoded(body);
+        std::unordered_map<std::string, std::string> out;
+        parse_form_encoded(body, out);
+        return out;
     }
 
     // Mutable cache for parsed Cookie header — only populated on first cookie().
     mutable std::unordered_map<std::string, std::string> cookies_cache_;
     mutable bool                                          cookies_parsed_ = false;
-
-private:
-    // Strict hex-nibble check — see the identical helper's comment in
-    // http_connection.cpp's url_decode() for why std::strtoul() is wrong
-    // here: it accepts a leading sign/whitespace before the digits, so
-    // "%+2e" or "%-1" decoded as a real byte instead of staying the literal
-    // text RFC 3986 says an escape with non-hex digits is.
-    static int hex_nibble(char c) {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-        return -1;
-    }
-
-    static std::string form_url_decode(const std::string& s) {
-        std::string out;
-        out.reserve(s.size());
-        for (size_t i = 0; i < s.size(); ++i) {
-            if (s[i] == '+') {
-                out += ' ';
-            } else if (s[i] == '%' && i + 2 < s.size()) {
-                int hi = hex_nibble(s[i+1]), lo = hex_nibble(s[i+2]);
-                if (hi >= 0 && lo >= 0) {
-                    int v = hi * 16 + lo;
-                    if (v != 0) out += static_cast<char>(v);  // reject %00 null bytes
-                    i += 2;
-                } else { out += '%'; }
-            } else {
-                out += s[i];
-            }
-        }
-        return out;
-    }
-
-    static std::unordered_map<std::string, std::string>
-    parse_form_encoded(const std::string& src) {
-        std::unordered_map<std::string, std::string> result;
-        size_t pos = 0;
-        while (pos <= src.size()) {
-            size_t amp = src.find('&', pos);
-            if (amp == std::string::npos) amp = src.size();
-            size_t eq = src.find('=', pos);
-            if (eq != std::string::npos && eq < amp) {
-                result[form_url_decode(src.substr(pos, eq - pos))] =
-                    form_url_decode(src.substr(eq + 1, amp - eq - 1));
-            } else if (amp > pos) {
-                result[form_url_decode(src.substr(pos, amp - pos))] = "";
-            }
-            pos = amp + 1;
-        }
-        return result;
-    }
 };
 
 } // namespace lux

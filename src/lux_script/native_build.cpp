@@ -279,7 +279,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     std::error_code ec;
     std::filesystem::create_directories(cache_dir, ec);
     if (ec) {
-        aviso = "--native: no se pudo crear " + cache_dir.string() + ": " + ec.message();
+        aviso = "--native: could not create " + cache_dir.string() + ": " + ec.message();
         return nullptr;
     }
 
@@ -374,7 +374,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         errs << errf.rdbuf();
         aviso = "--native: " + std::to_string(generadas.size() + rutas_generadas.size() +
                                               rutas_async_generadas.size()) +
-                " funcion(es)/ruta(s) no se pudieron compilar (g++ fallo): " + errs.str();
+                " function(s)/route(s) could not be compiled (g++ failed): " + errs.str();
         return nullptr;
     }
 
@@ -387,8 +387,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // probando esto contra un dlopen que de verdad fallaba). Una sola
         // llamada, guardada.
         const char* motivo = dlerror();
-        aviso = std::string("--native: no se pudo cargar la biblioteca generada: ") +
-                (motivo ? motivo : "motivo desconocido");
+        aviso = std::string("--native: could not load the generated library: ") +
+                (motivo ? motivo : "unknown reason");
         return nullptr;
     }
 
@@ -419,7 +419,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     }
     if (!out->error_message) simbolos_sin_resolver += " lux_native_error_message";
     if (!simbolos_sin_resolver.empty())
-        aviso = "--native: simbolo(s) no resueltos tras compilar (se sirven con bytecode):" +
+        aviso = "--native: unresolved symbol(s) after compiling (served with bytecode):" +
                 simbolos_sin_resolver;
 
     return out;

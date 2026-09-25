@@ -83,9 +83,7 @@ private:
         bool no_head_alias = false;
         std::vector<std::unique_ptr<Node>> children;
 
-        Node* find_static_child(const std::string& seg) const;
-        Node* find_param_child() const;
-        Node* find_wildcard_child() const;
+        Node* find_child(NodeType t, const std::string& seg = {}) const;
     };
 
     std::unique_ptr<Node> root_;

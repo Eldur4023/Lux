@@ -85,34 +85,6 @@ std::string format_errors(const DiagnosticBag& diags,
 
 namespace {
 
-// --native phase 1: for ONE specific call to
-// emit_route/emit_function/emit_method/emit_ctor/emit_error_handler/
-// emit_condition, compares the diagnostics it added against what its check_*
-// equivalent gives. Purely observational — never touches `diags`, never
-// changes the result of a real compilation — so it only runs if
-// LUX_SHADOW_CHECK is set in the environment: zero cost on the normal
-// path. It is the canary that validates, before taking the step of turning
-// emit_expr/emit_stmt/emit_call into IR consumers and stripping their own
-// checks, that check_expr/check_stmt keep reproducing the real compilation
-// on organic .lux programs too (not just the hand-written cases in
-// tests/check_*_shadow.cpp).
-bool shadow_check_enabled() {
-    static const bool v = std::getenv("LUX_SHADOW_CHECK") != nullptr;
-    return v;
-}
-
-void shadow_compare(const char* label, const DiagnosticBag& diags, size_t before,
-                    const DiagnosticBag& shadow) {
-    if (!shadow_check_enabled()) return;
-    std::vector<std::string> real, shadow_msgs;
-    for (size_t i = before; i < diags.items().size(); ++i) real.push_back(diags.items()[i].message);
-    for (const auto& it : shadow.items()) shadow_msgs.push_back(it.message);
-    if (real == shadow_msgs) return;
-    std::fprintf(stderr, "[shadow-check] discrepancy in %s\n", label);
-    for (const auto& m : real)       std::fprintf(stderr, "  real:   %s\n", m.c_str());
-    for (const auto& m : shadow_msgs) std::fprintf(stderr, "  shadow: %s\n", m.c_str());
-}
-
 // Lux Script type name for an already built value.  Used where the data is
 // constant and therefore its type is exact.
 std::string lux_script_type_of(const Value& v) {
@@ -269,13 +241,11 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             diags.error(e.loc, "invalid template name: '" + name + "'");
             return {};
         }
-        std::ifstream f(std::filesystem::path(tpl_dir) / name, std::ios::binary);
-        if (!f) {
+        auto source = read_whole_file(std::filesystem::path(tpl_dir) / name);
+        if (!source) {
             diags.error(e.loc, "template not found: '" + name + "' in " + tpl_dir);
             return {};
         }
-        const std::string fuente((std::istreambuf_iterator<char>(f)),
-                                 std::istreambuf_iterator<char>());
 
         // Here the data is CONSTANT, so the type of each key is known exactly:
         // the template is checked against the real values.
@@ -287,11 +257,11 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         }
 
         Template tpl_c;
-        if (!compile_template(fuente, name, tpl_dir, keys, diags, tpl_c)) return {};
+        if (!compile_template(*source, name, tpl_dir, keys, diags, tpl_c)) return {};
 
-        lux::Request  req_falsa;
-        lux::Response res_falsa;
-        NativeCtx        ctx{req_falsa, res_falsa};
+        lux::Request  fake_req;
+        lux::Response fake_res;
+        NativeCtx        ctx{fake_req, fake_res};
         std::string      html, err;
         if (!render_template(tpl_c, std::move(values), ctx, nullptr, html, err)) {
             diags.error(e.loc, "when rendering '" + name + "': " + err);
@@ -385,11 +355,6 @@ std::vector<std::string> pattern_params(const std::string& pattern) {
     return out;
 }
 
-const std::vector<std::string>& scalar_types() {
-    static const std::vector<std::string> v =
-        {"int", "long", "float", "double", "bool", "string"};
-    return v;
-}
 
 // The identifier of an asynchronous builtin is its index in the table; it is
 // looked up once so as not to depend on the order.
@@ -429,15 +394,12 @@ int async_ws_recv_id() {
 // above), just reached from the other end of the range instead of by
 // asking for "no wait" directly.
 long long clamp_sleep_ms(long long ms) {
-    constexpr long long kMax = std::numeric_limits<int>::max();
-    if (ms < 1)    return 1;
-    if (ms > kMax) return kMax;
-    return ms;
+    return std::clamp<long long>(ms, 1, std::numeric_limits<int>::max());
 }
 
 bool is_scalar(const std::string& t) {
-    const auto& v = scalar_types();
-    return std::find(v.begin(), v.end(), t) != v.end();
+    return t == "int" || t == "long" || t == "float" || t == "double" ||
+           t == "bool" || t == "string";
 }
 
 int async_db_query_id() { static const int id = native_id("__db_query"); return id; }
@@ -451,12 +413,6 @@ bool is_db_await(int id) {
     return id == async_db_query_id()  || id == async_db_exec_id()  ||
            id == async_db_begin_id()  || id == async_db_commit_id() ||
            id == async_db_rollback_id() || id == async_db_last_id();
-}
-
-Value db_error(const std::string& msg) {
-    Value::Dict d;
-    d["error"] = Value::str(msg);
-    return Value::dict(std::move(d));
 }
 
 // Resolves a database suspension.
@@ -562,6 +518,62 @@ lux::Task<Value> run_builtin_module_async(const VM::Result& r, lux::Request& req
 // next would inherit that state.
 lux::Task<void> rollback_pending(NativeCtx& ctx, lux::Request& req) {
     co_await rollback_pending_db(ctx.pinned_workers, req.loop);
+}
+
+// Runs the VM's suspend/resume loop: every time it stops on an `await`, the
+// real co_await happens here, on the engine, and the result is handed back.
+// Shared by http, ws and sse routes; `ws` is only set for a ws route (the one
+// place `await ws.recv()` can compile). Returns false if the client went away
+// mid-sleep -- by then any open transaction has already been rolled back and
+// the caller just stops.
+lux::Task<bool> drive_vm(VM& vm, VM::Result& result, lux::Request& req, NativeCtx& ctx,
+                         lux::WSConnection* ws = nullptr) {
+    while (result.status == VM::Status::Suspended) {
+        Value produced = Value::null();
+        if (result.await_is_module) {
+            produced = co_await run_builtin_module_async(result, req, ctx);
+        }
+        else if (ws && result.await_id == async_ws_recv_id()) {
+            // The message enters the VM as the result of the `await`; null
+            // means the connection closed. Unsolicited Pongs (the shape most
+            // clients' own heartbeat uses -- RFC 6455 lets them arrive
+            // unasked, and WSState queues every one) are skipped: `await
+            // ws.recv()` returns application messages, and surfacing a Pong's
+            // (often empty) payload made every idle heartbeat look like a
+            // real message to the handler.
+            std::optional<lux::WSMessage> msg;
+            do {
+                msg = co_await ws->recv();
+            } while (msg && msg->is_pong());
+            if (msg && !msg->is_close()) produced = Value::str(msg->data);
+        }
+        else if (is_db_await(result.await_id)) {
+            produced = co_await run_db(result, result.await_id, req, ctx);
+        }
+        else if (result.await_id == async_sleep_id()) {
+            long long ms = result.await_args.empty() ? 0 : result.await_args[0].as_int();
+            co_await lux::sleep(static_cast<int>(clamp_sleep_ms(ms)), req.loop, req.cancel_token);
+            // sleep() wakes early if the client disconnects: stop, but an open
+            // transaction must not be abandoned -- the connection would stay
+            // pinned inside it and the next request on that worker would run
+            // silently inside it (see rollback_pending_db, db.hpp).
+            if (req.is_cancelled()) {
+                co_await rollback_pending(ctx, req);
+                co_return false;
+            }
+        }
+        result = vm.resume(std::move(produced), ctx);
+    }
+    co_return true;
+}
+
+// "file:line:col" of a runtime error, or the route's own label if the VM has
+// no precise location.
+std::string error_at(const VM::Result& result, const std::string& where) {
+    return result.error_loc.file
+        ? *result.error_loc.file + ":" + std::to_string(result.error_loc.line) + ":" +
+          std::to_string(result.error_loc.col)
+        : where;
 }
 
 // ─── Classes ─────────────────────────────────────────────────────────────────
@@ -700,13 +712,7 @@ void build_classes(const Program& program, const FunctionSigs& fns,
         for (const auto& r : c.rules) {
             auto    chunk = std::make_shared<Chunk>();
             Emitter emitter(diags, &fns, &sigs, imports, nullptr, &enums);
-            size_t  antes = diags.size();
             if (!emitter.emit_condition(*r.condition, field_names, *chunk)) continue;
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                emitter.check_condition(*r.condition, field_names, *chunk, shadow);
-                shadow_compare("validate", diags, antes, shadow);
-            }
             info->rules.push_back({chunk, r.message});
         }
     }
@@ -1576,25 +1582,13 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
             auto ms = sig.methods.find(m.name);
             if (ms == sig.methods.end()) continue;
             Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
-            size_t  antes = diags.size();
             emitter.emit_method(c.name, m, *mod.functions[ms->second.index]);
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                emitter.check_method(c.name, m, *mod.functions[ms->second.index], shadow);
-                shadow_compare(("metodo " + c.name + "." + m.name).c_str(), diags, antes, shadow);
-            }
         }
         for (const auto& ct : c.ctors) {
             auto cs = sig.ctors.find(ct.params.size());
             if (cs == sig.ctors.end()) continue;
             Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
-            size_t  antes = diags.size();
             emitter.emit_ctor(c.name, sig.fields, ct, *mod.functions[cs->second]);
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                emitter.check_ctor(c.name, sig.fields, ct, *mod.functions[cs->second], shadow);
-                shadow_compare(("constructor " + c.name).c_str(), diags, antes, shadow);
-            }
         }
 
         // The implicit constructor: a synthetic CtorDecl with one parameter per
@@ -1612,16 +1606,8 @@ void emit_class_bodies(Module& mod, const ClassSigs& classes, const FunctionSigs
             auto cs = sig.ctors.find(c.fields.size());
             if (cs != sig.ctors.end()) {
                 Emitter emitter(diags, &fns, &classes, imports, nullptr, &enums);
-                size_t  antes = diags.size();
                 emitter.emit_ctor(c.name, sig.fields, implicito,
                                   *mod.functions[cs->second]);
-                if (shadow_check_enabled()) {
-                    DiagnosticBag shadow;
-                    emitter.check_ctor(c.name, sig.fields, implicito, *mod.functions[cs->second],
-                                       shadow);
-                    shadow_compare(("constructor implicito " + c.name).c_str(), diags, antes,
-                                    shadow);
-                }
             }
         }
     }
@@ -1722,13 +1708,7 @@ void emit_function_bodies(Module& mod, const FunctionSigs& fns, const ClassSigs&
         auto it = fns.find(f.name);
         if (it == fns.end()) continue;
         Emitter emitter(diags, &fns, &classes, &mod.program.imports, nullptr, &enums);
-        size_t  antes = diags.size();
         emitter.emit_function(f, *mod.functions[it->second.index]);
-        if (shadow_check_enabled()) {
-            DiagnosticBag shadow;
-            emitter.check_function(f, *mod.functions[it->second.index], shadow);
-            shadow_compare(("funcion " + f.name).c_str(), diags, antes, shadow);
-        }
     }
 }
 
@@ -1740,13 +1720,7 @@ void build_error_handlers(Module& mod, const FunctionSigs& fns,
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
         Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
-        size_t  antes = diags.size();
         if (!emitter.emit_error_handler(e, *chunk)) continue;
-        if (shadow_check_enabled()) {
-            DiagnosticBag shadow;
-            emitter.check_error_handler(e, *chunk, shadow);
-            shadow_compare(("on error " + std::to_string(e.code)).c_str(), diags, antes, shadow);
-        }
         mod.error_handlers[e.code] = std::move(chunk);
     }
 }
@@ -1798,13 +1772,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             auto    ws_chunk = std::make_shared<Chunk>();
             Emitter ws_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
-            size_t  antes = diags.size();
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                ws_emitter.check_route(r, *ws_chunk, shadow);
-                shadow_compare(("ws " + r.pattern).c_str(), diags, antes, shadow);
-            }
 
             ++mod.vm_routes;
             std::string ws_where = "WS " + r.pattern;
@@ -1871,71 +1839,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         VM         vm;
                         VM::Result result = vm.start(*ws_chunk, std::move(args), ctx, fn_table, &native_table);
 
-                        while (result.status == VM::Status::Suspended) {
-                            Value produced = Value::null();
-
-                            if (result.await_is_module) {
-                                produced = co_await run_builtin_module_async(result, req, ctx);
-                            }
-                            else if (result.await_id == async_ws_recv_id()) {
-                                // First suspension that returns a value: the
-                                // message enters the VM as the result of the
-                                // `await`.  null means the connection closed.
-                                //
-                                // A Ping never reaches here (WSState auto-
-                                // replies and never queues it), but an
-                                // unsolicited Pong -- the shape most real
-                                // clients' own heartbeat uses, not a reply
-                                // to a ws.ping() this handler sent -- does:
-                                // RFC 6455 does not require one to be
-                                // solicited, and WSState queues every Pong
-                                // it sees. `await ws.recv()` is documented
-                                // as returning application messages ("the
-                                // message text, or null when the connection
-                                // closes"), so surfacing a Pong's payload
-                                // (often empty) as if a client had actually
-                                // sent that meant every idle heartbeat
-                                // looked like a real, indistinguishable
-                                // message to the handler -- an empty chat
-                                // line, a bogus game-state update, whatever
-                                // the app treats an empty string as. Loop
-                                // past Pongs here instead of ever handing
-                                // one to the VM; a Close still ends the
-                                // loop (`msg` becomes null once the peer
-                                // disconnects, same as it always has).
-                                std::optional<lux::WSMessage> msg;
-                                do {
-                                    msg = co_await conn.recv();
-                                } while (msg && msg->is_pong());
-                                if (msg && !msg->is_close())
-                                    produced = Value::str(msg->data);
-                            }
-                            else if (is_db_await(result.await_id)) {
-                                produced = co_await run_db(result, result.await_id,
-                                                           req, ctx);
-                            }
-                            else if (result.await_id == async_sleep_id()) {
-                                long long ms = result.await_args.empty()
-                                             ? 0 : result.await_args[0].as_int();
-                                ms = clamp_sleep_ms(ms);
-                                co_await lux::sleep(static_cast<int>(ms), req.loop, req.cancel_token);
-                                // A ws handler that opened a transaction (begin())
-                                // before this sleep must not abandon it here: the
-                                // real connection stays pinned with an open
-                                // transaction on the DB side even though ctx (and
-                                // with it, the pinned_workers bookkeeping) is about
-                                // to be destroyed -- the next unrelated query the
-                                // pool routes to that same worker would silently
-                                // run inside it. See rollback_pending_db's own
-                                // comment (db.hpp) for why this exists at all.
-                                if (req.is_cancelled()) {
-                                    co_await rollback_pending(ctx, req);
-                                    co_return;
-                                }
-                            }
-
-                            result = vm.resume(std::move(produced), ctx);
-                        }
+                        if (!co_await drive_vm(vm, result, req, ctx, &conn)) co_return;
 
                         // See the identical comment on the sse route below:
                         // this is the only place left that can close a
@@ -1943,14 +1847,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                         // itself, on EITHER a normal end (Done) or an error.
                         co_await rollback_pending(ctx, req);
 
-                        if (result.status == VM::Status::Error) {
-                            std::string at = result.error_loc.file
-                                ? *result.error_loc.file + ":" +
-                                  std::to_string(result.error_loc.line) + ":" +
-                                  std::to_string(result.error_loc.col)
-                                : ws_where;
-                            lux::log().error(at + ": " + result.error);
-                        }
+                        if (result.status == VM::Status::Error)
+                            lux::log().error(error_at(result, ws_where) + ": " + result.error);
                         },
                         opts)(req, res);   // opts is copied, not moved: this whole
                                            // outer handler (and its captured opts)
@@ -1978,13 +1876,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
             auto    sse_chunk = std::make_shared<Chunk>();
             Emitter sse_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
-            size_t  antes = diags.size();
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
-            if (shadow_check_enabled()) {
-                DiagnosticBag shadow;
-                sse_emitter.check_route(r, *sse_chunk, shadow);
-                shadow_compare(("sse " + r.pattern).c_str(), diags, antes, shadow);
-            }
 
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
@@ -2012,29 +1904,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     VM         vm;
                     VM::Result result = vm.start(*sse_chunk, std::move(args), ctx, fn_table, &native_table);
 
-                    while (result.status == VM::Status::Suspended) {
-                        Value produced = Value::null();
-                        if (result.await_is_module) {
-                            produced = co_await run_builtin_module_async(result, req, ctx);
-                        }
-                        else if (is_db_await(result.await_id)) {
-                            produced = co_await run_db(result, result.await_id, req, ctx);
-                        }
-                        else if (result.await_id == async_sleep_id()) {
-                            long long ms = result.await_args.empty()
-                                         ? 0 : result.await_args[0].as_int();
-                            ms = clamp_sleep_ms(ms);
-                            co_await lux::sleep(static_cast<int>(ms), req.loop, req.cancel_token);
-                            // See the identical comment in the ws route above:
-                            // an open transaction cannot be abandoned just
-                            // because the client disconnected mid-sleep.
-                            if (req.is_cancelled()) {
-                                co_await rollback_pending(ctx, req);
-                                co_return;
-                            }
-                        }
-                        result = vm.resume(std::move(produced), ctx);
-                    }
+                    if (!co_await drive_vm(vm, result, req, ctx)) co_return;
 
                     // Every OTHER exit from an sse route runs through here --
                     // the stream ending normally (Done) or the handler
@@ -2048,14 +1918,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     // HTTP route below.
                     co_await rollback_pending(ctx, req);
 
-                    if (result.status == VM::Status::Error) {
-                        std::string at = result.error_loc.file
-                            ? *result.error_loc.file + ":" +
-                              std::to_string(result.error_loc.line) + ":" +
-                              std::to_string(result.error_loc.col)
-                            : sse_where;
-                        lux::log().error(at + ": " + result.error);
-                    }
+                    if (result.status == VM::Status::Error)
+                        lux::log().error(error_at(result, sse_where) + ": " + result.error);
                 },
                 /*head_alias=*/false);
             continue;
@@ -2146,13 +2010,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         // Nivel 2: ruta con logica → bytecode sobre el VM.
         auto    chunk = std::make_shared<Chunk>();
         Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
-        size_t  antes = diags.size();
         if (!emitter.emit_route(r, *chunk)) continue;
-        if (shadow_check_enabled()) {
-            DiagnosticBag shadow;
-            emitter.check_route(r, *chunk, shadow);
-            shadow_compare((r.method + " " + r.pattern).c_str(), diags, antes, shadow);
-        }
 
         // A route is never itself called from elsewhere, so unlike
         // mod.functions (propagate_has_await(), already run by the time
@@ -2221,46 +2079,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     }};
                 }
 
-                // The VM does not know how to wait: every time it stops, the real
-                // co_await happens here, on the engine, and the result is handed
-                // back to it.
-                while (result.status == VM::Status::Suspended) {
-                    Value produced = Value::null();
-
-                    if (result.await_is_module) {
-                        produced = co_await run_builtin_module_async(result, req, ctx);
-                    }
-                    else if (is_db_await(result.await_id)) {
-                        produced = co_await run_db(result, result.await_id, req, ctx);
-                    }
-                    else if (result.await_id == async_sleep_id()) {
-                        long long ms = result.await_args.empty()
-                                     ? 0 : result.await_args[0].as_int();
-                        ms = clamp_sleep_ms(ms);
-                        co_await lux::sleep(static_cast<int>(ms), req.loop, req.cancel_token);
-                        // sleep() wakes early if the client disconnects; in that
-                        // case there is no point in carrying on. A transaction
-                        // opened before this sleep still has to be closed here
-                        // though -- see the identical comment on the ws route.
-                        if (req.is_cancelled()) {
-                            co_await rollback_pending(ctx, req);
-                            co_return;
-                        }
-                    }
-
-                    // Only the has_await branch above can ever reach this
-                    // loop (the other one is guaranteed Done/Error, never
-                    // Suspended), so own_vm -- not shared_vm -- is the one
-                    // whose frame is actually live across this suspension.
-                    result = own_vm.resume(std::move(produced), ctx);
-                }
+                // Only the has_await branch can suspend, so own_vm -- not
+                // shared_vm -- is the one whose frame is live across it.
+                if (!co_await drive_vm(own_vm, result, req, ctx)) co_return;
 
                 if (result.status == VM::Status::Error) {
-                    std::string at = result.error_loc.file
-                        ? *result.error_loc.file + ":" +
-                          std::to_string(result.error_loc.line) + ":" +
-                          std::to_string(result.error_loc.col)
-                        : where;
+                    std::string at = error_at(result, where);
                     lux::log().error(at + ": " + result.error);
                     // The 500 below ends the request without ever reaching
                     // the rollback_pending() call a few lines down (that

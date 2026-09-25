@@ -13,20 +13,9 @@ namespace lux_script {
 
 namespace {
 
-std::string hex_encode(std::string_view raw) {
-    static const char* digits = "0123456789abcdef";
-    std::string out;
-    out.reserve(raw.size() * 2);
-    for (unsigned char c : raw) {
-        out.push_back(digits[c >> 4]);
-        out.push_back(digits[c & 0xF]);
-    }
-    return out;
-}
-
 Value fn_hash_sha256(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "hash.sha256() expects a string"; return Value::null(); }
-    return Value::str(hex_encode(crypto::sha256(args[0].as_str())));
+    return Value::str(crypto::hex_encode(crypto::sha256(args[0].as_str())));
 }
 
 Value fn_hash_hmac_sha256(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -34,7 +23,7 @@ Value fn_hash_hmac_sha256(NativeCtx&, std::vector<Value>& args, std::string& err
         error = "hash.hmac_sha256() expects two strings: key, message";
         return Value::null();
     }
-    return Value::str(hex_encode(crypto::hmac_sha256(args[0].as_str(), args[1].as_str())));
+    return Value::str(crypto::hex_encode(crypto::hmac_sha256(args[0].as_str(), args[1].as_str())));
 }
 
 Value fn_hash_random_hex(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -46,7 +35,7 @@ Value fn_hash_random_hex(NativeCtx&, std::vector<Value>& args, std::string& erro
     }
     std::string raw = crypto::random_bytes(static_cast<size_t>(n));
     if (raw.empty()) { error = "hash.random_hex(): could not get random bytes"; return Value::null(); }
-    return Value::str(hex_encode(raw));
+    return Value::str(crypto::hex_encode(raw));
 }
 
 class HashModule : public BuiltinModule {

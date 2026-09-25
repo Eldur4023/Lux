@@ -8,3 +8,8 @@ app:
 
 get endpoint("/range/file"):
     return send_file("tests/cases/range_fixture.bin")
+
+# Rooted send_file(): a name resolving ABOVE the root has fewer path
+# components than the root itself -- must be a 403, not a read past the end.
+get endpoint("/rooted/:name", string name):
+    return send_file(name, "tests/cases")

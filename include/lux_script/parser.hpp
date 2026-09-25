@@ -43,6 +43,7 @@ private:
     void  error_here(std::string msg);
     void  synchronize();
     void  skip_newlines();
+    void  skip_to_eol();
 
     // ── Declarations ─────────────────────────────────────────────────────────
     void parse_declaration(Program& out);
@@ -68,7 +69,6 @@ private:
     Block   parse_block();
     StmtPtr parse_statement();
     StmtPtr parse_if();
-    StmtPtr parse_if_from_elif();
     StmtPtr parse_while();
     StmtPtr parse_for();
     StmtPtr parse_return();
@@ -91,6 +91,7 @@ private:
     // ── Expressions, from lowest to highest precedence ───────────────────────
     ExprPtr parse_expr();
     ExprPtr parse_ternary();
+    ExprPtr binary(ExprPtr (Parser::*next)(), std::initializer_list<Tok> ops);
     ExprPtr parse_or();
     ExprPtr parse_and();
     ExprPtr parse_not();
@@ -103,6 +104,7 @@ private:
     ExprPtr parse_primary();
 
     ExprPtr make(ExprKind k, SourceLoc loc);
+    StmtPtr make_stmt(StmtKind k, SourceLoc loc);
 };
 
 } // namespace lux_script

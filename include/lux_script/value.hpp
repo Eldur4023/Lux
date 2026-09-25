@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 
@@ -362,14 +363,7 @@ inline void Value::Dict::build_index() {
 }
 
 inline Value::Dict::iterator Value::Dict::find(std::string_view k) {
-    if (!idx_.empty()) {
-        auto it = idx_.find(k);
-        return it == idx_.end() ? v_.end()
-                                : v_.begin() + static_cast<std::ptrdiff_t>(it->second);
-    }
-    for (auto it = v_.begin(); it != v_.end(); ++it)
-        if (it->first == k) return it;
-    return v_.end();
+    return v_.begin() + (std::as_const(*this).find(k) - v_.cbegin());
 }
 
 inline Value::Dict::const_iterator Value::Dict::find(std::string_view k) const {
@@ -390,6 +384,16 @@ inline Value& Value::Dict::operator[](std::string_view k) {
     if (!idx_.empty())            idx_.emplace(v_.back().first, v_.size() - 1);
     else if (v_.size() > kIndexThreshold) build_index();
     return v_.back().second;
+}
+
+// Trims ASCII whitespace (space/tab/CR/LF) off both ends -- the exact same
+// four lines used to be reimplemented separately in natives.cpp (string
+// .trim()) and template.cpp (its own free-standing trim()).
+inline std::string trim_ascii_ws(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return {};
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
 }
 
 // ─── UTF-8 helpers ──────────────────────────────────────────────────────────
@@ -495,19 +499,14 @@ inline uint32_t utf8_codepoint_lower(uint32_t cp) {
     return cp;
 }
 
-inline std::string utf8_upper(const std::string& s) {
+inline std::string utf8_map(const std::string& s, uint32_t (*f)(uint32_t)) {
     std::string out;
     out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ) out += utf8_encode(utf8_codepoint_upper(utf8_decode(s, i)));
+    for (size_t i = 0; i < s.size(); ) out += utf8_encode(f(utf8_decode(s, i)));
     return out;
 }
-
-inline std::string utf8_lower(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ) out += utf8_encode(utf8_codepoint_lower(utf8_decode(s, i)));
-    return out;
-}
+inline std::string utf8_upper(const std::string& s) { return utf8_map(s, utf8_codepoint_upper); }
+inline std::string utf8_lower(const std::string& s) { return utf8_map(s, utf8_codepoint_lower); }
 
 // Splits a string into its individual codepoints, each its own (1-4 byte)
 // string -- what `for c in <string>` and `split(s, "")` iterate over,

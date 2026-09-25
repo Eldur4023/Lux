@@ -22,7 +22,6 @@ class Response {
     struct State {
         int         status_code = 200;
         std::string body;
-        std::string templates_dir = "./templates";
         std::unordered_map<std::string, std::string> headers;
         // Set-Cookie is the one HTTP response header that legally appears
         // multiple times — keep them in a separate list so they survive the
@@ -139,14 +138,7 @@ public:
     }
 
     Response& text(std::string body) {
-        if (state_->body_committed) {
-            std::cerr << "[lux] Response.text() called after body already committed — ignoring\n";
-            return *this;
-        }
-        header("Content-Type", "text/plain; charset=utf-8");
-        state_->body = std::move(body);
-        state_->body_committed = true;
-        return *this;
+        return commit("text", std::move(body), "text/plain; charset=utf-8");
     }
 
     // The argument is ALWAYS the response body, never a filename.
@@ -161,50 +153,18 @@ public:
     // or the C++ API documented that branch, and no caller used it: templates
     // go through render() (resolved to a compile-time index, so a name can
     // never come from a request) and files through send_file().
-    Response& html(const std::string& content) {
-        if (state_->body_committed) {
-            std::cerr << "[lux] Response.html() called after body already committed — ignoring\n";
-            return *this;
-        }
-        header("Content-Type", "text/html; charset=utf-8");
-        state_->body_committed = true;
-        state_->body = content;
-        return *this;
+    Response& html(std::string content) {
+        return commit("html", std::move(content), "text/html; charset=utf-8");
     }
 
     // Already serialized JSON body.  This used to take an nlohmann tree and
     // call dump(); now whoever has the data writes it directly, which is one
     // materialization less.
-    Response& json_text(std::string cuerpo) {
-        if (state_->body_committed) {
-            std::cerr << "[lux] Response.json_text() called after body already committed - ignoring\n";
-            return *this;
-        }
-        header("Content-Type", "application/json; charset=utf-8");
-        state_->body = std::move(cuerpo);
-        state_->body_committed = true;
-        return *this;
+    Response& json_text(std::string body) {
+        return commit("json_text", std::move(body), "application/json; charset=utf-8");
     }
 
-    Response& send(std::string body) {
-        if (state_->body_committed) {
-            std::cerr << "[lux] Response.send() called after body already committed — ignoring\n";
-            return *this;
-        }
-        state_->body = std::move(body);
-        state_->body_committed = true;
-        return *this;
-    }
-
-    // Templates are no longer rendered here.
-    //
-    // The engine lives in the Lux Script frontend
-    // (src/lux_script/template.cpp): it compiles the template at startup
-    // against the keys of each render(), and on the hot path all that is left
-    // is walking a list of instructions.  The result reaches Response as
-    // finished HTML, through header().send().
-    // That got Jinja2Cpp off our back, and with it Boost, fmt, rapidjson and
-    // bibliotecas mas.
+    Response& send(std::string body) { return commit("send", std::move(body), nullptr); }
 
     // Zero-copy static file: instead of reading the file into the body,
     // record the path and let the connection layer use sendfile(2).
@@ -217,28 +177,17 @@ public:
         // Internal callers (serve_file_from, try_serve_static) pass canonical
         // paths so this check is a no-op for them.
         for (const auto& comp : path) {
-            if (comp == "..") {
-                state_->status_code = 403;
-                state_->body = R"({"error":"Forbidden"})";
-                state_->headers["Content-Type"] = "application/json; charset=utf-8";
-                return *this;
-            }
+            if (comp == "..") return fail(403, "Forbidden");
         }
         std::error_code ec;
         auto sz = std::filesystem::file_size(path, ec);
         if (ec) { state_->status_code = 500; state_->body = "Cannot stat file"; return *this; }
-        state_->sendfile_path = path.string();
-        state_->sendfile_size = sz;
-        state_->body_committed = true;
-        // Advertises Range support up front, on the FIRST (non-ranged)
-        // response too -- a client has to see this before it knows it is
-        // allowed to ask for a range on a later request (a video player
-        // seeking is the reason this exists at all).
-        header("Accept-Ranges", "bytes");
-        return *this;
+        return send_file(path, sz);
     }
 
     // Overload for callers that already have the file size — skips the extra stat(2).
+    // Advertises Range support up front, on the FIRST (non-ranged) response
+    // too -- a client has to see this before it knows it may ask for a range.
     Response& send_file(const std::filesystem::path& path, std::uintmax_t known_size) {
         state_->sendfile_path = path.string();
         state_->sendfile_size = known_size;
@@ -278,36 +227,19 @@ public:
         // prevents symlink-swap attacks where a symlink inside root points to
         // a file outside root.
         auto canonical_root = fs::canonical(root, ec);
-        if (ec) {
-            state_->status_code = 500;
-            state_->body = R"({"error":"Internal Server Error"})";
-            state_->headers["Content-Type"] = "application/json; charset=utf-8";
-            return *this;
-        }
+        if (ec) return fail(500, "Internal Server Error");
         auto canonical_file = fs::canonical(canonical_root / user_path, ec);
-        if (ec) {
-            state_->status_code = 404;
-            state_->body = R"({"error":"Not Found"})";
-            state_->headers["Content-Type"] = "application/json; charset=utf-8";
-            return *this;
-        }
+        if (ec) return fail(404, "Not Found");
+        // 4-iterator mismatch: a file resolving ABOVE root has fewer
+        // components than root, and the 3-iterator form would read past its end.
         auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
-                                       canonical_file.begin());
-        if (ri != canonical_root.end()) {
-            state_->status_code = 403;
-            state_->body = R"({"error":"Forbidden"})";
-            state_->headers["Content-Type"] = "application/json; charset=utf-8";
-            return *this;
-        }
+                                       canonical_file.begin(), canonical_file.end());
+        if (ri != canonical_root.end()) return fail(403, "Forbidden");
         return send_file(canonical_file);
     }
 
-
-
-
     // ── Framework-internal ───────────────────────────────────────────────────
 
-    void set_templates_dir(const std::string& dir) { state_->templates_dir = dir; }
 
     int                    status_code()    const { return state_->status_code; }
     const std::string&     body()           const { return state_->body; }
@@ -364,6 +296,26 @@ public:
     }
 
 private:
+    // Sets the body once; a second body write is logged and ignored.
+    Response& commit(const char* who, std::string body, const char* content_type) {
+        if (state_->body_committed) {
+            std::cerr << "[lux] Response." << who
+                      << "() called after body already committed — ignoring\n";
+            return *this;
+        }
+        if (content_type) header("Content-Type", content_type);
+        state_->body = std::move(body);
+        state_->body_committed = true;
+        return *this;
+    }
+
+    Response& fail(int code, const char* error) {
+        state_->status_code = code;
+        state_->body = std::string(R"({"error":")") + error + "\"}";
+        state_->headers["Content-Type"] = "application/json; charset=utf-8";
+        return *this;
+    }
+
     // HTTP header field names are case-insensitive (RFC 7230 §3.2), but
     // state_->headers is keyed by whatever exact case a handler passed to
     // header() — needed so headers_map() still hands back what the caller

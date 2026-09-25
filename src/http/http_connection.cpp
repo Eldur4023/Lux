@@ -4,6 +4,7 @@
 #include "../../include/lux/task.hpp"
 #include "../../include/lux/metrics.hpp"
 #include "../../include/lux/logger.hpp"
+#include "../../include/lux/percent_encoding.hpp"
 
 #include <sys/epoll.h>
 #include <sys/sendfile.h>
@@ -19,70 +20,8 @@
 #include <cstring>
 #include <iostream>
 #include <algorithm>
-#include <sstream>
 
 namespace lux::http {
-
-// ── URL helpers ───────────────────────────────────────────────────────────────
-
-// Strict hex-nibble check: '0'-'9', 'a'-'f', 'A'-'F' only. std::strtoul()
-// used to do this job, but it implements the C library's number-parsing
-// rules, not RFC 3986's: it happily accepts an optional leading '+'/'-' and
-// leading whitespace before the digits, so "%+4", "% 4" and "%-1" all
-// looked like valid, fully-consumed two-hex-digit escapes to it (endptr
-// landed on buf+2 either way) and got decoded — "%-1" as high-nibble 0xF
-// (unsigned wraparound of -1 truncated to a nibble), "%+4"/"% 4" as 0x04 —
-// bytes RFC 3986 says are not percent-escapes at all and a strict decoder
-// leaves as a literal '%'. A filter/WAF matching the raw request against a
-// blocklist and this decoder disagreeing about which bytes a given escape
-// produces is exactly a decoder-differential bypass: the filter sees
-// "%-1dmin" and lets it through as gibberish; this function turned it into
-// a leading 0xF (or whatever) byte glued to "dmin", not what the filter
-// evaluated at all.
-static inline int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static std::string url_decode(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '%' && i + 2 < s.size()) {
-            int hi = hex_nibble(s[i+1]), lo = hex_nibble(s[i+2]);
-            if (hi >= 0 && lo >= 0) {
-                int v = hi * 16 + lo;
-                // Reject %00 (null byte): it can bypass string comparisons
-                // used for authorization checks (e.g. "\0admin" != "admin").
-                if (v != 0) out += static_cast<char>(v);
-                i += 2;
-            } else {
-                out += s[i];  // keep literal '%' for invalid hex sequences
-            }
-        } else if (s[i] == '+') {
-            out += ' ';
-        } else {
-            out += s[i];
-        }
-    }
-    return out;
-}
-
-static void parse_query(const std::string& qs,
-                        std::unordered_map<std::string, std::string>& out) {
-    if (qs.empty()) return;
-    std::istringstream ss(qs);
-    std::string pair;
-    while (std::getline(ss, pair, '&')) {
-        auto eq = pair.find('=');
-        if (eq != std::string::npos)
-            out[url_decode(pair.substr(0, eq))] = url_decode(pair.substr(eq + 1));
-        else if (!pair.empty())
-            out[url_decode(pair)] = "";
-    }
-}
 
 // ── HttpConnection ────────────────────────────────────────────────────────────
 
@@ -99,16 +38,7 @@ HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
 
 void HttpConnection::start() {
     // Arm the header timeout — Slowloris defence.
-    auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
-    header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
-        if (auto self = self_weak.lock()) {
-            if (!self->closed_) {
-                self->header_tfd_ = -1;  // event loop already closed this tfd
-                self->send_error(408, "Request Header Timeout");
-                self->close();
-            }
-        }
-    });
+    arm_408(&HttpConnection::header_tfd_, kHeaderTimeoutMs, "Request Header Timeout");
 }
 
 // Fired by the parser (cb_on_headers_complete, via the OnHeadersComplete
@@ -119,10 +49,7 @@ void HttpConnection::start() {
 // cancels it for a stream — see cancel_request_timeout()), kRequestTimeoutMs
 // is this request's one budget for body + handler + write combined.
 void HttpConnection::on_headers_complete() {
-    if (header_tfd_ >= 0) {
-        loop_.cancel_timer(header_tfd_);
-        header_tfd_ = -1;
-    }
+    drop_timer(header_tfd_);
     arm_request_timeout();
 }
 
@@ -130,18 +57,17 @@ void HttpConnection::on_headers_complete() {
 // running first. Called to start the window fresh (on_headers_complete())
 // and to push it back out on forward progress (refresh_request_timeout()).
 void HttpConnection::arm_request_timeout() {
-    if (timeout_tfd_ >= 0) {
-        loop_.cancel_timer(timeout_tfd_);
-        timeout_tfd_ = -1;
-    }
-    auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
-    timeout_tfd_ = loop_.schedule_timer(kRequestTimeoutMs, [self_weak]() {
-        if (auto self = self_weak.lock()) {
-            if (!self->closed_) {
-                self->timeout_tfd_ = -1;  // event loop already closed this tfd
-                self->send_error(408, "Request Timeout");
-                self->close();
-            }
+    drop_timer(timeout_tfd_);
+    arm_408(&HttpConnection::timeout_tfd_, kRequestTimeoutMs, "Request Timeout");
+}
+
+void HttpConnection::arm_408(int HttpConnection::*tfd, int ms, const char* msg) {
+    std::weak_ptr<HttpConnection> weak = shared_from_this();
+    this->*tfd = loop_.schedule_timer(ms, [weak, tfd, msg]() {
+        if (auto self = weak.lock(); self && !self->closed_) {
+            (*self).*tfd = -1;  // event loop already closed this tfd
+            self->send_error(408, msg);
+            self->close();
         }
     });
 }
@@ -162,10 +88,7 @@ void HttpConnection::refresh_request_timeout() {
 // WebSocket) opt out of the bounded request timeout once ITS headers are on
 // the wire — see the comment on Request::_cancel_request_timeout.
 void HttpConnection::cancel_request_timeout() {
-    if (timeout_tfd_ >= 0) {
-        loop_.cancel_timer(timeout_tfd_);
-        timeout_tfd_ = -1;
-    }
+    drop_timer(timeout_tfd_);
 }
 
 HttpConnection::~HttpConnection() {
@@ -205,15 +128,12 @@ void HttpConnection::on_event(uint32_t events) {
 void HttpConnection::do_read() {
     char buf[16384];
     while (!closed_) {
-        ssize_t n;
-        {
-            n = ::read(fd_, buf, sizeof(buf));
-            if (n == 0) { close(); return; }
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) return;
-                if (errno == EINTR) continue;
-                close(); return;
-            }
+        ssize_t n = ::read(fd_, buf, sizeof(buf));
+        if (n == 0) { close(); return; }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+            if (errno == EINTR) continue;
+            close(); return;
         }
 
         // Bytes arrived: this connection is making progress, not stalled.
@@ -241,47 +161,7 @@ void HttpConnection::do_read() {
             continue;
         }
 
-        in_parser_ = true;
-        bool ok    = parser_.feed(buf, static_cast<size_t>(n));
-        in_parser_ = false;
-        if (!ok) {
-            send_error(parser_.body_too_large() ? 413 : 400,
-                       parser_.body_too_large() ? "Content Too Large" : "Bad Request");
-            close();
-            return;
-        }
-
-        // Parser pauses after each completed message — save any trailing
-        // bytes that belong to the next pipelined request.
-        if (parser_.is_paused()) {
-            size_t un = parser_.unconsumed();
-            if (un > 0) {
-                const char* tail = buf + static_cast<size_t>(n) - un;
-                // The handler that just ran synchronously inside feed()
-                // (above) may have upgraded this connection to WebSocket —
-                // the RFC 6455 handshake request and the client's first
-                // frame can legitimately land in the same TCP segment /
-                // read() call. The HTTP parser has no notion of WS framing,
-                // so it correctly reports these trailing bytes as
-                // "unconsumed" by the HTTP message, but the pending_buf_
-                // path below assumes they are the start of the NEXT
-                // pipelined HTTP request — wrong for raw WS frame bytes,
-                // and since in_flight_ never resets to false for a
-                // long-lived WS/SSE handler, nothing would ever drain
-                // pending_buf_ again for the rest of this connection's
-                // life. Feed them to the WS parser directly instead when
-                // the upgrade has already happened.
-                if (auto req = current_req_.lock(); req && req->_ws_on_data) {
-                    req->_ws_on_data(tail, un);
-                } else if (un > kMaxPendingBuf) {
-                    send_error(400, "Pipelined request too large");
-                    close();
-                    return;
-                } else {
-                    pending_buf_.append(tail, un);
-                }
-            }
-        }
+        if (!feed_parser(buf, static_cast<size_t>(n))) return;
 
         // The handler was synchronous and already replied inside feed(): now
         // that the pause is in place, the cycle can really be closed.
@@ -291,6 +171,38 @@ void HttpConnection::do_read() {
             if (closed_) return;
         }
     }
+}
+
+bool HttpConnection::feed_parser(const char* data, size_t n) {
+    in_parser_ = true;
+    bool ok    = parser_.feed(data, n);
+    in_parser_ = false;
+    if (!ok) {
+        send_error(parser_.body_too_large() ? 413 : 400,
+                   parser_.body_too_large() ? "Content Too Large" : "Bad Request");
+        close();
+        return false;
+    }
+    // Parser pauses after each completed message — save any trailing bytes
+    // that belong to the next pipelined request.
+    size_t un = parser_.is_paused() ? parser_.unconsumed() : 0;
+    if (un == 0) return true;
+    const char* tail = data + n - un;
+    // The handler that just ran synchronously inside feed() may have
+    // upgraded this connection to WebSocket — the handshake and the client's
+    // first frame can land in the same read(). Those bytes are WS frames, not
+    // the next pipelined HTTP request, and since in_flight_ never resets for a
+    // long-lived WS handler, nothing would ever drain pending_buf_ again.
+    if (auto req = current_req_.lock(); req && req->_ws_on_data) {
+        req->_ws_on_data(tail, un);
+    } else if (pending_buf_.size() + un > kMaxPendingBuf) {
+        send_error(400, "Pipelined request too large");
+        close();
+        return false;
+    } else {
+        pending_buf_.append(tail, un);
+    }
+    return true;
 }
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -318,7 +230,6 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->body         = std::move(req_parsed.body);
     req_ptr->loop         = &loop_;
     req_ptr->cancel_token = cancel_token_;
-    req_ptr->_conn_fd     = fd_;
 
     // TLS-aware writer for SSE / WebSocket / any path that needs direct socket
     // I/O.  Captures `this` via shared_from_this so the connection object
@@ -340,7 +251,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
         };
     }
 
-    parse_query(req_parsed.query, req_ptr->query);
+    parse_form_encoded(req_parsed.query, req_ptr->query);
 
     // Keep a weak ref for WebSocket mode — do_read() routes through it.
     current_req_ = req_ptr;
@@ -495,9 +406,7 @@ void HttpConnection::finish_dispatch(lux::Request& request,
         if (fd < 0) {
             lux::Response err;
             err.status(500).json_text(R"({"error":"Cannot open file"})");
-            err.header("Connection", "close");
-            keep_alive_ = false;
-            send_response(err.build());
+            send_and_close(err);
             return;
         }
         file_fd_        = fd;
@@ -550,9 +459,7 @@ void HttpConnection::finish_dispatch(lux::Request& request,
                     file_fd_ = -1;
                     lux::Response err;
                     err.status(416).header("Content-Range", "bytes */" + std::to_string(total));
-                    err.header("Connection", "close");
-                    keep_alive_ = false;
-                    send_response(err.build());
+                    send_and_close(err);
                     return;
                 }
                 if (end >= total) end = total - 1;
@@ -605,53 +512,35 @@ void HttpConnection::send_response(std::string data) {
         return;
     }
 
-    // Try immediate write
-    ssize_t n;
-    {
-        n = ::write(fd_, data.data(), data.size());
-        if (n < 0) {
-            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                close(); return;
-            }
-            write_buf_    = std::move(data);
-            write_offset_ = 0;
-            loop_.modify(fd_, EPOLLOUT);
-            return;
-        }
+    // Try an immediate write; on EAGAIN/partial, keep the full string with
+    // an offset and arm EPOLLOUT only (EPOLLIN dropped until it completes).
+    ssize_t n = ::write(fd_, data.data(), data.size());
+    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        close(); return;
     }
-
-    {
-        size_t written = static_cast<size_t>(n);
-        if (written == data.size()) {
-            // Headers sent in one shot — still need to stream the file body if pending.
-            if (file_fd_ >= 0) { do_sendfile(); return; }
-            on_write_complete();
-            return;
-        }
-        // Partial write — keep the full string and advance the offset.
-        write_buf_    = std::move(data);
-        write_offset_ = written;
+    size_t written = n < 0 ? 0 : static_cast<size_t>(n);
+    if (written == data.size()) {
+        // Headers sent in one shot — still need to stream the file body if pending.
+        if (file_fd_ >= 0) { do_sendfile(); return; }
+        on_write_complete();
+        return;
     }
-
-    // Arm EPOLLOUT only; drop EPOLLIN until write completes
+    write_buf_    = std::move(data);
+    write_offset_ = written;
     loop_.modify(fd_, EPOLLOUT);
 }
 
 void HttpConnection::do_write() {
     while (write_offset_ < write_buf_.size()) {
-        ssize_t n;
-        {
-            n = ::write(fd_,
-                        write_buf_.data()  + write_offset_,
-                        write_buf_.size()  - write_offset_);
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    loop_.modify(fd_, EPOLLOUT);
-                    return;
-                }
-                if (errno == EINTR) continue;
-                close(); return;
+        ssize_t n = ::write(fd_, write_buf_.data() + write_offset_,
+                            write_buf_.size() - write_offset_);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                loop_.modify(fd_, EPOLLOUT);
+                return;
             }
+            if (errno == EINTR) continue;
+            close(); return;
         }
         write_offset_ += static_cast<size_t>(n);
         // Forward progress on a slow client's socket buffer — see the
@@ -774,8 +663,7 @@ void HttpConnection::do_sendfile() {
 
 void HttpConnection::on_write_complete() {
     // Cancel the request timeout — response delivered successfully
-    loop_.cancel_timer(timeout_tfd_);
-    timeout_tfd_ = -1;
+    drop_timer(timeout_tfd_);
     in_flight_ = false;
 
     if (!keep_alive_) {
@@ -815,34 +703,7 @@ void HttpConnection::finish_cycle() {
         std::string buf;
         buf.swap(pending_buf_);
 
-        in_parser_ = true;
-        bool ok = parser_.feed(buf.data(), buf.size());
-        in_parser_ = false;
-        if (!ok) {
-            send_error(parser_.body_too_large() ? 413 : 400,
-                       parser_.body_too_large() ? "Content Too Large" : "Bad Request");
-            close();
-            return;
-        }
-        if (parser_.is_paused()) {
-            size_t un = parser_.unconsumed();
-            if (un > 0) {
-                const char* tail = buf.data() + buf.size() - un;
-                // Same reasoning as the identical check in do_read(): the
-                // request just fed above may have been a WS upgrade whose
-                // handshake and first client frame arrived together in this
-                // pipelined chunk.
-                if (auto req = current_req_.lock(); req && req->_ws_on_data) {
-                    req->_ws_on_data(tail, un);
-                } else if (un > kMaxPendingBuf) {
-                    send_error(400, "Pipelined request too large");
-                    close();
-                    return;
-                } else {
-                    pending_buf_.assign(tail, un);
-                }
-            }
-        }
+        if (!feed_parser(buf.data(), buf.size())) return;
 
         // The handler was synchronous and already replied inside the feed()
         // above: loop back around to resume the parser and drain whatever is
@@ -863,16 +724,7 @@ void HttpConnection::finish_cycle() {
     // Re-arm the header timeout for the next pipelined/keep-alive request.
     // Without this, a client that sends headers slowly on the second request
     // (Slowloris) would go unchecked — the 5s timer only ran for the first one.
-    auto self_weak = std::weak_ptr<HttpConnection>(shared_from_this());
-    header_tfd_ = loop_.schedule_timer(kHeaderTimeoutMs, [self_weak]() {
-        if (auto self = self_weak.lock()) {
-            if (!self->closed_) {
-                self->header_tfd_ = -1;  // event loop already closed this tfd
-                self->send_error(408, "Request Header Timeout");
-                self->close();
-            }
-        }
-    });
+    arm_408(&HttpConnection::header_tfd_, kHeaderTimeoutMs, "Request Header Timeout");
 
     // Ready for the next request
     loop_.modify(fd_, EPOLLIN);
@@ -884,8 +736,11 @@ void HttpConnection::send_error(int code, const char* msg) {
     lux::Response r;
     // The message comes from a fixed engine list, with no quotes or backslashes.
     r.status(code).json_text(std::string(R"({"error":")") + msg + R"("})");
+    send_and_close(r);
+}
+
+void HttpConnection::send_and_close(lux::Response& r) {
     r.header("Connection", "close");
-    // send_error is only called for protocol-level errors; ignore keep-alive
     keep_alive_ = false;
     send_response(r.build());
 }
@@ -906,14 +761,9 @@ void HttpConnection::close() {
     }
     current_req_.reset();
 
-    loop_.cancel_timer(header_tfd_);
-    header_tfd_ = -1;
-    loop_.cancel_timer(timeout_tfd_);
-    timeout_tfd_ = -1;
+    drop_timer(header_tfd_);
+    drop_timer(timeout_tfd_);
     loop_.remove(fd_);
-
-    // TLS shutdown: best-effort (non-blocking); we close the fd regardless.
-
     ::close(fd_);
     if (file_fd_ >= 0) { ::close(file_fd_); file_fd_ = -1; }
     if (conn_count_) conn_count_->fetch_sub(1, std::memory_order_relaxed);

@@ -11,88 +11,17 @@
 #
 #   tests/run_sqlite.sh [path-to-binary]
 
-set -u
-
-LUX="${1:-$HOME/lux-build/lux}"
-# An absolute path first of all: further down the directory is changed so the
-# .db file lands in the repo root, and a relative path would stop working.
-case "$LUX" in /*) ;; *) LUX="$(cd "$(dirname "$LUX")" && pwd)/$(basename "$LUX")" ;; esac
-HERE="$(cd "$(dirname "$0")" && pwd)"
-TMP="$(mktemp -d)"
 PORT=${LUX_TEST_SQLITE_PORT:-8820}
-SRV=""
+source "$(dirname "$0")/lib.sh"
+trap 'kill_wait $SRV; rm -rf "$TMP" "$HERE/cases/tests-sqlite-types.db"*' EXIT
 
-passed=0
-failed=0
-
-red()  { printf '\033[31m%s\033[0m\n' "$*"; }
-green() { printf '\033[32m%s\033[0m\n' "$*"; }
-grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
-
-ok()   { passed=$((passed + 1)); printf '  ok    %s\n' "$1"; }
-fail() {
-    failed=$((failed + 1))
-    red "  FAIL $1"
-    printf '        expected: %s\n        got: %s\n' "$2" "$3"
-}
-
-stop_server() {
-    [ -n "$SRV" ] && kill -9 "$SRV" 2>/dev/null
-    # Only that pid: a bare `wait` would also wait for the server.
-    wait "$SRV" 2>/dev/null
-    SRV=""
-}
-trap 'stop_server; rm -rf "$TMP" "$HERE/cases/tests-sqlite-types.db"* 2>/dev/null' EXIT
-
-if ! "$LUX" --check "$HERE/cases/sqlite.lux" > "$TMP/check" 2>&1; then
-    if grep -q "sqlite" "$TMP/check" && grep -q "import" "$TMP/check"; then
-        grey "sqlite: the binary was built without the module — suite skipped"
-        exit 77
-    fi
-    red "the test file does not compile:"; cat "$TMP/check"; exit 1
-fi
-
-check() {
-    local name="$1" method="$2" path="$3" want_code="$4" needle="${5:-}"
-    local got
-    got=$(curl -sS --max-time 10 -X "$method" -o "$TMP/body" -w '%{http_code}' \
-          "http://127.0.0.1:$PORT$path" 2>/dev/null)
-    local body; body=$(head -c 400 "$TMP/body" 2>/dev/null)
-    if [ "$got" != "$want_code" ]; then
-        fail "$name" "code $want_code" "code $got — $body"; return
-    fi
-    if [ -n "$needle" ] && ! grep -qF "$needle" "$TMP/body"; then
-        fail "$name" "to contain '$needle'" "$body"; return
-    fi
-    ok "$name"
-}
-
-# Really valid JSON: correct UTF-8 included.  A blob with stray bytes or an
-# infinity would come out in a shape no client can read.
-json_valid() {
-    local name="$1" path="$2"
-    curl -sS --max-time 10 -o "$TMP/body" "http://127.0.0.1:$PORT$path" 2>/dev/null
-    if python3 -c "import json,sys; json.load(open(sys.argv[1], encoding='utf-8'))" \
-            "$TMP/body" 2>/dev/null; then
-        ok "$name"
-    else
-        fail "$name" "valid UTF-8 JSON" "$(head -c 200 "$TMP/body" | cat -v)"
-    fi
-}
+skip_without_module sqlite "$HERE/cases/sqlite.lux"
 
 rm -f "$HERE/cases/tests-sqlite-types.db"*
 
 echo "== startup =="
 cd "$HERE/.."
-"$LUX" --no-watch --port "$PORT" "$HERE/cases/sqlite.lux" > "$TMP/srv.log" 2>&1 &
-SRV=$!
-for _ in $(seq 1 60); do
-    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/__ping__" 2>/dev/null && break
-    kill -0 "$SRV" 2>/dev/null || { red "the server died on startup:"; cat "$TMP/srv.log"; exit 1; }
-    sleep 0.3
-done
-curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/__ping__" || {
-    red "the server did not answer"; cat "$TMP/srv.log"; exit 1; }
+start_server "$HERE/cases/sqlite.lux" || exit 1
 ok "starts and connects"
 check "creates the schema" GET /create 200 '"ok":true'
 
@@ -184,8 +113,4 @@ else fail "40 concurrent, each with its own result" "40 correct" "$conc_failures
 kill -0 "$SRV" 2>/dev/null && ok "the server is still alive" \
                            || fail "the server is still alive" "alive" "dead"
 
-echo
-if [ "$failed" -eq 0 ]; then green "$passed tests, all passing"; exit 0; fi
-red "$passed passed, $failed failed"
-echo "--- server log ---"; tail -30 "$TMP/srv.log"
-exit 1
+summary

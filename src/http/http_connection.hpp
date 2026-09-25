@@ -55,7 +55,7 @@ private:
     bool                       in_flight_ = false;
     static constexpr size_t    kMaxPendingBuf = 64 * 1024;  // 64 KB pipelined
 
-    // Un handler sincrono responde DENTRO de parser_.feed(): llhttp llama a
+    // A synchronous handler replies INSIDE parser_.feed(): llhttp llama a
     // on_message_complete, which dispatches, and the response is written in
     // full before the callback returns HPE_PAUSED.  If the cycle close ran
     // there, it would resume() a pause that does not exist yet and the
@@ -135,6 +135,13 @@ private:
     void arm_request_timeout();
     void refresh_request_timeout();
     void cancel_request_timeout();
+    // Arms a one-shot timer into `this->*tfd` that answers 408 `msg` and closes.
+    void arm_408(int HttpConnection::*tfd, int ms, const char* msg);
+    void drop_timer(int& tfd) { loop_.cancel_timer(tfd); tfd = -1; }
+
+    // Feeds bytes to the HTTP parser and stashes any unconsumed tail (the
+    // next pipelined request, or a WS client's first frame). False = closed.
+    bool feed_parser(const char* data, size_t n);
 
     // Response cycle close: resumes the parser, replays anything that arrived
     // by pipelining, rearms the header timer and EPOLLIN.
@@ -143,6 +150,8 @@ private:
     // Begin writing `data`; buffers any unsent remainder and arms EPOLLOUT.
     void send_response(std::string data);
     void send_error(int code, const char* msg);
+    // Sends `r` with "Connection: close" and drops keep-alive.
+    void send_and_close(lux::Response& r);
     void close();
 
     void dispatch(ParsedRequest req);

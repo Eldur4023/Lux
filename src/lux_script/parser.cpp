@@ -51,6 +51,11 @@ bool Parser::expect(Tok k, const char* context) {
     return false;
 }
 
+// Skips the rest of a line after an error, so one mistake doesn't cascade.
+void Parser::skip_to_eol() {
+    while (!check(Tok::Newline) && !check(Tok::Dedent) && !check(Tok::EndOfFile)) advance();
+}
+
 void Parser::skip_newlines() {
     while (check(Tok::Newline)) advance();
 }
@@ -302,7 +307,7 @@ void Parser::parse_error(Program& out) {
 
 void Parser::parse_group(Program& out, const std::string& prefix,
                          const std::vector<Guard>& outer_guards) {
-    SourceLoc loc = advance().loc;                    // 'group'
+    advance();                                        // 'group'
 
     if (!expect(Tok::LParen, "after 'group'")) { synchronize(); return; }
     std::string own_prefix;
@@ -360,8 +365,7 @@ void Parser::parse_group(Program& out, const std::string& prefix,
                 default:
                     error_here("a group only accepts 'require', routes and "
                                "other groups");
-                    while (!check(Tok::Newline) && !check(Tok::Dedent) &&
-                           !check(Tok::EndOfFile)) advance();
+                    skip_to_eol();
             }
         }
 
@@ -369,7 +373,6 @@ void Parser::parse_group(Program& out, const std::string& prefix,
         if (i_ == before) advance();
     }
     match(Tok::Dedent);
-    (void)loc;
 }
 
 // ─── Classes ─────────────────────────────────────────────────────────────────
@@ -661,8 +664,7 @@ void Parser::parse_app(Program& out) {
                     if (!config_value(text, number, flag, kind)) {
                         error_here("invalid value: expected a string, a number, "
                                    "true/false o env(\"VAR\")");
-                        while (!check(Tok::Newline) && !check(Tok::Dedent) &&
-                               !check(Tok::EndOfFile)) advance();
+                        skip_to_eol();
                         continue;
                     }
                     // Everything is kept as text: each driver reads its own.
@@ -692,8 +694,7 @@ void Parser::parse_app(Program& out) {
                     if (!config_value(text, number, flag, kind, &from_env)) {
                         error_here("invalid value: expected a string, a number, "
                                    "true/false o env(\"VAR\")");
-                        while (!check(Tok::Newline) && !check(Tok::Dedent) &&
-                               !check(Tok::EndOfFile)) advance();
+                        skip_to_eol();
                         continue;
                     }
 
@@ -748,14 +749,12 @@ void Parser::parse_app(Program& out) {
             }
             else {
                 diags_.error(key.loc, "unknown key in the app block: '" + k + "'");
-                while (!check(Tok::Newline) && !check(Tok::Dedent) &&
-                       !check(Tok::EndOfFile)) advance();
+                skip_to_eol();
             }
         }
         else {
             error_here("expected a configuration key");
-            while (!check(Tok::Newline) && !check(Tok::Dedent) &&
-                   !check(Tok::EndOfFile)) advance();
+            skip_to_eol();
         }
 
         skip_newlines();
@@ -796,13 +795,11 @@ StmtPtr Parser::parse_statement() {
         case Tok::KwRequire:  return parse_require();
         case Tok::KwTry:      return parse_try();
         case Tok::KwBreak: {
-            auto s = std::make_unique<Stmt>();
-            s->kind = StmtKind::Break; s->loc = advance().loc;
+            auto s = make_stmt(StmtKind::Break, advance().loc);
             return s;
         }
         case Tok::KwContinue: {
-            auto s = std::make_unique<Stmt>();
-            s->kind = StmtKind::Continue; s->loc = advance().loc;
+            auto s = make_stmt(StmtKind::Continue, advance().loc);
             return s;
         }
         default: break;
@@ -810,9 +807,7 @@ StmtPtr Parser::parse_statement() {
 
     // Variable declaration: <type> <ident> [= expr]
     if (looks_like_type()) {
-        auto s  = std::make_unique<Stmt>();
-        s->kind = StmtKind::VarDecl;
-        s->loc  = peek().loc;
+        auto s = make_stmt(StmtKind::VarDecl, peek().loc);
         s->type = parse_type();
         if (check(Tok::Ident)) s->name = advance().text;
         else                   error_here("expected the variable name");
@@ -846,25 +841,19 @@ StmtPtr Parser::parse_statement() {
         bin->lhs  = clone_target(*e);
         bin->rhs  = parse_expr();
 
-        auto s    = std::make_unique<Stmt>();
-        s->kind   = StmtKind::Assign;
-        s->loc    = loc;
+        auto s = make_stmt(StmtKind::Assign, loc);
         s->target = std::move(e);
         s->value  = std::move(bin);
         return s;
     }
 
     if (match(Tok::Assign)) {
-        auto s    = std::make_unique<Stmt>();
-        s->kind   = StmtKind::Assign;
-        s->loc    = loc;
+        auto s = make_stmt(StmtKind::Assign, loc);
         s->target = std::move(e);
         s->value  = parse_expr();
         return s;
     }
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::ExprStmt;
-    s->loc  = loc;
+    auto s = make_stmt(StmtKind::ExprStmt, loc);
     s->value = std::move(e);
     return s;
 }
@@ -889,29 +878,25 @@ ExprPtr Parser::clone_target(const Expr& e) {
 }
 
 StmtPtr Parser::parse_return() {
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::Return;
-    s->loc  = advance().loc;
+    auto s = make_stmt(StmtKind::Return, advance().loc);
     if (!check(Tok::Newline) && !check(Tok::Dedent) && !check(Tok::EndOfFile))
         s->value = parse_expr();
     return s;
 }
 
+// Also parses an `elif` (the else holds a complete If): the two differ only in
+// the keyword consumed here. `else if` chains the same way.
 StmtPtr Parser::parse_if() {
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::If;
-    s->loc  = advance().loc;
+    const bool elif = check(Tok::KwElif);
+    auto s = make_stmt(StmtKind::If, advance().loc);                  // 'if' or 'elif'
     s->value = parse_expr();
-    expect(Tok::Colon, "after the if condition");
+    expect(Tok::Colon, elif ? "after the elif condition" : "after the if condition");
     s->body = parse_block();
 
     skip_newlines();
     if (check(Tok::KwElif)) {
-        // `elif` chains: the else holds a complete If.  `else if` does the same,
-        // and both are accepted.
-        s->orelse.push_back(parse_if_from_elif());
-    }
-    else if (check(Tok::KwElse)) {
+        s->orelse.push_back(parse_if());
+    } else if (check(Tok::KwElse)) {
         advance();
         if (check(Tok::KwIf)) {
             s->orelse.push_back(parse_if());
@@ -923,33 +908,8 @@ StmtPtr Parser::parse_if() {
     return s;
 }
 
-// An `elif` is an `if` whose header has already been consumed.
-StmtPtr Parser::parse_if_from_elif() {
-    auto s   = std::make_unique<Stmt>();
-    s->kind  = StmtKind::If;
-    s->loc   = advance().loc;                 // 'elif'
-    s->value = parse_expr();
-    expect(Tok::Colon, "after the elif condition");
-    s->body = parse_block();
-
-    skip_newlines();
-    if (check(Tok::KwElif)) {
-        s->orelse.push_back(parse_if_from_elif());
-    } else if (check(Tok::KwElse)) {
-        advance();
-        if (check(Tok::KwIf)) s->orelse.push_back(parse_if());
-        else {
-            expect(Tok::Colon, "after 'else'");
-            s->orelse = parse_block();
-        }
-    }
-    return s;
-}
-
 StmtPtr Parser::parse_while() {
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::While;
-    s->loc  = advance().loc;
+    auto s = make_stmt(StmtKind::While, advance().loc);
     s->value = parse_expr();
     expect(Tok::Colon, "after the while condition");
     s->body = parse_block();
@@ -957,9 +917,7 @@ StmtPtr Parser::parse_while() {
 }
 
 StmtPtr Parser::parse_for() {
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::For;
-    s->loc  = advance().loc;
+    auto s = make_stmt(StmtKind::For, advance().loc);
     s->type = parse_type();
     if (check(Tok::Ident)) s->name = advance().text;
     else                   error_here("expected the loop variable name");
@@ -971,9 +929,7 @@ StmtPtr Parser::parse_for() {
 }
 
 StmtPtr Parser::parse_require() {
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::Require;
-    s->loc  = advance().loc;
+    auto s = make_stmt(StmtKind::Require, advance().loc);
     s->value = parse_expr();
     if (!expect(Tok::KwElse, "in 'require ... else ...'")) return s;
     s->target = parse_expr();
@@ -981,9 +937,7 @@ StmtPtr Parser::parse_require() {
 }
 
 StmtPtr Parser::parse_try() {
-    auto s  = std::make_unique<Stmt>();
-    s->kind = StmtKind::Try;
-    s->loc  = advance().loc;
+    auto s = make_stmt(StmtKind::Try, advance().loc);
     expect(Tok::Colon, "after 'try'");
     s->body = parse_block();
     skip_newlines();
@@ -1035,9 +989,7 @@ void Parser::parse_switch_into(Block& out) {
     if (!expect(Tok::Indent, "opening the switch block")) return;
 
     std::string tmp_name = "__switch_" + std::to_string(switch_count_++);
-    auto decl   = std::make_unique<Stmt>();
-    decl->kind  = StmtKind::VarDecl;
-    decl->loc   = switch_loc;
+    auto decl = make_stmt(StmtKind::VarDecl, switch_loc);
     decl->type.name = "Json";   // the subject can be any comparable type
     decl->type.loc  = switch_loc;
     decl->name  = tmp_name;
@@ -1092,9 +1044,7 @@ void Parser::parse_switch_into(Block& out) {
 
     Block chain = has_else ? std::move(else_block) : Block{};
     for (auto it = arms.rbegin(); it != arms.rend(); ++it) {
-        auto if_stmt    = std::make_unique<Stmt>();
-        if_stmt->kind   = StmtKind::If;
-        if_stmt->loc    = it->loc;
+        auto if_stmt = make_stmt(StmtKind::If, it->loc);
         if_stmt->value  = std::move(it->cond);
         if_stmt->body   = std::move(it->body);
         if_stmt->orelse = std::move(chain);
@@ -1152,6 +1102,13 @@ TypeRef Parser::parse_type() {
 
 // ─── Expressions ─────────────────────────────────────────────────────────────
 
+StmtPtr Parser::make_stmt(StmtKind k, SourceLoc loc) {
+    auto s  = std::make_unique<Stmt>();
+    s->kind = k;
+    s->loc  = loc;
+    return s;
+}
+
 ExprPtr Parser::make(ExprKind k, SourceLoc loc) {
     auto e  = std::make_unique<Expr>();
     e->kind = k;
@@ -1174,27 +1131,24 @@ ExprPtr Parser::parse_ternary() {
     return e;
 }
 
-ExprPtr Parser::parse_or() {
-    ExprPtr l = parse_and();
-    while (check(Tok::KwOr)) {
-        SourceLoc loc = advance().loc;
-        auto e = make(ExprKind::Binary, loc);
-        e->text = "or"; e->lhs = std::move(l); e->rhs = parse_and();
+// One left-associative precedence level: `next (op next)*` for any op in `ops`.
+ExprPtr Parser::binary(ExprPtr (Parser::*next)(), std::initializer_list<Tok> ops) {
+    ExprPtr l = (this->*next)();
+    for (;;) {
+        bool hit = false;
+        for (Tok k : ops) if (check(k)) { hit = true; break; }
+        if (!hit) return l;
+        const Token& op = advance();
+        auto e = make(ExprKind::Binary, op.loc);
+        e->text = tok_name(op.kind);
+        e->lhs  = std::move(l);
+        e->rhs  = (this->*next)();
         l = std::move(e);
     }
-    return l;
 }
 
-ExprPtr Parser::parse_and() {
-    ExprPtr l = parse_not();
-    while (check(Tok::KwAnd)) {
-        SourceLoc loc = advance().loc;
-        auto e = make(ExprKind::Binary, loc);
-        e->text = "and"; e->lhs = std::move(l); e->rhs = parse_not();
-        l = std::move(e);
-    }
-    return l;
-}
+ExprPtr Parser::parse_or()  { return binary(&Parser::parse_and, {Tok::KwOr}); }
+ExprPtr Parser::parse_and() { return binary(&Parser::parse_not, {Tok::KwAnd}); }
 
 ExprPtr Parser::parse_not() {
     if (check(Tok::KwNot)) {
@@ -1207,51 +1161,14 @@ ExprPtr Parser::parse_not() {
 }
 
 ExprPtr Parser::parse_equality() {
-    ExprPtr l = parse_comparison();
-    while (check(Tok::Eq) || check(Tok::NotEq)) {
-        const Token& op = advance();
-        auto e = make(ExprKind::Binary, op.loc);
-        e->text = tok_name(op.kind);
-        e->lhs = std::move(l); e->rhs = parse_comparison();
-        l = std::move(e);
-    }
-    return l;
+    return binary(&Parser::parse_comparison, {Tok::Eq, Tok::NotEq});
 }
-
 ExprPtr Parser::parse_comparison() {
-    ExprPtr l = parse_sum();
-    while (check(Tok::Lt) || check(Tok::LtEq) || check(Tok::Gt) || check(Tok::GtEq)) {
-        const Token& op = advance();
-        auto e = make(ExprKind::Binary, op.loc);
-        e->text = tok_name(op.kind);
-        e->lhs = std::move(l); e->rhs = parse_sum();
-        l = std::move(e);
-    }
-    return l;
+    return binary(&Parser::parse_sum, {Tok::Lt, Tok::LtEq, Tok::Gt, Tok::GtEq});
 }
-
-ExprPtr Parser::parse_sum() {
-    ExprPtr l = parse_product();
-    while (check(Tok::Plus) || check(Tok::Minus)) {
-        const Token& op = advance();
-        auto e = make(ExprKind::Binary, op.loc);
-        e->text = tok_name(op.kind);
-        e->lhs = std::move(l); e->rhs = parse_product();
-        l = std::move(e);
-    }
-    return l;
-}
-
+ExprPtr Parser::parse_sum()     { return binary(&Parser::parse_product, {Tok::Plus, Tok::Minus}); }
 ExprPtr Parser::parse_product() {
-    ExprPtr l = parse_unary();
-    while (check(Tok::Star) || check(Tok::Slash) || check(Tok::Percent)) {
-        const Token& op = advance();
-        auto e = make(ExprKind::Binary, op.loc);
-        e->text = tok_name(op.kind);
-        e->lhs = std::move(l); e->rhs = parse_unary();
-        l = std::move(e);
-    }
-    return l;
+    return binary(&Parser::parse_unary, {Tok::Star, Tok::Slash, Tok::Percent});
 }
 
 ExprPtr Parser::parse_unary() {

@@ -144,6 +144,8 @@ public:
     // in the real compiler calls this yet.
     IrExprPtr check_expr(const Expr& e, DiagnosticBag& shadow) const;
     IrExprPtr check_call(const Expr& e, bool awaited, DiagnosticBag& shadow) const;
+    bool check_positional(const Expr& e, std::vector<IrArg>& out, DiagnosticBag& shadow,
+                          const std::string& named_msg) const;
 
     // Counterpart of check_expr for emit_condition: same reset of
     // locals_/route_method_/scope_depth_, same declarations of `names`, but
@@ -254,6 +256,7 @@ private:
     static void flatten_concat_ir(const IrExpr& e, std::vector<const IrExpr*>& out);
 
     int  resolve_local(const std::string& name) const;
+    void reset(Chunk& out, std::string method);
     void begin_scope();
     void end_scope();
 

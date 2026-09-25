@@ -341,7 +341,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 bool r  = compare(a, b, generic_form_of(in.op), ok);
                 if (!ok)
                     return fail(std::string("cannot compare ") + a.type_name() +
-                                " y " + b.type_name(), in.loc);
+                                " and " + b.type_name(), in.loc);
                 push(Value::boolean(r));
                 break;
             }
@@ -509,8 +509,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 uint32_t name_k = in.operand >> 8;
                 int      argc   = static_cast<int>(in.operand & 0xFF);
 
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+                std::vector<Value> args = pop_args(argc);
                 Value recv = pop();
 
                 std::string error;
@@ -521,29 +520,14 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
             }
 
-            case Op::CallNative: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+            // Same shape, two id-spaces: kNatives vs BuiltinModuleRegistry.
+            case Op::CallNative: case Op::CallBuiltinModule: {
+                int id = static_cast<int>(in.operand >> 8);
+                std::vector<Value> args = pop_args(static_cast<int>(in.operand & 0xFF));
 
                 std::string error;
-                Value out = native_at(id).fn(ctx, args, error);
-                if (!error.empty()) return fail(std::move(error), in.loc);
-                push(std::move(out));
-                break;
-            }
-
-            case Op::CallBuiltinModule: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
-
-                std::string error;
-                Value out = builtin_module_function_at(id).fn(ctx, args, error);
+                Value out = in.op == Op::CallNative ? native_at(id).fn(ctx, args, error)
+                                                    : builtin_module_function_at(id).fn(ctx, args, error);
                 if (!error.empty()) return fail(std::move(error), in.loc);
                 push(std::move(out));
                 break;
@@ -552,33 +536,16 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
             // The VM does not know how to wait: it gathers the arguments, stops,
             // and lets the driver do the real co_await on the engine.  On the way
             // back, resume() pushes the result and the frame carries on.
-            case Op::CallAsync: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
+            //
+            // CallAsyncModule's id lives in BuiltinModuleRegistry's id-space,
+            // not kNatives': await_is_module tells the driver (project.cpp)
+            // so it doesn't confuse it with is_db_await/sleep/__ws_recv.
+            case Op::CallAsync: case Op::CallAsyncModule: {
                 Result r;
-                r.status     = Status::Suspended;
-                r.await_id   = id;
-                r.await_args.resize(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
-                return r;
-            }
-
-            // Same shape as CallAsync -- the VM doesn't know how to wait
-            // here either, it just gathers the arguments and stops -- but
-            // `id` lives in BuiltinModuleRegistry's id-space, not kNatives',
-            // so await_is_module tells the driver (project.cpp) that, so it
-            // doesn't confuse it with is_db_await/sleep/__ws_recv.
-            case Op::CallAsyncModule: {
-                int id   = static_cast<int>(in.operand >> 8);
-                int argc = static_cast<int>(in.operand & 0xFF);
-
-                Result r;
-                r.status         = Status::Suspended;
-                r.await_id       = id;
-                r.await_is_module = true;
-                r.await_args.resize(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) r.await_args[static_cast<size_t>(i)] = pop();
+                r.status          = Status::Suspended;
+                r.await_id        = static_cast<int>(in.operand >> 8);
+                r.await_is_module = in.op == Op::CallAsyncModule;
+                r.await_args      = pop_args(static_cast<int>(in.operand & 0xFF));
                 return r;
             }
 
@@ -632,8 +599,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                                 std::to_string(kMaxFrames) + " nested calls",
                                 in.loc);
 
-                std::vector<Value> args(static_cast<size_t>(argc));
-                for (int i = argc; i-- > 0;) args[static_cast<size_t>(i)] = pop();
+                std::vector<Value> args = pop_args(argc);
 
                 // Mixed mode for --native (Phase 2): if this function was
                 // compiled to native code, it's called directly and no
@@ -652,7 +618,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                                                              static_cast<int32_t>(nargs.size()));
                     if (r.tag == NativeValue::Tag::Error) {
                         std::string msg = native_->error_message ? native_->error_message()
-                                                                  : "error nativo";
+                                                                  : "native error";
                         return fail(std::move(msg), in.loc);
                     }
                     push(de_nativevalue(r));
@@ -676,29 +642,18 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 break;
             }
 
-            case Op::Return: {
-                Value  v     = pop();
+            case Op::Return: case Op::ReturnNull: {
+                Value  v     = in.op == Op::Return ? pop() : Value::null();
                 size_t lbase = frame.locals_base, sbase = frame.stack_base;
                 frames_.pop_back();
                 if (frames_.empty()) {
                     Result r;
-                    r.status = Status::Done;
-                    r.value  = std::move(v);
+                    r.value = std::move(v);
                     return r;
                 }
                 stack_.resize(sbase);
                 locals_.resize(lbase);
                 push(std::move(v));
-                break;
-            }
-
-            case Op::ReturnNull: {
-                size_t lbase = frame.locals_base, sbase = frame.stack_base;
-                frames_.pop_back();
-                if (frames_.empty()) return Result{};
-                stack_.resize(sbase);
-                locals_.resize(lbase);
-                push(Value::null());
                 break;
             }
         }

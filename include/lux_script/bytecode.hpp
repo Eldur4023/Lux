@@ -151,6 +151,5 @@ struct Chunk {
 // resolves the name to an index, so the VM never looks one up by name.
 using FunctionTable = std::vector<std::shared_ptr<Chunk>>;
 
-const char* op_name(Op op);
 
 } // namespace lux_script

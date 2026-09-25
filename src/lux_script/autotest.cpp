@@ -105,11 +105,10 @@ std::string value_for(const std::string& type) {
     return "test";
 }
 
-std::string json_para(const std::string& type) {
-    if (type == "int" || type == "long")     return "1";
-    if (type == "float" || type == "double") return "1.5";
-    if (type == "bool")                      return "true";
-    return "\"test\"";
+// The same value as JSON: only the string fallback needs quoting.
+std::string json_value_for(const std::string& type) {
+    std::string v = value_for(type);
+    return v == "test" ? "\"test\"" : v;
 }
 
 // Fills in :id / {id} and appends the query parameters with a value.
@@ -149,7 +148,7 @@ std::string body_for(const RouteDecl& r, const Program& programa) {
             for (const auto& f : c.fields) {
                 if (f.type.optional) continue;          // the optional ones are skipped
                 if (!first) j += ",";
-                j += "\"" + f.name + "\":" + json_para(f.type.name);
+                j += "\"" + f.name + "\":" + json_value_for(f.type.name);
                 first = false;
             }
             return j + "}";

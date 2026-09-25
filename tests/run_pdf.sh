@@ -8,62 +8,10 @@
 #
 #   tests/run_pdf.sh [path-to-binary]
 
-set -u
-
-LUX="${1:-$HOME/lux-build/lux}"
-case "$LUX" in /*) ;; *) LUX="$(cd "$(dirname "$LUX")" && pwd)/$(basename "$LUX")" ;; esac
-HERE="$(cd "$(dirname "$0")" && pwd)"
-TMP="$(mktemp -d)"
 PORT=${LUX_TEST_PDF_PORT:-8830}
-SRV=""
+source "$(dirname "$0")/lib.sh"
 
-passed=0
-failed=0
-
-red()   { printf '\033[31m%s\033[0m\n' "$*"; }
-green() { printf '\033[32m%s\033[0m\n' "$*"; }
-grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
-
-ok()   { passed=$((passed + 1)); printf '  ok    %s\n' "$1"; }
-fail() {
-    failed=$((failed + 1))
-    red "  FAIL $1"
-    printf '        expected: %s\n        got: %s\n' "$2" "$3"
-}
-
-stop_server() {
-    [ -n "$SRV" ] && kill -9 "$SRV" 2>/dev/null
-    wait "$SRV" 2>/dev/null
-    SRV=""
-}
-trap 'stop_server; rm -rf "$TMP"' EXIT
-
-if ! "$LUX" --check "$HERE/cases/pdf.lux" > "$TMP/check" 2>&1; then
-    # The exact wording project.cpp uses when LUX_PDF was off/cairo was
-    # missing at build time -- NOT "...contains 'import'" (that never
-    # matches this message; caught while adding the http module's own suite
-    # and finding this one had never really been exercised either).
-    if grep -q "module 'pdf' is not compiled into this binary" "$TMP/check"; then
-        grey "pdf: the binary was built without the module — suite skipped"
-        exit 77
-    fi
-    red "the test file does not compile:"; cat "$TMP/check"; exit 1
-fi
-
-check() {
-    local name="$1" method="$2" path="$3" want_code="$4" needle="${5:-}"
-    local got
-    got=$(curl -sS --max-time 10 -X "$method" -o "$TMP/body" -w '%{http_code}' \
-          "http://127.0.0.1:$PORT$path" 2>/dev/null)
-    local body; body=$(head -c 400 "$TMP/body" 2>/dev/null)
-    if [ "$got" != "$want_code" ]; then
-        fail "$name" "code $want_code" "code $got — $body"; return
-    fi
-    if [ -n "$needle" ] && ! grep -qF "$needle" "$TMP/body"; then
-        fail "$name" "to contain '$needle'" "$body"; return
-    fi
-    ok "$name"
-}
+skip_without_module pdf "$HERE/cases/pdf.lux"
 
 # A real, valid PDF, not just a non-empty response: decodes the base64 body
 # straight from the JSON response and checks the magic bytes are really
@@ -88,15 +36,7 @@ print(raw[:5].decode('latin1'), end='')
 
 echo "== startup =="
 cd "$HERE/.."
-"$LUX" --no-watch --port "$PORT" "$HERE/cases/pdf.lux" > "$TMP/srv.log" 2>&1 &
-SRV=$!
-for _ in $(seq 1 60); do
-    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/health" 2>/dev/null && break
-    kill -0 "$SRV" 2>/dev/null || { red "the server died on startup:"; cat "$TMP/srv.log"; exit 1; }
-    sleep 0.3
-done
-curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/health" || {
-    red "the server did not answer"; cat "$TMP/srv.log"; exit 1; }
+start_server "$HERE/cases/pdf.lux" /health || exit 1
 ok "starts and connects"
 
 echo "== generation =="
@@ -109,10 +49,4 @@ check "unknown handle"        GET /unknown_handle    500 'unknown handle'
 check "draw after finish"     GET /draw_after_finish 500 'already saved'
 check "close twice"           GET /close_twice       200 '"first":true,"second":false'
 
-echo
-if [ "$failed" -eq 0 ]; then
-    green "$passed tests, all passing"
-    exit 0
-fi
-red "$passed passed, $failed failed"
-exit 1
+summary

@@ -234,17 +234,4 @@ void HttpParser::resume() {
     last_len_  = 0;
 }
 
-void HttpParser::reset() {
-    ctx_->current      = {};
-    ctx_->last_field.clear();
-    ctx_->last_value.clear();
-    ctx_->value_pending = false;
-    ctx_->header_count  = 0;
-    ctx_->error         = false;
-    ctx_->body_too_large = false;
-    last_data_ = nullptr;
-    last_len_  = 0;
-    llhttp_reset(parser_.get());
-}
-
 } // namespace lux::http

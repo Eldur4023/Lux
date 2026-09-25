@@ -1,4 +1,7 @@
 #pragma once
+#include <filesystem>
+#include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,10 +56,19 @@ struct Template {
     // render(); the next ones, the loop variables.
     //
     // They carry the type along because the expressions inside are compiled
-    // against them: that is what makes `{{ who.mayusculas() }}` on a string a
+    // against them: that is what makes `{{ who.uppercase() }}` on a string a
     // compile error and not a broken page.
     std::vector<TypedName> names;
 };
+
+// Reads a whole file in binary mode, or nullopt if it can't be opened --
+// the one piece shared by every "load a template off disk" call site
+// (a top-level render(), {% include %}, {% extends %}).
+inline std::optional<std::string> read_whole_file(const std::filesystem::path& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return std::nullopt;
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
 
 // Compiles the source of a template.
 //

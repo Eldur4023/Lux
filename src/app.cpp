@@ -5,6 +5,7 @@
 #include "../include/lux/response.hpp"
 #include "../include/lux/task.hpp"
 #include "../include/lux/blocking_pool.hpp"
+#include "../include/lux/percent_encoding.hpp"
 
 #include <lux/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
@@ -23,6 +24,8 @@
 #include <mutex>
 #include <functional>
 #include <sstream>
+#include <string_view>
+#include <utility>
 #include <iomanip>
 #include <unistd.h>
 #include <fcntl.h>
@@ -32,45 +35,47 @@ namespace lux {
 namespace {
 
 
+// Without the right Content-Type a <track> subtitle (.vtt) is silently
+// ignored and an HLS player refuses the manifest/segments (.m3u8/.ts).
 static const char* mime_for_ext(const std::string& ext) {
-    if (ext == ".html" || ext == ".htm")  return "text/html; charset=utf-8";
-    if (ext == ".css")   return "text/css; charset=utf-8";
-    if (ext == ".js")    return "application/javascript; charset=utf-8";
-    if (ext == ".json")  return "application/json; charset=utf-8";
-    if (ext == ".svg")   return "image/svg+xml";
-    if (ext == ".png")   return "image/png";
-    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
-    if (ext == ".gif")   return "image/gif";
-    if (ext == ".webp")  return "image/webp";
-    if (ext == ".ico")   return "image/x-icon";
-    if (ext == ".woff")  return "font/woff";
-    if (ext == ".woff2") return "font/woff2";
-    if (ext == ".ttf")   return "font/ttf";
-    if (ext == ".pdf")   return "application/pdf";
-    if (ext == ".xml")   return "application/xml";
-    if (ext == ".txt")   return "text/plain; charset=utf-8";
-    if (ext == ".wasm")  return "application/wasm";
-    if (ext == ".mjs")   return "application/javascript; charset=utf-8";
-    if (ext == ".map")   return "application/json; charset=utf-8";
-    if (ext == ".mp4")   return "video/mp4";
-    if (ext == ".webm")  return "video/webm";
-    if (ext == ".mp3")   return "audio/mpeg";
-    if (ext == ".ogg")   return "audio/ogg";
-    if (ext == ".avif")  return "image/avif";
-    // Video streaming/subtitle types: without the right Content-Type a
-    // <track> subtitle file is silently ignored by the browser (.vtt), and
-    // an HLS player refuses to treat the manifest/segments as a stream at
-    // all (.m3u8/.ts) — both are exactly what send_file()/a static mount
-    // are used for alongside Range support (see partial_content()), so
-    // missing them here breaks the one thing this MIME table exists for.
-    if (ext == ".vtt")   return "text/vtt; charset=utf-8";
-    if (ext == ".m3u8")  return "application/vnd.apple.mpegurl";
-    if (ext == ".ts")    return "video/mp2t";
-    if (ext == ".mkv")   return "video/x-matroska";
-    if (ext == ".flac")  return "audio/flac";
-    if (ext == ".wav")   return "audio/wav";
-    if (ext == ".m4a")   return "audio/mp4";
-    if (ext == ".csv")   return "text/csv; charset=utf-8";
+    static constexpr std::pair<std::string_view, const char*> kMime[] = {
+        {".html",  "text/html; charset=utf-8"},
+        {".htm",   "text/html; charset=utf-8"},
+        {".css",   "text/css; charset=utf-8"},
+        {".js",    "application/javascript; charset=utf-8"},
+        {".json",  "application/json; charset=utf-8"},
+        {".svg",   "image/svg+xml"},
+        {".png",   "image/png"},
+        {".jpg",   "image/jpeg"},
+        {".jpeg",  "image/jpeg"},
+        {".gif",   "image/gif"},
+        {".webp",  "image/webp"},
+        {".ico",   "image/x-icon"},
+        {".woff",  "font/woff"},
+        {".woff2", "font/woff2"},
+        {".ttf",   "font/ttf"},
+        {".pdf",   "application/pdf"},
+        {".xml",   "application/xml"},
+        {".txt",   "text/plain; charset=utf-8"},
+        {".wasm",  "application/wasm"},
+        {".mjs",   "application/javascript; charset=utf-8"},
+        {".map",   "application/json; charset=utf-8"},
+        {".mp4",   "video/mp4"},
+        {".webm",  "video/webm"},
+        {".mp3",   "audio/mpeg"},
+        {".ogg",   "audio/ogg"},
+        {".avif",  "image/avif"},
+        {".vtt",   "text/vtt; charset=utf-8"},
+        {".m3u8",  "application/vnd.apple.mpegurl"},
+        {".ts",    "video/mp2t"},
+        {".mkv",   "video/x-matroska"},
+        {".flac",  "audio/flac"},
+        {".wav",   "audio/wav"},
+        {".m4a",   "audio/mp4"},
+        {".csv",   "text/csv; charset=utf-8"},
+    };
+    for (auto& [e, mime] : kMime)
+        if (ext == e) return mime;
     return "application/octet-stream";
 }
 
@@ -84,65 +89,14 @@ static std::string make_etag(const std::filesystem::file_time_type& mtime,
     return ss.str();
 }
 
-// Strict hex-nibble check — see the identical helper's comment in
-// http_connection.cpp's url_decode() for why this can't be std::strtoul():
-// it accepts a leading sign/whitespace before the digits, so "%+2e" (or
-// "%-1", "% e") looked like a fully-consumed, valid escape to it instead of
-// the literal text RFC 3986 says it is — a decoder/filter differential, and
-// on a decoder that feeds a path traversal check exactly the kind of thing
-// that check exists to catch.
-static inline int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-static std::string url_decode_path(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] == '%' && i + 2 < s.size()) {
-            int hi = hex_nibble(s[i+1]), lo = hex_nibble(s[i+2]);
-            if (hi >= 0 && lo >= 0) {
-                int v = hi * 16 + lo;
-                // Drop %00: it truncates POSIX path operations after
-                // canonicalisation, creating a mismatch between what auth
-                // middlewares see (decoded path) and what the filesystem
-                // resolves (truncated at NUL).  Matches the HTTP-level
-                // url_decode() in http_connection.cpp.
-                if (v != 0) out += static_cast<char>(v);
-                i += 2;
-                continue;
-            }
-        }
-        out += s[i];
-    }
-    return out;
-}
-
 // True if `candidate` lives inside `root` (root is a component-wise prefix
 // of candidate). Both must already be canonical/weakly-canonical paths.
-//
-// This is NOT std::mismatch(root.begin(), root.end(), candidate.begin()):
-// that three-iterator overload walks `root`'s length and advances
-// candidate's iterator in lockstep WITHOUT ever comparing it against
-// candidate.end() — the moment a resolved path has fewer components than
-// the serve root (a symlink inside the root pointing at a shallower
-// directory, e.g. "public/assets -> /opt/assets" under root
-// "/home/user/app/public"), it walks candidate's iterator straight past
-// end() and dereferences it, which is a real SEGV (confirmed with
-// AddressSanitizer), not just theoretical UB — in exactly the branch that
-// exists to reject that path with a 403. Advancing both iterators together
-// and stopping the instant either one runs out avoids that entirely.
+// Four-iterator mismatch: a candidate with FEWER components than root (a
+// symlink to a shallower directory) must not be walked past its end.
 static bool path_is_within(const std::filesystem::path& root,
                             const std::filesystem::path& candidate) {
-    auto r = root.begin(), rend = root.end();
-    auto c = candidate.begin(), cend = candidate.end();
-    for (; r != rend; ++r, ++c) {
-        if (c == cend || *c != *r) return false;
-    }
-    return true;
+    return std::mismatch(root.begin(), root.end(),
+                         candidate.begin(), candidate.end()).first == root.end();
 }
 
 // Returns true and fills res if a static mount covers this path.
@@ -153,6 +107,10 @@ static bool try_serve_static(
     Response& res)
 {
     namespace fs = std::filesystem;
+    auto fail = [&](int code, const char* body) {
+        res.status(code).json_text(body);
+        return true;
+    };
     for (const auto& m : mounts) {
         if (req.path.rfind(m.prefix, 0) != 0) continue;
         const size_t plen = m.prefix.size();
@@ -170,7 +128,7 @@ static bool try_serve_static(
         if (m.prefix.back() != '/' &&
             req.path.size() > plen && req.path[plen] != '/') continue;
 
-        std::string rel = url_decode_path(req.path.substr(plen));
+        std::string rel = lux::percent_decode(req.path.substr(plen), false);
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
         // Block dotfiles: any path component starting with '.' (e.g. .env,
@@ -190,10 +148,7 @@ static bool try_serve_static(
         bool is_well_known = rel.compare(0, kWellKnown.size(), kWellKnown) == 0;
         if (!is_well_known) {
             for (size_t i = 0; i < rel.size(); ++i) {
-                if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') {
-                    res.status(404).json_text(R"({"error":"Not Found"})");
-                    return true;
-                }
+                if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') return fail(404, R"({"error":"Not Found"})");
             }
         }
 
@@ -202,10 +157,7 @@ static bool try_serve_static(
         // so the mismatch check below compares fully-resolved paths.
         std::error_code root_ec;
         auto canonical_root = fs::canonical(m.root, root_ec);
-        if (root_ec) {
-            res.status(500).json_text(R"({"error":"Server misconfiguration"})");
-            return true;
-        }
+        if (root_ec) return fail(500, R"({"error":"Server misconfiguration"})");
 
         fs::path file = canonical_root / rel.substr(1);
 
@@ -213,10 +165,7 @@ static bool try_serve_static(
         // target file does not exist yet (needed for the 404 branch below).
         std::error_code ec;
         auto preliminary = fs::weakly_canonical(file);
-        if (!path_is_within(canonical_root, preliminary)) {
-            res.status(403).json_text(R"({"error":"Forbidden"})");
-            return true;
-        }
+        if (!path_is_within(canonical_root, preliminary)) return fail(403, R"({"error":"Forbidden"})");
 
         auto canonical_file = preliminary;
 
@@ -245,45 +194,29 @@ static bool try_serve_static(
             // routers (React Router, Vue Router, etc.) can handle the URL.
             if (m.spa) {
                 canonical_file = fs::canonical(canonical_root / "index.html", ec);
-                if (ec || !fs::is_regular_file(fs::status(canonical_file))) {
-                    res.status(404).json_text(R"({"error":"Not Found"})");
-                    return true;
-                }
+                if (ec || !fs::is_regular_file(fs::status(canonical_file))) return fail(404, R"({"error":"Not Found"})");
                 // index.html itself may be a symlink pointing outside the root.
                 // Re-check that the resolved path still lives inside canonical_root
                 // so a misconfigured/compromised dist directory cannot exfiltrate
                 // arbitrary files via the SPA fallback.
-                if (!path_is_within(canonical_root, canonical_file)) {
-                    res.status(403).json_text(R"({"error":"Forbidden"})");
-                    return true;
-                }
+                if (!path_is_within(canonical_root, canonical_file)) return fail(403, R"({"error":"Forbidden"})");
             } else {
-                res.status(404).json_text(R"({"error":"Not Found"})");
-                return true;
+                return fail(404, R"({"error":"Not Found"})");
             }
         } else {
             // File exists: fully resolve symlinks and re-check traversal.
             // The first pass caught ".." sequences; this pass catches symlinks
             // that point outside the root (e.g. uploads/evil -> /etc/passwd).
             canonical_file = fs::canonical(preliminary, ec);
-            if (ec) {
-                res.status(404).json_text(R"({"error":"Not Found"})");
-                return true;
-            }
-            if (!path_is_within(canonical_root, canonical_file)) {
-                res.status(403).json_text(R"({"error":"Forbidden"})");
-                return true;
-            }
+            if (ec) return fail(404, R"({"error":"Not Found"})");
+            if (!path_is_within(canonical_root, canonical_file)) return fail(403, R"({"error":"Forbidden"})");
         }
 
         // ── ETag ──────────────────────────────────────────────────────────────
         std::error_code mtime_ec, size_ec;
         auto mtime    = fs::last_write_time(canonical_file, mtime_ec);
         auto filesize = fs::file_size(canonical_file, size_ec);
-        if (mtime_ec || size_ec) {
-            res.status(500).json_text(R"({"error":"Cannot stat file"})");
-            return true;
-        }
+        if (mtime_ec || size_ec) return fail(500, R"({"error":"Cannot stat file"})");
         std::string etag = make_etag(mtime, filesize);
 
         // ── Cache-Control ─────────────────────────────────────────────────────
@@ -385,7 +318,6 @@ void App::prepare() {
 // Used by run() (via the DispatchFn) and by TestClient for in-process testing.
 
 Task<void> App::handle_request(Request& req, Response& res) {
-    res.set_templates_dir(templates_dir_);
 
     // Static file mounts bypass the middleware chain — but only for a path
     // that has no explicitly declared route of its own. A broad mount like

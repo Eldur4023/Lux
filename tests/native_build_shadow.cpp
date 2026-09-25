@@ -7,6 +7,7 @@
 // del interprete (Op::CallFunction, ver vm.cpp) esta bien conectado, no solo
 // que el generador produce C++ correcto.
 #include <lux_script/diagnostic.hpp>
+#include "parse_program.hpp"
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
 #include <lux_script/native_build.hpp>
@@ -26,16 +27,6 @@
 using namespace lux_script;
 
 static int fallos = 0;
-
-static bool parse_program(const std::string& src, SourceFile& file, DiagnosticBag& diags,
-                          Program& out) {
-    file.path = "<prueba>";
-    file.text = src;
-    Lexer  lexer(file, diags);
-    Parser parser(lexer.tokenize(), diags);
-    parser.parse_into(out);
-    return diags.empty();
-}
 
 static VM::Result ejecutar_result(const Chunk& chunk, std::vector<Value> args,
                                   const FunctionTable* fns, const NativeModule* nativo) {

@@ -29,6 +29,9 @@ bool        base64url_decode(std::string_view text, std::string& out);
 // no client would know how to read it.
 std::string base64_encode(std::string_view raw);
 
+// Lowercase hex, two digits per byte.
+std::string hex_encode(std::string_view raw);
+
 // Constant-time comparison.  Comparing signatures with == leaks through the
 // response time how many leading bytes the attacker got right, which is enough
 // to rebuild the signature byte by byte.

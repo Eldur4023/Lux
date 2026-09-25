@@ -425,7 +425,7 @@ Value fn_req_body(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.body);
 }
 
-const std::array<NativeDef, 51> kNatives = {{
+const std::array<NativeDef, 50> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -486,8 +486,6 @@ const std::array<NativeDef, 51> kNatives = {{
     {"__db_commit",   1, 1, nullptr, true},
     {"__db_rollback", 1, 1, nullptr, true},
     {"__db_last_id",  1, 1, nullptr, true},
-    // Final marker so native_count() does not depend on the order.
-    {nullptr,     0, 0,  nullptr},
 }};
 
 } // namespace
@@ -533,14 +531,13 @@ bool SharedState::remove(const std::string& key) {
 }
 
 int native_id(const std::string& name) {
-    for (size_t i = 0; i + 1 < kNatives.size(); ++i)
+    for (size_t i = 0; i < kNatives.size(); ++i)
         if (name == kNatives[i].name) return static_cast<int>(i);
     return -1;
 }
 
 const NativeDef& native_at(int id) { return kNatives[static_cast<size_t>(id)]; }
 
-int native_count() { return static_cast<int>(kNatives.size()) - 1; }
 
 // ─── Methods on values ───────────────────────────────────────────────────────
 
@@ -570,17 +567,6 @@ std::string safe_name(const std::string& raw) {
     std::string base = (slash == std::string::npos) ? raw_trunc : raw_trunc.substr(slash + 1);
     if (base.empty() || base == "." || base == "..") base = "subida";
     return base;
-}
-
-std::string to_hex(const std::string& raw) {
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(raw.size() * 2);
-    for (unsigned char c : raw) {
-        out += kHex[c >> 4];
-        out += kHex[c & 0xF];
-    }
-    return out;
 }
 
 // Splits "name.ext" into {"name", ".ext"}. No dot, or a dot-only hidden
@@ -722,12 +708,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
         if (name == "upper" || name == "lower") {
             return Value::str(name == "upper" ? utf8_upper(s) : utf8_lower(s));
         }
-        if (name == "trim") {
-            size_t a = s.find_first_not_of(" \t\r\n");
-            if (a == std::string::npos) return Value::str("");
-            size_t b = s.find_last_not_of(" \t\r\n");
-            return Value::str(s.substr(a, b - a + 1));
-        }
+        if (name == "trim") return Value::str(trim_ascii_ws(s));
         // Byte offsets, not Unicode codepoints -- matching how the rest of
         // the runtime already treats strings (value.cpp's escape_json/
         // utf8_seq_len work byte-wise too). Correct for ASCII, and for
@@ -1040,7 +1021,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                 } else {
                     // crypto::random_bytes() returns "" on failure
                     // (/dev/urandom would not open, or a short read) --
-                    // to_hex("") is also "", which would make every
+                    // hex_encode("") is also "", which would make every
                     // remaining retry build the exact same candidate as the
                     // last one and fail deterministically on the same
                     // collision instead of actually trying a fresh name.
@@ -1053,7 +1034,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                         error = "save(): could not get random bytes for '" + base + "'";
                         return Value::null();
                     }
-                    candidate = stem + "-" + to_hex(suffix) + ext;
+                    candidate = stem + "-" + crypto::hex_encode(suffix) + ext;
                 }
                 fd = ::open((dir + candidate).c_str(),
                             O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
@@ -1185,7 +1166,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 43> kMembers = {{
+const std::array<MemberMap, 31> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -1199,24 +1180,12 @@ const std::array<MemberMap, 43> kMembers = {{
     {"error",   "code",    "__error_code"},
     {"error",   "message",  "__error_message"},
     {"error",   "messages", "__error_messages"},
-    {"sqlite",   "query", "__db_query"},
-    {"sqlite",   "exec",  "__db_exec"},
-    {"postgres", "query", "__db_query"},
-    {"postgres", "exec",  "__db_exec"},
-    {"mysql",    "query", "__db_query"},
-    {"mysql",    "exec",  "__db_exec"},
-    {"sqlite",   "begin",    "__db_begin"},
-    {"sqlite",   "commit",   "__db_commit"},
-    {"sqlite",   "rollback", "__db_rollback"},
-    {"sqlite",   "last_id",  "__db_last_id"},
-    {"postgres", "begin",    "__db_begin"},
-    {"postgres", "commit",   "__db_commit"},
-    {"postgres", "rollback", "__db_rollback"},
-    {"postgres", "last_id",  "__db_last_id"},
-    {"mysql",    "begin",    "__db_begin"},
-    {"mysql",    "commit",   "__db_commit"},
-    {"mysql",    "rollback", "__db_rollback"},
-    {"mysql",    "last_id",  "__db_last_id"},
+    {" db",      "query",    "__db_query"},
+    {" db",      "exec",     "__db_exec"},
+    {" db",      "begin",    "__db_begin"},
+    {" db",      "commit",   "__db_commit"},
+    {" db",      "rollback", "__db_rollback"},
+    {" db",      "last_id",  "__db_last_id"},
     {"request", "path",    "__req_path"},
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},
@@ -1232,13 +1201,17 @@ const std::array<MemberMap, 43> kMembers = {{
 }};
 } // namespace
 
+// " db" (not a valid identifier, so no script can name it) stands for every
+// database module: sqlite/postgres/mysql expose the same six operations.
 int member_native_id(const std::string& object, const std::string& member) {
+    const std::string obj = is_db_module(object) ? " db" : object;
     for (const auto& m : kMembers)
-        if (object == m.object && member == m.member) return native_id(m.native);
+        if (obj == m.object && member == m.member) return native_id(m.native);
     return -1;
 }
 
 bool is_reserved_object(const std::string& name) {
+    if (is_db_module(name)) return true;
     for (const auto& m : kMembers) if (name == m.object) return true;
     return false;
 }

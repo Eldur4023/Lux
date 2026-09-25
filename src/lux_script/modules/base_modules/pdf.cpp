@@ -30,39 +30,18 @@ struct PdfDoc {
                                    // save() and to_base64() are both just
                                    // different ways of handing this out.
     bool             finished = false;
+
+    PdfDoc() = default;
+    PdfDoc(const PdfDoc&) = delete;
+    PdfDoc& operator=(const PdfDoc&) = delete;
+    ~PdfDoc() {
+        if (cr) cairo_destroy(cr);
+        if (surface) cairo_surface_destroy(surface);
+    }
 };
 
-class HandleTable {
-public:
-    int put(std::unique_ptr<PdfDoc> d) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        int id = next_id_++;
-        docs_.emplace(id, std::move(d));
-        return id;
-    }
-    PdfDoc* get(int id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = docs_.find(id);
-        return it == docs_.end() ? nullptr : it->second.get();
-    }
-    bool close(int id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = docs_.find(id);
-        if (it == docs_.end()) return false;
-        if (it->second->cr) cairo_destroy(it->second->cr);
-        if (it->second->surface) cairo_surface_destroy(it->second->surface);
-        docs_.erase(it);
-        return true;
-    }
-
-private:
-    std::mutex                                     mutex_;
-    std::unordered_map<int, std::unique_ptr<PdfDoc>> docs_;
-    int                                              next_id_ = 1;
-};
-
-HandleTable& handles() {
-    static HandleTable h;
+HandleTable<PdfDoc>& handles() {
+    static HandleTable<PdfDoc> h;
     return h;
 }
 
@@ -92,8 +71,7 @@ Value fn_pdf_create(NativeCtx&, std::vector<Value>& args, std::string& error) {
                                                         args[0].as_float(), args[1].as_float());
     if (cairo_surface_status(doc->surface) != CAIRO_STATUS_SUCCESS) {
         error = "pdf.create(): failed to create the document";
-        cairo_surface_destroy(doc->surface);
-        return Value::null();
+        return Value::null();   // ~PdfDoc destroys the surface
     }
     doc->cr = cairo_create(doc->surface);
     return Value::integer(handles().put(std::move(doc)));

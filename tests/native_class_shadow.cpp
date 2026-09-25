@@ -31,6 +31,7 @@
 // native_gen_shadow.cpp hace para fib/cuenta_primos. Es la prueba de que el
 // C++ generado es correcto; la de que es ALCANZABLE llegara con la Fase 4.
 #include <lux_script/diagnostic.hpp>
+#include "parse_program.hpp"
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
 #include <lux_script/native_build.hpp>
@@ -202,12 +203,7 @@ static bool prueba_campos_y_metodo() {
     SourceFile    file;
     DiagnosticBag diag_parse;
     Program       prog;
-    file.path = "<prueba>";
-    file.text = src;
-    Lexer  lexer(file, diag_parse);
-    Parser parser(lexer.tokenize(), diag_parse);
-    parser.parse_into(prog);
-    if (!diag_parse.empty()) {
+    if (!parse_program(src, file, diag_parse, prog)) {
         std::printf("FALLA (campos): no parsea (%s)\n",
                    diag_parse.items().empty() ? "?" : diag_parse.items().front().message.c_str());
         return false;
@@ -271,12 +267,7 @@ static bool prueba_ctor_y_referencia() {
     SourceFile    file;
     DiagnosticBag diag_parse;
     Program       prog;
-    file.path = "<prueba>";
-    file.text = src;
-    Lexer  lexer(file, diag_parse);
-    Parser parser(lexer.tokenize(), diag_parse);
-    parser.parse_into(prog);
-    if (!diag_parse.empty()) {
+    if (!parse_program(src, file, diag_parse, prog)) {
         std::printf("FALLA (ctor/referencia): no parsea (%s)\n",
                    diag_parse.items().empty() ? "?" : diag_parse.items().front().message.c_str());
         return false;
@@ -339,12 +330,7 @@ static bool prueba_inalcanzable_no_rompe() {
     SourceFile    file;
     DiagnosticBag diag_parse;
     Program       prog;
-    file.path = "<prueba>";
-    file.text = src;
-    Lexer  lexer(file, diag_parse);
-    Parser parser(lexer.tokenize(), diag_parse);
-    parser.parse_into(prog);
-    if (!diag_parse.empty()) return false;
+    if (!parse_program(src, file, diag_parse, prog)) return false;
 
     FunctionSigs  fns;
     ClassSigs     classes;

@@ -12,72 +12,15 @@
 #
 #   tests/run_http.sh [path-to-binary]
 
-set -u
-
-LUX="${1:-$HOME/lux-build/lux}"
-case "$LUX" in /*) ;; *) LUX="$(cd "$(dirname "$LUX")" && pwd)/$(basename "$LUX")" ;; esac
-HERE="$(cd "$(dirname "$0")" && pwd)"
-TMP="$(mktemp -d)"
 PORT=${LUX_TEST_HTTP_PORT:-8840}
 ECHO_PORT=${LUX_TEST_HTTP_ECHO_PORT:-8899}
-SRV=""
-ECHO_SRV=""
+source "$(dirname "$0")/lib.sh"
 
-passed=0
-failed=0
-
-red()   { printf '\033[31m%s\033[0m\n' "$*"; }
-green() { printf '\033[32m%s\033[0m\n' "$*"; }
-grey()  { printf '\033[90m%s\033[0m\n' "$*"; }
-
-ok()   { passed=$((passed + 1)); printf '  ok    %s\n' "$1"; }
-fail() {
-    failed=$((failed + 1))
-    red "  FAIL $1"
-    printf '        expected: %s\n        got: %s\n' "$2" "$3"
-}
-
-stop_all() {
-    [ -n "$SRV" ] && kill -9 "$SRV" 2>/dev/null
-    [ -n "$ECHO_SRV" ] && kill -9 "$ECHO_SRV" 2>/dev/null
-    wait "$SRV" 2>/dev/null
-    wait "$ECHO_SRV" 2>/dev/null
-    SRV=""; ECHO_SRV=""
-}
-trap 'stop_all; rm -rf "$TMP"' EXIT
-
-if ! "$LUX" --check "$HERE/cases/http.lux" > "$TMP/check" 2>&1; then
-    # The exact wording project.cpp uses when a module's cmake option was
-    # off/its dependency was missing at build time (LUX_HTTP) -- NOT
-    # "...contains 'import'", which this message never does (found the hard
-    # way: that check, inherited from the older sqlite/postgres/mysql
-    # scripts, never actually skips, because it was never exercised against
-    # a real missing-module build until this suite's own first run).
-    if grep -q "module 'http' is not compiled into this binary" "$TMP/check"; then
-        grey "http: the binary was built without the module — suite skipped"
-        exit 77
-    fi
-    red "the test file does not compile:"; cat "$TMP/check"; exit 1
-fi
-
-check() {
-    local name="$1" method="$2" path="$3" want_code="$4" needle="${5:-}"
-    local got
-    got=$(curl -sS --max-time 10 -X "$method" -o "$TMP/body" -w '%{http_code}' \
-          "http://127.0.0.1:$PORT$path" 2>/dev/null)
-    local body; body=$(head -c 600 "$TMP/body" 2>/dev/null)
-    if [ "$got" != "$want_code" ]; then
-        fail "$name" "code $want_code" "code $got — $body"; return
-    fi
-    if [ -n "$needle" ] && ! grep -qF "$needle" "$TMP/body"; then
-        fail "$name" "to contain '$needle'" "$body"; return
-    fi
-    ok "$name"
-}
+skip_without_module http "$HERE/cases/http.lux"
 
 echo "== startup =="
 python3 "$HERE/http_echo_server.py" "$ECHO_PORT" > "$TMP/echo.log" 2>&1 &
-ECHO_SRV=$!
+EXTRA_PIDS=$!
 for _ in $(seq 1 30); do
     curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$ECHO_PORT/echo" 2>/dev/null && break
     sleep 0.2
@@ -87,15 +30,7 @@ curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$ECHO_PORT/echo" || {
 ok "echo server starts"
 
 cd "$HERE/.."
-"$LUX" --no-watch --port "$PORT" "$HERE/cases/http.lux" > "$TMP/srv.log" 2>&1 &
-SRV=$!
-for _ in $(seq 1 60); do
-    curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/get_basic" 2>/dev/null && break
-    kill -0 "$SRV" 2>/dev/null || { red "the server died on startup:"; cat "$TMP/srv.log"; exit 1; }
-    sleep 0.3
-done
-curl -s -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/get_basic" || {
-    red "the server did not answer"; cat "$TMP/srv.log"; exit 1; }
+start_server "$HERE/cases/http.lux" /get_basic || exit 1
 ok "lux server starts and connects"
 
 echo "== requests =="
@@ -126,10 +61,4 @@ check "'+' is not special on input"     GET /url_encode 200 '"plus_not_special":
 check "unreserved set passes through"   GET /url_encode 200 '"unreserved_untouched":"AZaz09-_.~"'
 check "a full query value round-trips"  GET /url_encode 200 '"full_query_value":"hello%20world%20%26%20more%20%3Dtest"'
 
-echo
-if [ "$failed" -eq 0 ]; then
-    green "$passed tests, all passing"
-    exit 0
-fi
-red "$passed passed, $failed failed"
-exit 1
+summary
