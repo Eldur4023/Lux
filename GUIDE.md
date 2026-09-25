@@ -1688,7 +1688,7 @@ picked by the token's `kid`) — so a provider's key set can be passed as fetche
 
 ```lux
 Json keys = (await http.get("https://www.googleapis.com/oauth2/v3/certs"))["body"]
-Json who = crypto.jwt_verify(id_token, keys, { "aud": env("GOOGLE_CLIENT_ID"), "iss": "https://accounts.google.com" })
+Json who = crypto.jwt_verify(id_token, keys, { "aud": os.getenv("GOOGLE_CLIENT_ID"), "iss": "https://accounts.google.com" })
 ```
 
 `jwt_verify` refuses `alg: none`, an algorithm that does not fit the key (the RS256→HS256
