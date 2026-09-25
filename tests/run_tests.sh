@@ -489,8 +489,6 @@ native_compiles "--native compiles the postgres suite" "$HERE/cases/postgres.lux
 native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"    16
 native_compiles "--native compiles module calls"      "$HERE/cases/modules.lux"  58
 native_compiles "--native survives its edge cases"    "$HERE/cases/native_edges.lux" 1
-native_compiles "--native compiles classes.lux"       "$HERE/cases/classes.lux"  7
-native_compiles "--native compiles language.lux"      "$HERE/cases/language.lux" 12
 native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  7
 native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 12
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
