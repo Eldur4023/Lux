@@ -26,3 +26,12 @@ group("/api"):
 
     get endpoint("/me"):
         return { "sub": jwt.claims["sub"] }
+
+post endpoint("/login", string user, string role):
+    session.user = user
+    session.role = role
+    return { "ok": true }
+
+post endpoint("/logout"):
+    session.clear()
+    return { "ok": true }

@@ -498,7 +498,8 @@ public:
     static bool llamada_reservada_generica(const IrExpr& e) {
         if (e.call_index < 0) return false;
         const std::string n = native_at(e.call_index).name;
-        return n.rfind("__req_", 0) == 0 || n.rfind("__log_", 0) == 0 || n.rfind("__state_", 0) == 0;
+        return n.rfind("__req_", 0) == 0 || n.rfind("__log_", 0) == 0 || n.rfind("__state_", 0) == 0 ||
+               n.rfind("__session_", 0) == 0 || n.rfind("__jwt_", 0) == 0;
     }
 
     // A synchronous builtin (range, float, query, header, cookie, form,
@@ -509,12 +510,17 @@ public:
         if (e.call_index < 0 || e.call_name == "render") return std::nullopt;
         const NativeDef& d = native_at(e.call_index);
         if (!d.fn || d.is_async) return std::nullopt;
+        const std::string n = d.name;
+        if (n.rfind("__session_", 0) == 0 || n.rfind("__jwt_", 0) == 0) usa_sesion_ = true;
         for (const auto& a : e.args)
             if (!a.value || !a.name.empty() || !es_valor_json(*a.value)) return std::nullopt;
         dinamicas_.insert(&e);
         return std::string(d.name) == "range" ? Type::list_of(Type::json()) : Type::json();
     }
     bool dinamica(const IrExpr& e) const { return dinamicas_.count(&e) > 0; }
+    // session.*/jwt.*: the route loads them (begin_auth) and writes the
+    // cookie back (end_auth), as bytecode does.
+    bool usa_sesion() const { return usa_sesion_; }
     // A VarDecl/Assign whose value is built with valor_json(): the local is a Value.
     bool en_value(const IrStmt& s) const { return en_value_.count(&s) > 0; }
 
@@ -706,7 +712,12 @@ private:
             // GetMember en el VM).
             case IrExprKind::Member: {
                 // request.path, a reserved object's member with no call.
-                if (!e.object) return !e.call_name.empty() && llamada_reservada_generica(e) ? nativa_dinamica(e) : std::nullopt;
+                if (!e.object && e.call_name.empty()) {   // session.x (__session_get)
+                    usa_sesion_ = true;
+                    dinamicas_.insert(&e);
+                    return Type::json();
+                }
+                if (!e.object) return llamada_reservada_generica(e) ? nativa_dinamica(e) : std::nullopt;
                 auto tobj = tipo_provable(*e.object);
                 if (!tobj) return std::nullopt;
                 // row.name on a Value: Op::GetMember (lux_json_member).
@@ -1393,7 +1404,11 @@ public:
                     auto tval = tipo_provable(*s.value);
                     return tval && *tval == *campo_tipo;
                 }
-                return false; // Session: fuera de esta fase (requiere una ruta)
+                // session.x = v (__session_set)
+                if (!es_valor_json(*s.value)) return false;
+                usa_sesion_ = true;
+                en_value_.insert(&s);
+                return true;
             }
 
             case IrStmtKind::If:
@@ -1476,6 +1491,7 @@ private:
     int                              n_params_ = 0;
     mutable std::optional<int>       promocion_;
     mutable bool                     retorno_dinamico_ = false;
+    mutable bool                     usa_sesion_ = false;
     std::set<const IrStmt*>          for_dinamicos_;
     std::string                      motivo_;
 };
@@ -1621,6 +1637,9 @@ public:
             // generacion -- Comprobador::tipo_provable() ya demostro que
             // `o` es de una clase que de verdad tiene ese campo.
             case IrExprKind::Member:
+                if (!e.object && e.call_name.empty())
+                    return "lux_dyn_global(l_ctx, " + std::to_string(native_id("__session_get")) + ", LuxL{}.add(Value::str(" +
+                           literal_string(e.text) + ")).items())";
                 if (!e.object) return "lux_dyn_global(" + std::string(con_ctx() ? "l_ctx" : "lux_ctx()") + ", " +
                                       std::to_string(e.call_index) + ", Value::List{})";
                 if (comprobador_.dinamica(e))
@@ -2120,6 +2139,9 @@ public:
             }
 
             case IrStmtKind::Assign: {
+                if (s.assign_target == IrAssignTarget::Session)
+                    return "lux_dyn_global(l_ctx, " + std::to_string(native_id("__session_set")) + ", LuxL{}.add(Value::str(" +
+                           literal_string(s.assign_field) + ")).add(" + valor_json(*s.value) + ").items());";
                 if (comprobador_.en_value(s) && s.assign_target == IrAssignTarget::Index)
                     return "lux_json_set_index(" + expr(*s.assign_object) + ", " + valor_json(*s.assign_index) +
                            ", " + valor_json(*s.value) + ");";
@@ -2338,10 +2360,12 @@ public:
     bool con_ctx() const { return ruta_ || asincrona_; }
 
     std::string ret_vacio() const {
-        if (!asincrona_) return "return;";
+        const std::string auth = ruta_ && comprobador_.usa_sesion()
+                                     ? "lux_script::end_auth(*g_lux_auth, l_session, res); " : "";
+        if (!asincrona_) return auth + "return;";
         if (comprobador_.usa_transaccion())
-            return "co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop); co_return;";
-        return "co_return;";
+            return auth + "co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop); co_return;";
+        return auth + "co_return;";
     }
 
 private:
@@ -2505,6 +2529,8 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
         return no(cp->motivo());
     }
     const Comprobador& comprobador = *cp;
+    // Only a route loads the session and the JWT claims (begin_auth).
+    if (comprobador.usa_sesion()) return no("session/jwt outside a route");
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
@@ -2640,7 +2666,7 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     // funcion nativa, nunca con `co_await`, asi que suspenderse a mitad no
     // tiene a quien avisar). Rechazar aqui dejala en bytecode entera, igual
     // que cualquier otra pieza fuera de alcance.
-    if (comprobador.usa_await()) return std::nullopt;
+    if (comprobador.usa_await() || comprobador.usa_sesion()) return std::nullopt;
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
@@ -2995,6 +3021,9 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // limpiarse.
     cuerpo += "    lux_script::last_validation_messages().clear();\n";
     cuerpo += "    lux_script::NativeCtx l_ctx = lux_route_ctx(req, res);\n";
+    if (comprobador.usa_sesion())
+        cuerpo += "    lux_script::SessionState l_session;\n    Value l_claims;\n"
+                  "    lux_script::begin_auth(*g_lux_auth, req, l_session, l_claims, l_ctx);\n";
     // Parsed at most once per request, only if some query-style parameter
     // below actually needs it (req.form() itself is cheap when the
     // content-type is not application/x-www-form-urlencoded -- it returns
@@ -3122,6 +3151,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // mismo cierre de transaccion que cualquier otra salida.
     if (asincrona && comprobador.usa_transaccion())
         cuerpo += "    co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop);\n";
+    if (comprobador.usa_sesion()) cuerpo += "    lux_script::end_auth(*g_lux_auth, l_session, res);\n";
     cuerpo += "    if (!lux_answered(res, l_ctx)) res.status(204).send(\"\");\n";
     cuerpo += "    } catch (const LuxNativeError&) {\n";
     cuerpo += "        Value::Dict __e;\n";
@@ -3568,9 +3598,11 @@ std::string route_runtime_prelude() {
         // route builds: a map(f) callback or a render() needs them.
         "static decltype(lux_script::NativeCtx::functions) g_lux_functions = nullptr;\n"
         "static decltype(lux_script::NativeCtx::templates) g_lux_templates = nullptr;\n"
-        "extern \"C\" void lux_native_bind(const void* f, const void* t) {\n"
+        "static const lux_script::AuthConfig* g_lux_auth = nullptr;\n"
+        "extern \"C\" void lux_native_bind(const void* f, const void* t, const void* a) {\n"
         "    g_lux_functions = static_cast<decltype(g_lux_functions)>(f);\n"
         "    g_lux_templates = static_cast<decltype(g_lux_templates)>(t);\n"
+        "    g_lux_auth = static_cast<const lux_script::AuthConfig*>(a);\n"
         "}\n"
         "inline lux_script::NativeCtx lux_route_ctx(lux::Request& req, lux::Response& res) {\n"
         "    lux_script::NativeCtx c{req, res};\n"

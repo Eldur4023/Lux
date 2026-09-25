@@ -77,7 +77,7 @@ public:
 
     // Hands the module's function and template tables to the generated
     // code, for the NativeCtx its routes build (map(f), render(...)).
-    using BindFn = void (*)(const void* functions, const void* templates);
+    using BindFn = void (*)(const void* functions, const void* templates, const void* auth);
     BindFn bind = nullptr;
 
     size_t compiled() const;

@@ -261,6 +261,26 @@ check "protected area"      GET /admin/panel      403
 check "forged cookie"  GET /whoami           200 '"user":null'
 check "jwt missing"         GET /api/me           401
 check "invalid jwt"        GET /api/me           401
+# A session written, read back and cleared through the cookie, and a valid
+# token: the round trips, not only the refusals.
+jar="$TMP/jar"
+curl -sS -c "$jar" -X POST "http://127.0.0.1:$PORT/login?user=ana&role=admin" > /dev/null
+got=$(curl -sS -b "$jar" "http://127.0.0.1:$PORT/whoami")
+case "$got" in *'"user":"ana","role":"admin"'*) ok "session written and read back" ;; *) fail "session written and read back" 'user ana' "$got" ;; esac
+code=$(curl -sS -b "$jar" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/admin/panel")
+[ "$code" = 200 ] && ok "a session opens the protected area" || fail "a session opens the protected area" 200 "$code"
+curl -sS -b "$jar" -c "$jar" -X POST "http://127.0.0.1:$PORT/logout" > /dev/null
+got=$(curl -sS -b "$jar" "http://127.0.0.1:$PORT/whoami")
+case "$got" in *'"user":null'*) ok "session.clear() logs out" ;; *) fail "session.clear() logs out" 'user null' "$got" ;; esac
+token=$(python3 -c "
+import hmac, hashlib, base64, json, time
+b = lambda d: base64.urlsafe_b64encode(d).rstrip(b'=').decode()
+h = b(json.dumps({'alg': 'HS256', 'typ': 'JWT'}).encode())
+p = b(json.dumps({'sub': 'u42', 'iss': 'tests', 'exp': int(time.time()) + 600}).encode())
+sig = hmac.new(b'test-jwt-secret-long-enough-for-hmac-signing', (h + '.' + p).encode(), hashlib.sha256).digest()
+print(h + '.' + p + '.' + b(sig))")
+got=$(curl -sS -H "Authorization: Bearer $token" "http://127.0.0.1:$PORT/api/me")
+case "$got" in *'"sub":"u42"'*) ok "a valid jwt" ;; *) fail "a valid jwt" 'sub u42' "$got" ;; esac
 
 echo "== database =="
 rm -f "$HERE/cases/tests-suite.db"*

@@ -11,6 +11,7 @@
 #include "ast.hpp"
 #include "emitter.hpp"
 #include "native_build.hpp"
+#include "auth.hpp"
 #include "template.hpp"
 #include "diagnostic.hpp"
 
@@ -72,6 +73,7 @@ struct Module {
     };
     std::vector<RouteReport> route_report;
     NativeReport native_why;   // why --native left a route or function on bytecode
+    AuthConfig   auth;         // session/JWT settings; native routes read them through bind
 
     // mtimes of the compiled files, to detect changes.
     std::vector<std::pair<std::filesystem::path,

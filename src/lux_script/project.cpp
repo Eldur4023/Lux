@@ -2266,17 +2266,17 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         if (native && diags.empty())
             mod->native = compile_native(mod->program, fns, sigs, ".lux-native",
                                           mod->native_warning, &mod->native_why, &mod->functions, &enums);
-        if (mod->native && mod->native->bind) mod->native->bind(&mod->functions, &mod->templates);
 
         ClassTable classes;
         build_classes(mod->program, fns, sigs, enums, &mod->program.imports, classes, diags);
 
-        AuthConfig auth;
+        AuthConfig& auth = mod->auth;
         auth.session_secret  = mod->program.app.session_secret;
         auth.session_max_age = mod->program.app.session_max_age;
         auth.session_secure  = mod->program.app.session_secure;
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
+        if (mod->native && mod->native->bind) mod->native->bind(&mod->functions, &mod->templates, &mod->auth);
 
         if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, enums, diags);
         if (diags.empty()) build_error_handlers(*mod, fns, sigs, enums, diags);
