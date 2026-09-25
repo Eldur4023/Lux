@@ -86,8 +86,8 @@ private:
 // biblioteca compartida las funciones de `prog` (sueltas, y metodos/
 // constructores de `clases`) que native_gen.cpp sabe representar.
 // `cache_dir` es donde queda el .cpp/.so generados (se crea si hace falta)
-// -- hoy siempre se regenera; el cacheado por hash de fuentes que describe
-// la seccion 11 del documento queda para cuando de verdad haga falta.
+// -- g++ only runs when native.key (hash of the source, the command and the
+// linked libraries) no longer matches; otherwise the existing .so is reused.
 //
 // Esto NUNCA tumba la compilacion del modulo -- a diferencia del resto del
 // compilador, un fallo aqui (falta `g++`, un error de enlazado, dlopen sin

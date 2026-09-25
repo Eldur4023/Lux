@@ -2,11 +2,11 @@
 
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
-#include <sys/timerfd.h>
 #include <unistd.h>
 #include <stdexcept>
 #include <cstring>
 #include <cerrno>
+#include <climits>
 #include <iostream>
 
 namespace lux::core {
@@ -85,7 +85,7 @@ void EpollLoop::run() {
         // We process tasks before waiting to handle anything posted before the loop
         process_tasks();
         
-        int n = epoll_wait(epoll_fd_, events, kMaxEvents, -1);
+        int n = epoll_wait(epoll_fd_, events, kMaxEvents, next_timeout_ms());
         if (n < 0) {
             if (errno == EINTR) continue;
             std::cerr << "epoll_wait: " << strerror(errno) << '\n';
@@ -110,39 +110,46 @@ void EpollLoop::run() {
             Callback cb = it->second;
             cb(events[i].events);
         }
+        run_timers();
     }
 }
 
+// Returns a timer id (> 0, never an fd). Loop thread only, like add().
 int EpollLoop::schedule_timer(int ms, std::function<void()> cb) {
-    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
-    if (tfd < 0) {
-        post(std::move(cb));
-        return -1;
-    }
+    do next_timer_id_ = next_timer_id_ == INT_MAX ? 1 : next_timer_id_ + 1;
+    while (timer_deadline_.count(next_timer_id_));
 
-    struct itimerspec ts{};
-    if (ms > 0) {
-        ts.it_value.tv_sec  = ms / 1000;
-        ts.it_value.tv_nsec = static_cast<long>(ms % 1000) * 1'000'000L;
-    } else {
-        ts.it_value.tv_nsec = 1;
-    }
-    timerfd_settime(tfd, 0, &ts, nullptr);
-
-    add(tfd, EPOLLIN, [this, tfd, cb = std::move(cb)](uint32_t) mutable {
-        uint64_t val;
-        (void)::read(tfd, &val, sizeof(val));
-        remove(tfd);
-        ::close(tfd);
-        cb();
-    });
-    return tfd;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(ms > 0 ? ms : 0);
+    timers_.emplace(std::pair{deadline, next_timer_id_}, std::move(cb));
+    timer_deadline_.emplace(next_timer_id_, deadline);
+    return next_timer_id_;
 }
 
-void EpollLoop::cancel_timer(int tfd) {
-    if (tfd < 0) return;
-    remove(tfd);
-    ::close(tfd);
+void EpollLoop::cancel_timer(int id) {
+    auto it = timer_deadline_.find(id);
+    if (it == timer_deadline_.end()) return; // already fired or cancelled
+    timers_.erase({it->second, id});
+    timer_deadline_.erase(it);
+}
+
+// Fires every expired timer. Each is unlinked before its callback runs, so
+// the callback may schedule or cancel timers (itself included) freely.
+void EpollLoop::run_timers() {
+    const auto now = Clock::now();
+    while (!timers_.empty() && timers_.begin()->first.first <= now) {
+        auto node = timers_.extract(timers_.begin());
+        timer_deadline_.erase(node.key().second);
+        node.mapped()();
+    }
+}
+
+// epoll_wait timeout: -1 with no timers, else ms to the nearest one, rounded
+// up so the loop doesn't wake a hair early and spin.
+int EpollLoop::next_timeout_ms() const {
+    if (timers_.empty()) return -1;
+    const auto left = timers_.begin()->first.first - Clock::now();
+    if (left <= Clock::duration::zero()) return 0;
+    return static_cast<int>(std::chrono::ceil<std::chrono::milliseconds>(left).count());
 }
 
 void EpollLoop::stop() {

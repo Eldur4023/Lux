@@ -86,7 +86,7 @@ check "the driver returns the 5 bytes" GET /null_in_text 200 '"bytes":5'
 json_valid "and the JSON stays valid" /null_in_text
 
 echo "== params =="
-check "echo of params"  GET '/echo?n=42&s=abc' 200 '"integer"'
+check "echo of params"  GET '/echo?n=42&s=abc' 200 '"int_col"'
 check "unicode in the bind" GET /unicode          200 'unicode'
 
 echo "== injection =="

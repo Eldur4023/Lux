@@ -4,6 +4,7 @@
 #include <utility>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <iostream>
 #include <lux/core/event_loop.hpp>
 #include "cancel.hpp"
@@ -181,6 +182,66 @@ struct Task<void> {
         if (handle.promise().exception) std::rethrow_exception(handle.promise().exception);
     }
 };
+
+// ─── when_both ───────────────────────────────────────────────────────────────
+//
+// `co_await when_both(a, b)` starts both tasks before waiting for either and
+// yields {result_a, result_b}: two independent queries cost the slower of the
+// two instead of the sum. Single-threaded by design -- completions resume on
+// the event loop -- so the countdown needs no atomics.
+//
+// The count starts at 3, not 2: either task may finish synchronously inside
+// await_suspend (an inline sqlite read does), and the last to finish resumes
+// the waiter. Holding a third share until both are launched keeps that
+// resume from happening while await_suspend is still on the stack.
+template <typename T>
+class WhenBoth {
+public:
+    WhenBoth(Task<T> a, Task<T> b) : a_(std::move(a)), b_(std::move(b)) {}
+
+    bool await_ready() const noexcept { return false; }
+
+    bool await_suspend(std::coroutine_handle<> outer) {
+        outer_ = outer;
+        ha_.emplace(run(a_, ra_, ea_));
+        hb_.emplace(run(b_, rb_, eb_));
+        ha_->handle.resume();
+        hb_->handle.resume();
+        return --left_ != 0;   // both already done: carry on without suspending
+    }
+
+    std::pair<T, T> await_resume() {
+        if (ea_) std::rethrow_exception(ea_);
+        if (eb_) std::rethrow_exception(eb_);
+        return {std::move(ra_), std::move(rb_)};
+    }
+
+private:
+    // Hands control back to the waiter from inside a runner, which stays
+    // suspended here until ~WhenBoth destroys its frame.
+    struct ResumeWaiter {
+        std::coroutine_handle<> h;
+        bool await_ready() const noexcept { return false; }
+        std::coroutine_handle<> await_suspend(std::coroutine_handle<>) noexcept { return h; }
+        void await_resume() const noexcept {}
+    };
+
+    Task<void> run(Task<T>& t, T& out, std::exception_ptr& err) {
+        try { out = co_await t; }
+        catch (...) { err = std::current_exception(); }
+        if (--left_ == 0) co_await ResumeWaiter{outer_};
+    }
+
+    Task<T>                 a_, b_;
+    T                       ra_{}, rb_{};
+    std::exception_ptr      ea_, eb_;
+    std::optional<Task<void>> ha_, hb_;
+    std::coroutine_handle<> outer_;
+    int                     left_ = 3;
+};
+
+template <typename T>
+WhenBoth<T> when_both(Task<T> a, Task<T> b) { return WhenBoth<T>(std::move(a), std::move(b)); }
 
 // ─── SleepAwaitable ──────────────────────────────────────────────────────────
 // Non-blocking sleep: suspends the coroutine and resumes it after `ms`

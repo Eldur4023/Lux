@@ -4,7 +4,9 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <unordered_map>
 
 namespace lux_script {
 
@@ -199,8 +201,21 @@ public:
             if (!pass.empty()) conninfo_ += " password=" + pass;
         }
 
+        // Named prepared statements save the server a parse and a plan per
+        // query. PgBouncer in transaction mode (before 1.21) cannot follow
+        // them across backends: `statement_cache false` goes back to one
+        // unnamed statement per query.
+        auto sc = options.find("statement_cache");
+        if (sc != options.end()) {
+            if (sc->second != "true" && sc->second != "false") {
+                error = "postgres: 'statement_cache' must be true or false";
+                return false;
+            }
+            statement_cache_ = sc->second == "true";
+        }
+
         if (!read_pool(options, error)) return false;
-        conns_.assign(pool_size(), nullptr);
+        conns_ = std::vector<Conn>(pool_size());
         return true;
     }
 
@@ -208,12 +223,18 @@ public:
         if (worker >= conns_.size()) { error = "postgres: worker out of range"; return false; }
 
         // A dropped connection reopens itself on the next query, without the
-        // .lux having to know.
-        if (conns_[worker] && PQstatus(conns_[worker]) != CONNECTION_OK) {
-            PQfinish(conns_[worker]);
-            conns_[worker] = nullptr;
+        // .lux having to know. PQstatus() only learns of a drop from a failed
+        // query, so the socket is peeked first (see peek_socket in db.hpp);
+        // pending bytes -- postgres sends an error before closing a
+        // terminated backend -- get a real check with an empty query.
+        Conn& k = conns_[worker];
+        if (k.db && PQstatus(k.db) == CONNECTION_OK) {
+            const SocketState st = peek_socket(PQsocket(k.db));
+            if (st == SocketState::Dead) drop(worker);
+            else if (st == SocketState::Unknown) PQclear(PQexec(k.db, ""));
         }
-        if (conns_[worker]) return true;
+        if (k.db && PQstatus(k.db) != CONNECTION_OK) drop(worker);
+        if (k.db) return true;
 
         PGconn* c = PQconnectdb(conninfo_.c_str());
         if (!c || PQstatus(c) != CONNECTION_OK) {
@@ -222,7 +243,7 @@ public:
             if (c) PQfinish(c);
             return false;
         }
-        conns_[worker] = c;
+        k.db = c;
         return true;
     }
 
@@ -261,19 +282,71 @@ public:
     }
 
     ~PostgresDriver() override {
-        for (auto* c : conns_) if (c) PQfinish(c);
+        for (size_t w = 0; w < conns_.size(); ++w) drop(w);
     }
 
 private:
-    std::string          conninfo_;
-    std::vector<PGconn*> conns_;
+    // One per worker. `stmts` maps the translated SQL to the name of its
+    // server-side prepared statement on THIS connection.
+    struct Conn {
+        PGconn*                                      db = nullptr;
+        std::unordered_map<std::string, std::string> stmts;
+        unsigned                                     next_id = 0;
+    };
+    static constexpr size_t kMaxCachedStatements = 128;
+
+    std::string       conninfo_;
+    std::vector<Conn> conns_;
+    bool              statement_cache_ = true;
+
+    void drop(size_t worker) {
+        Conn& k = conns_[worker];
+        if (k.db) PQfinish(k.db);
+        k.db = nullptr;
+        k.stmts.clear();   // prepared statements die with their connection
+    }
+
+    // Named statement for `sql` on this connection, preparing it on first
+    // use. Empty when caching is off or full: the caller then sends an
+    // unnamed one, as before.
+    std::string prepared(size_t worker, const std::string& sql, int nargs, std::string& error,
+                         bool& failed) {
+        failed = false;
+        Conn& k = conns_[worker];
+        if (!statement_cache_) return {};
+        auto it = k.stmts.find(sql);
+        if (it != k.stmts.end()) return it->second;
+        if (k.stmts.size() >= kMaxCachedStatements) return {};
+
+        std::string name = "lux_" + std::to_string(++k.next_id);
+        PGresult* r = PQprepare(k.db, name.c_str(), sql.c_str(), nargs, nullptr);
+        if (!r || PQresultStatus(r) != PGRES_COMMAND_OK) {
+            error = std::string("postgres: ") + (r ? PQresultErrorMessage(r) : PQerrorMessage(k.db));
+            if (r) PQclear(r);
+            failed = true;
+            return {};
+        }
+        PQclear(r);
+        k.stmts.emplace(sql, name);
+        return name;
+    }
+
+    // SQLSTATEs that mean a cached statement is unusable: 26000 it no longer
+    // exists (DEALLOCATE ALL, a pooler switched backend), 0A000 "cached plan
+    // must not change result type" after an ALTER TABLE. Re-running is safe:
+    // a failed statement is rolled back whole, and inside an explicit
+    // transaction the retry just fails with the transaction already aborted.
+    static bool stale_statement(const PGresult* r) {
+        const char* st = r ? PQresultErrorField(r, PG_DIAG_SQLSTATE) : nullptr;
+        return st && (std::strcmp(st, "26000") == 0 || std::strcmp(st, "0A000") == 0);
+    }
 
     // The parameters go through PQexecParams, never concatenated: that is what
     // makes SQL injection impossible from Lux Script.  They are sent as text
     // and the server converts them to the column type.
     PGresult* run(size_t worker, const std::string& sql, const std::vector<Value>& args,
                   std::string& error) {
-        PGconn* c = conns_[worker];
+        PGconn* c = conns_[worker].db;
 
         std::string sql_pg;
         if (!traducir_marcadores(sql, args.size(), sql_pg, error)) return nullptr;
@@ -290,12 +363,28 @@ private:
         // No pointer fix-up needed: `store` was reserved up front, so it never
         // reallocates and every c_str() taken above stays valid.
 
-        PGresult* res = PQexecParams(c, sql_pg.c_str(), static_cast<int>(args.size()),
-                                     nullptr, ptrs.data(), nullptr, nullptr, 0);
+        const int nargs = static_cast<int>(args.size());
+        PGresult* res   = nullptr;
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            bool failed = false;
+            const std::string name = prepared(worker, sql_pg, nargs, error, failed);
+            if (failed) return nullptr;
+            res = name.empty()
+                ? PQexecParams(c, sql_pg.c_str(), nargs, nullptr, ptrs.data(), nullptr, nullptr, 0)
+                : PQexecPrepared(c, name.c_str(), nargs, ptrs.data(), nullptr, nullptr, 0);
+            if (name.empty() || !stale_statement(res) || attempt == 1) break;
+            conns_[worker].stmts.erase(sql_pg);   // re-prepare once; it never ran
+            PQclear(res);
+            res = nullptr;
+        }
         auto status = res ? PQresultStatus(res) : PGRES_FATAL_ERROR;
         if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
             error = std::string("postgres: ") +
                     (res ? PQresultErrorMessage(res) : PQerrorMessage(c));
+            const char* st = res ? PQresultErrorField(res, PG_DIAG_SQLSTATE) : nullptr;
+            if (st && std::strcmp(st, "26000") == 0)
+                error += " (behind PgBouncer in transaction mode? set `statement_cache false` "
+                         "in the postgres: block)";
             if (res) PQclear(res);
             return nullptr;
         }

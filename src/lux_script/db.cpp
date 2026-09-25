@@ -1,6 +1,9 @@
 #include <lux_script/db.hpp>
 #include <lux/logger.hpp>
 
+#include <sys/socket.h>
+#include <cerrno>
+
 namespace lux_script {
 
 // ─── DbPool ──────────────────────────────────────────────────────────────────
@@ -153,6 +156,17 @@ void DbRegistry::shutdown() {
 
 // ─── Bridge shared by bytecode and --native ──────────────────────────────────
 
+SocketState peek_socket(int fd) {
+    if (fd < 0) return SocketState::Dead;
+    char c;
+    const ssize_t n = ::recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (n == 0) return SocketState::Dead;                 // orderly close
+    if (n > 0)  return SocketState::Unknown;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return SocketState::Alive;
+    if (errno == EINTR) return SocketState::Unknown;
+    return SocketState::Dead;                             // reset and friends
+}
+
 Value db_error(const std::string& msg) {
     Value::Dict d;
     d["error"] = Value::str(msg);
@@ -201,6 +215,18 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
     // common cleanup block -- for that it is enough to run the right
     // statement here and let the rest of the code (which already treats
     // Commit and Rollback the same for pinned_workers) stay unchanged.
+    // A read outside a transaction may be served right here, with no thread
+    // handoff at all -- see DbDriver::query_inline.
+    if (op == DbOp::Query && pin < 0) {
+        Value       rows;
+        std::string err;
+        switch (driver->query_inline(sql, params, rows, err)) {
+            case DbDriver::Inline::Done:       co_return rows;
+            case DbDriver::Inline::Failed:     co_return db_error(err);
+            case DbDriver::Inline::NotHandled: break;
+        }
+    }
+
     const bool aborting_commit = (op == DbOp::Commit) && in_tx && poisoned.count(module);
     const DbOp stmt_op         = aborting_commit ? DbOp::Rollback : op;
 

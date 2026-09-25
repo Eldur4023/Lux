@@ -35,11 +35,12 @@ stop_server() { kill_wait $SRV; SRV=""; }
 trap 'kill_wait $SRV $EXTRA_PIDS; rm -rf "$TMP"' EXIT
 
 # start_server <file.lux> [ping-path]: starts it on $PORT and waits for it to
-# answer. Each suite uses its own port: with SO_REUSEPORT two processes
+# answer. LUX_TEST_FLAGS (e.g. --native) is passed through to every server.
+# Each suite uses its own port: with SO_REUSEPORT two processes
 # share a port and the kernel splits connections between them.
 start_server() {
     stop_server
-    "$LUX" --no-watch --port "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
+    "$LUX" --no-watch ${LUX_TEST_FLAGS:-} --port "$PORT" "$1" > "$TMP/srv.log" 2>&1 &
     SRV=$!
     for _ in $(seq 1 60); do
         curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PORT${2:-/__ping__}" 2>/dev/null && return 0

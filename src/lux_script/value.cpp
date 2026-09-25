@@ -244,11 +244,11 @@ void write_double(double d, std::string& out) {
     char buf[32];
     auto r = std::to_chars(buf, buf + sizeof(buf), d);
     if (r.ec != std::errc{}) { out += "0"; return; }
-    std::string t(buf, r.ptr);
+    out.append(buf, r.ptr);
     // A whole double comes out as "3"; JSON would read that as an integer, so
     // it gets the ".0" just as nlohmann did.
-    if (t.find_first_of(".eE") == std::string::npos) t += ".0";
-    out += t;
+    if (std::string_view(buf, r.ptr - buf).find_first_of(".eE") == std::string_view::npos)
+        out += ".0";
 }
 
 } // namespace
@@ -257,7 +257,11 @@ void Value::write_json(std::string& out) const {
     switch (type_) {
         case Type::Null:  out += "null";                   return;
         case Type::Bool:  out += b_ ? "true" : "false";    return;
-        case Type::Int:   out += std::to_string(i_);       return;
+        case Type::Int: {
+            char buf[24];
+            out.append(buf, std::to_chars(buf, buf + sizeof(buf), i_).ptr);
+            return;
+        }
         case Type::Float: write_double(d_, out);        return;
         case Type::Str:   escape_json(as_str(), out);          return;
         case Type::List: {

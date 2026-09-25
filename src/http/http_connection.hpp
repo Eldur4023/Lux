@@ -100,6 +100,12 @@ private:
     int header_tfd_  = -1;
     int timeout_tfd_ = -1;
 
+    // Peer address, resolved on the first request: it cannot change for the
+    // life of the socket, and keep-alive would otherwise pay getpeername +
+    // inet_ntop on every request.
+    std::string peer_ip_;
+    bool        peer_ip_done_ = false;
+
     // ── sendfile state ────────────────────────────────────────────────────────
     // When serving static files, we skip the read-into-buffer step and stream
     // directly from the file descriptor to the socket.  The connection sends

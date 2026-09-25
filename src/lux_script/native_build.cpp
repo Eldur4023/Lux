@@ -368,7 +368,30 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // con `await`, ver el comentario de LUX_NATIVE_LIB en CMakeLists.txt).
     if (con_rutas) cmd << " " << std::quoted(std::string(LUX_NATIVE_LIB));
     cmd << " 2> " << std::quoted(err_path.string());
-    if (std::system(cmd.str().c_str()) != 0) {
+
+    // Build cache: g++ takes seconds, and the same program generates the
+    // same .cpp every start. The key covers the source, the exact command
+    // (compiler, flags, paths) and the identity of what the .so links
+    // against or is loaded into -- rebuilding lux changes those mtimes and
+    // forces a recompile. The key is written only after g++ succeeds.
+    const std::filesystem::path key_path = cache_dir / "native.key";
+    std::string clave = codigo + '\0' + cmd.str();
+    for (const char* dep : {LUX_NATIVE_SCRIPT_LIB, LUX_NATIVE_LIB, "/proc/self/exe"}) {
+        std::error_code e1, e2;
+        const auto p = std::filesystem::canonical(dep, e1);
+        clave += '\0' + std::to_string(e1 ? 0 : std::filesystem::file_size(p, e2)) + ':' +
+                 std::to_string(e1 ? 0 : std::filesystem::last_write_time(p, e2).time_since_epoch().count());
+    }
+    const std::string clave_hash = std::to_string(std::hash<std::string>{}(clave));
+    std::string clave_previa;
+    {
+        std::ifstream kin(key_path);
+        std::getline(kin, clave_previa);
+    }
+    const bool en_cache = clave_previa == clave_hash && std::filesystem::exists(so_path, ec);
+
+    std::filesystem::remove(key_path, ec); // stale until this compile succeeds
+    if (!en_cache && std::system(cmd.str().c_str()) != 0) {
         std::ifstream errf(err_path);
         std::ostringstream errs;
         errs << errf.rdbuf();
@@ -377,6 +400,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                 " function(s)/route(s) could not be compiled (g++ failed): " + errs.str();
         return nullptr;
     }
+    std::ofstream(key_path, std::ios::trunc) << clave_hash << '\n';
 
     void* handle = dlopen(so_path.c_str(), RTLD_NOW);
     if (!handle) {

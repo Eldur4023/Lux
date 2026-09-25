@@ -333,7 +333,25 @@ public:
     // operacion bien definida (a diferencia de "leer una clave que puede
     // faltar", que sigue fuera: vease el comentario de tipo_soportado), asi
     // que no reabre esa ambiguedad.
+    static bool contiene_await(const IrExpr& e) {
+        if (e.kind == IrExprKind::Await) return true;
+        for (const IrExpr* c : {e.object.get(), e.lhs.get(), e.rhs.get()})
+            if (c && contiene_await(*c)) return true;
+        for (const auto& a : e.args)    if (a.value && contiene_await(*a.value)) return true;
+        for (const auto& i : e.items)   if (i && contiene_await(*i)) return true;
+        for (const auto& d : e.entries)
+            if ((d.key && contiene_await(*d.key)) || (d.value && contiene_await(*d.value)))
+                return true;
+        return false;
+    }
+
     bool es_valor_json(const IrExpr& e) const {
+        // A Dict/List literal is generated as an immediately-invoked lambda
+        // (Generador::valor_json), and a lambda cannot co_await: `{"id":
+        // await db.last_id()}` failed g++ and took the whole module down to
+        // bytecode. Rejected here, only that route stays on bytecode.
+        if ((e.kind == IrExprKind::DictLit || e.kind == IrExprKind::ListLit) && contiene_await(e))
+            return false;
         if (e.kind == IrExprKind::DictLit) {
             if (e.entries.empty()) return false;
             for (const auto& entry : e.entries) {
@@ -1448,8 +1466,16 @@ public:
                 // tipo expone (string: std::string::size(); List<T>: LList
                 // no tiene .size(), su metodo es lux_len() -- ver
                 // list_runtime_prelude), no a una sola llamada generica.
-                if (e.call_shape == IrCallShape::BuiltinGlobalCall && e.call_name == "str")
+                if (e.call_shape == IrCallShape::BuiltinGlobalCall && e.call_name == "str") {
+                    // int/string skip the Value round trip: Value::to_string()
+                    // is exactly std::to_string / a copy for those two.
+                    auto t = comprobador_.tipo_provable(*e.args[0].value);
+                    if (t && t->kind() == Type::Kind::Int)
+                        return "std::to_string(" + expr(*e.args[0].value) + ")";
+                    if (t && t->kind() == Type::Kind::String)
+                        return "std::string(" + expr(*e.args[0].value) + ")";
                     return valor_json(*e.args[0].value) + ".to_string()";
+                }
                 if (e.call_shape == IrCallShape::BuiltinGlobalCall && e.call_name == "len") {
                     auto t = comprobador_.tipo_provable(*e.args[0].value);
                     // Json (Fase 5.5): puede ser string/List/Dict en tiempo
@@ -1572,8 +1598,8 @@ public:
                     // token belonging to some unrelated -- possibly already
                     // closed -- connection instead of its own. See the
                     // comment on lux::sleep(ms, loop, token) in task.hpp.
-                    return "co_await lux::sleep(lux_clamp_sleep_ms(" +
-                           expr(*e.lhs->args[0].value) + "), req.loop, req.cancel_token)";
+                    return "(co_await lux::sleep(lux_clamp_sleep_ms(" +
+                           expr(*e.lhs->args[0].value) + "), req.loop, req.cancel_token))";
                 // await <modulo>.query/exec/last_id(...) (Fase 5.5): mismo
                 // camino que bytecode (lux_script::await_db(), ver
                 // db.hpp) -- l_pinned_workers/l_last_exec_workers son las
@@ -1592,39 +1618,95 @@ public:
                 // el mismo vector, construido por una llamada de funcion
                 // normal en su lugar -- eso SI compila limpio, confirmado
                 // con el mismo reproductor.
-                {
-                    const IrExpr& call = *e.lhs;
-                    const std::string dbop = call.call_index == db_query_id()    ? "Query"
-                                            : call.call_index == db_exec_id()    ? "Exec"
-                                            : call.call_index == db_last_id_id() ? "LastId"
-                                            : call.call_index == db_begin_id()   ? "Begin"
-                                            : call.call_index == db_commit_id()  ? "Commit"
-                                                                                 : "Rollback";
-                    std::string sql    = "std::string()";
-                    std::string params = "lux_db_params()";
-                    if (dbop == "Query" || dbop == "Exec") {
-                        sql = expr(*call.args[0].value);
-                        params = "lux_db_params(";
-                        for (size_t i = 1; i < call.args.size(); ++i) {
-                            if (i > 1) params += ", ";
-                            params += valor_json(*call.args[i].value);
-                        }
-                        params += ")";
-                    }
-                    return "co_await lux_script::await_db(lux_script::DbOp::" + dbop + ", " +
-                           literal_string(call.call_name) + ", req.loop, " + sql + ", " + params +
-                           ", l_pinned_workers, l_last_exec_workers, l_poisoned_db)";
-                }
+                // Parenthesized: co_await binds looser than `.`, so `return
+                // await db.query(...)` became `co_await X.to_json_text()` --
+                // a g++ error that sent the WHOLE module back to bytecode.
+                return "(co_await " + llamada_db(*e.lhs) + ")";
 
             default:
                 return ""; // inalcanzable: Comprobador ya lo descarto antes de llegar aqui
         }
     }
 
+    // The await_db(...) call for `await <module>.query/exec/...(...)`, without
+    // the co_await -- block() also hands two of them to lux::when_both.
+    std::string llamada_db(const IrExpr& call) const {
+        const std::string dbop = call.call_index == db_query_id()    ? "Query"
+                                : call.call_index == db_exec_id()    ? "Exec"
+                                : call.call_index == db_last_id_id() ? "LastId"
+                                : call.call_index == db_begin_id()   ? "Begin"
+                                : call.call_index == db_commit_id()  ? "Commit"
+                                                                     : "Rollback";
+        std::string sql    = "std::string()";
+        std::string params = "lux_db_params()";
+        if (dbop == "Query" || dbop == "Exec") {
+            sql = expr(*call.args[0].value);
+            params = "lux_db_params(";
+            for (size_t i = 1; i < call.args.size(); ++i) {
+                if (i > 1) params += ", ";
+                params += valor_json(*call.args[i].value);
+            }
+            params += ")";
+        }
+        return "lux_script::await_db(lux_script::DbOp::" + dbop + ", " +
+               literal_string(call.call_name) + ", req.loop, " + sql + ", " + params +
+               ", l_pinned_workers, l_last_exec_workers, l_poisoned_db)";
+    }
+
+    // `Json x = await <module>.query(...)`: the only statement block() may
+    // run concurrently with its neighbour. A read has no effect the next
+    // statement could observe; exec/last_id/begin order matters, so no.
+    bool es_consulta_db(const IrStmt& s) {
+        if (s.kind != IrStmtKind::VarDecl || !s.value || s.value->kind != IrExprKind::Await)
+            return false;
+        const IrExpr& call = *s.value->lhs;
+        if (call.call_shape == IrCallShape::BuiltinGlobalCall || call.call_index != db_query_id())
+            return false;
+        auto t = comprobador_.tipo_provable(*s.value);
+        return t && tipo_cpp(*t) == "Value";
+    }
+
+    static bool usa_ranura(const IrExpr& e, int slot) {
+        if (e.kind == IrExprKind::Ident && e.slot == slot) return true;
+        for (const IrExpr* c : {e.object.get(), e.lhs.get(), e.rhs.get()})
+            if (c && usa_ranura(*c, slot)) return true;
+        for (const auto& a : e.args)    if (a.value && usa_ranura(*a.value, slot)) return true;
+        for (const auto& i : e.items)   if (i && usa_ranura(*i, slot)) return true;
+        for (const auto& d : e.entries)
+            if ((d.key && usa_ranura(*d.key, slot)) || (d.value && usa_ranura(*d.value, slot)))
+                return true;
+        return false;
+    }
+
+    // Two reads in a row where the second does not use the first's result
+    // run at once (lux::when_both): over a network the route waits for the
+    // slower one instead of both. Never in a route that opens a transaction:
+    // there every statement goes, in order, through the one pinned connection.
+    bool consultas_independientes(const IrStmt& a, const IrStmt& b) {
+        return ruta_ && !comprobador_.usa_transaccion() && es_consulta_db(a) &&
+               es_consulta_db(b) && !usa_ranura(*b.value, a.slot);
+    }
+
+    std::string par_de_consultas(const IrStmt& a, const IrStmt& b) {
+        registrar(a.slot, a.name);
+        registrar(b.slot, b.name);
+        const std::string par = "__par_" + std::to_string(a.slot);
+        return "auto " + par + " = co_await lux::when_both(" + llamada_db(*a.value->lhs) + ", " +
+               llamada_db(*b.value->lhs) + "); Value " + nombre_cpp(a.name) + " = std::move(" +
+               par + ".first); Value " + nombre_cpp(b.name) + " = std::move(" + par + ".second);";
+    }
+
     std::string block(const IrBlock& b, int indent) {
         std::string s;
         const std::string p(static_cast<size_t>(indent) * 4, ' ');
-        for (const auto& st : b) s += p + stmt(*st, indent) + "\n";
+        for (size_t i = 0; i < b.size(); ++i) {
+            if (i + 1 < b.size() && consultas_independientes(*b[i], *b[i + 1])) {
+                s += p + par_de_consultas(*b[i], *b[i + 1]) + "\n";
+                ++i;
+                continue;
+            }
+            s += p + stmt(*b[i], indent) + "\n";
+        }
         return s;
     }
 
@@ -1756,15 +1838,17 @@ public:
     // diferencia de expr(), un DictLit/ListLit aqui NO tiene que ser
     // homogeneo: cada entrada se convierte por su cuenta, recursivamente.
     std::string valor_json(const IrExpr& e) const {
+        // reserve(): the key count is known here, same as the VM's MakeDict
+        // -- without it a 4-key literal reallocates its vector three times.
         if (e.kind == IrExprKind::DictLit) {
-            std::string s = "([&]{ Value::Dict d; ";
+            std::string s = "([&]{ Value::Dict d; d.reserve(" + std::to_string(e.entries.size()) + "); ";
             for (const auto& entry : e.entries)
                 s += "d[" + expr(*entry.key) + "] = " + valor_json(*entry.value) + "; ";
             s += "return Value::dict(std::move(d)); }())";
             return s;
         }
         if (e.kind == IrExprKind::ListLit) {
-            std::string s = "([&]{ Value::List l; ";
+            std::string s = "([&]{ Value::List l; l.reserve(" + std::to_string(e.items.size()) + "); ";
             for (const auto& item : e.items) s += "l.push_back(" + valor_json(*item) + "); ";
             s += "return Value::list(std::move(l)); }())";
             return s;
@@ -2829,9 +2913,14 @@ std::string error_runtime_prelude() {
         "    if (b == 0) lux_native_fail(\"division by zero\");\n"
         "    return a / b;\n"
         "}\n"
+        // Both operands in [0, 2^32): a 32-bit div gives the same result and
+        // is ~12% faster on a trial-division loop -- the "bypass slow
+        // division" clang does on its own and GCC does not.
         "template <class T, class U>\n"
         "static auto lux_mod_check(T a, U b) {\n"
         "    if (b == 0) lux_native_fail(\"modulo by zero\");\n"
+        "    if (((uint64_t(a) | uint64_t(b)) >> 32) == 0)\n"
+        "        return static_cast<decltype(a % b)>(uint32_t(a) % uint32_t(b));\n"
         "    return a % b;\n"
         "}\n"
         // int(x) sobre string (natives.cpp: fn_int) -- mismo std::stoll SIN

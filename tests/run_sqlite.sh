@@ -28,6 +28,7 @@ check "creates the schema" GET /create 200 '"ok":true'
 echo "== reading =="
 check "select without parameters" GET /all      200 '"title":"long"'
 check "select with a parameter"  GET /one/1      200 '"author":"Ana"'
+check "two reads at once"  GET /pair/1     200 '{"title":"long","count":'
 check "missing row"    GET /one/99999  404
 
 echo "== long text =="

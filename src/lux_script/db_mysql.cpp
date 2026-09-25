@@ -4,9 +4,11 @@
 #include <mysql.h>
 
 #include <cstdlib>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 
 namespace lux_script {
 
@@ -62,17 +64,27 @@ public:
         }
 
         if (!read_pool(options, error)) return false;
-        conns_.assign(pool_size(), nullptr);
+        conns_ = std::vector<Conn>(pool_size());
         return true;
     }
 
     bool open(size_t worker, std::string& error) override {
         if (worker >= conns_.size()) { error = "mysql: worker out of range"; return false; }
-        if (conns_[worker] && mysql_ping(conns_[worker]) != 0) {
-            mysql_close(conns_[worker]);
-            conns_[worker] = nullptr;
+        // open() runs before EVERY statement, and mysql_ping() is a full round
+        // trip: pinging each time doubled the latency of a point read. A local
+        // peek at the socket catches a connection the server closed; a real
+        // ping is kept for the ambiguous case and, like HikariCP, for one idle
+        // for over a second.
+        Conn& k = conns_[worker];
+        const auto now = std::chrono::steady_clock::now();
+        if (k.db) {
+            const SocketState st = peek_socket(k.db->net.fd);
+            const bool check = st == SocketState::Unknown ||
+                               now - k.last_used > std::chrono::seconds(1);
+            if (st == SocketState::Dead || (check && mysql_ping(k.db) != 0)) drop(worker);
         }
-        if (conns_[worker]) return true;
+        k.last_used = now;
+        if (k.db) return true;
 
         MYSQL* c = mysql_init(nullptr);
         if (!c) { error = "mysql: out of memory"; return false; }
@@ -93,7 +105,7 @@ public:
             return false;
         }
         mysql_set_character_set(c, "utf8mb4");
-        conns_[worker] = c;
+        k.db = c;
         return true;
     }
 
@@ -104,22 +116,23 @@ public:
         // the object, two simultaneous queries trod on the pointers
         // libmysqlclient was still using.
         MYSQL_STMT* stmt = nullptr;
+        bool        cached = false;
         std::vector<MYSQL_BIND>  binds;
         std::vector<std::string> store;
         std::unique_ptr<lux_script_my_bool[]> nulls_in;
         std::vector<unsigned long>      lens_in;
-        if (!prepare(worker, sql, args, &stmt, binds, store, nulls_in, lens_in, error))
+        if (!prepare(worker, sql, args, &stmt, &cached, binds, store, nulls_in, lens_in, error))
             return false;
 
         if (mysql_stmt_execute(stmt) != 0) {
             error = std::string("mysql: ") + mysql_stmt_error(stmt);
-            mysql_stmt_close(stmt);
+            finish(worker, sql, stmt, cached, false);
             return false;
         }
 
         MYSQL_RES* meta = mysql_stmt_result_metadata(stmt);
         if (!meta) {                       // it returned no rows
-            mysql_stmt_close(stmt);
+            finish(worker, sql, stmt, cached, true);
             out = Value::list();
             return true;
         }
@@ -134,7 +147,7 @@ public:
         if (mysql_stmt_store_result(stmt) != 0) {
             error = std::string("mysql: ") + mysql_stmt_error(stmt);
             mysql_free_result(meta);
-            mysql_stmt_close(stmt);
+            finish(worker, sql, stmt, cached, false);
             return false;
         }
 
@@ -176,7 +189,7 @@ public:
                       ? std::string("mysql: fila truncada al leerla")
                       : std::string("mysql: ") + mysql_stmt_error(stmt);
                 mysql_free_result(meta);
-                mysql_stmt_close(stmt);
+                finish(worker, sql, stmt, cached, false);
                 return false;
             }
             Value::Dict row;
@@ -190,7 +203,7 @@ public:
         }
 
         mysql_free_result(meta);
-        mysql_stmt_close(stmt);
+        finish(worker, sql, stmt, cached, true);
         out = Value::list(std::move(rows));
         return true;
     }
@@ -208,10 +221,11 @@ public:
         // And it opens no hole: what makes injection impossible is that the
         // PARAMETERS travel by bind, and here there are none to bind.
         if (args.empty()) {
-            MYSQL* c = conns_[worker];
+            MYSQL* c = conns_[worker].db;
             if (mysql_real_query(c, sql.c_str(),
                                  static_cast<unsigned long>(sql.size())) != 0) {
                 error = std::string("mysql: ") + mysql_error(c);
+                note_failure(worker, mysql_errno(c));
                 return false;
             }
             // An exec() on something returning rows would leave the connection
@@ -226,64 +240,114 @@ public:
         // the object, two simultaneous queries trod on the pointers
         // libmysqlclient was still using.
         MYSQL_STMT* stmt = nullptr;
+        bool        cached = false;
         std::vector<MYSQL_BIND>  binds;
         std::vector<std::string> store;
         std::unique_ptr<lux_script_my_bool[]> nulls_in;
         std::vector<unsigned long>      lens_in;
-        if (!prepare(worker, sql, args, &stmt, binds, store, nulls_in, lens_in, error))
+        if (!prepare(worker, sql, args, &stmt, &cached, binds, store, nulls_in, lens_in, error))
             return false;
 
         if (mysql_stmt_execute(stmt) != 0) {
             error = std::string("mysql: ") + mysql_stmt_error(stmt);
-            mysql_stmt_close(stmt);
+            finish(worker, sql, stmt, cached, false);
             return false;
         }
         affected = static_cast<long long>(mysql_stmt_affected_rows(stmt));
-        mysql_stmt_close(stmt);
+        finish(worker, sql, stmt, cached, true);
         return true;
     }
 
     bool last_insert_id(size_t worker, long long& id, std::string& error) override {
-        if (worker >= conns_.size() || !conns_[worker]) {
+        if (worker >= conns_.size() || !conns_[worker].db) {
             error = "mysql: no connection";
             return false;
         }
-        id = static_cast<long long>(mysql_insert_id(conns_[worker]));
+        id = static_cast<long long>(mysql_insert_id(conns_[worker].db));
         return true;
     }
 
     ~MysqlDriver() override {
-        for (auto* c : conns_) if (c) mysql_close(c);
+        for (size_t w = 0; w < conns_.size(); ++w) drop(w);
     }
 
 private:
     std::string          host_, user_, pass_, db_;
     unsigned             port_ = 3306;
-    std::vector<MYSQL*>  conns_;
+    // One per worker. `stmts` caches prepared statements by SQL text: without
+    // it every query paid prepare + execute + close, two round trips and a
+    // server-side parse more than needed. Capped like the sqlite driver's.
+    struct Conn {
+        MYSQL*                                       db = nullptr;
+        std::unordered_map<std::string, MYSQL_STMT*> stmts;
+        std::chrono::steady_clock::time_point        last_used{};
+    };
+    static constexpr size_t kMaxCachedStatements = 128;
+    std::vector<Conn> conns_;
+
+    void drop(size_t worker) {
+        Conn& k = conns_[worker];
+        for (auto& [_, st] : k.stmts) mysql_stmt_close(st);
+        k.stmts.clear();
+        if (k.db) mysql_close(k.db);
+        k.db = nullptr;
+    }
+
+    // A connection that died mid-use is discarded so the next statement on
+    // this worker reconnects -- nothing is retried: a write that failed with
+    // "server gone" may still have run.
+    void note_failure(size_t worker, unsigned err) {
+        if (err == CR_SERVER_GONE_ERROR || err == CR_SERVER_LOST) drop(worker);
+    }
+
+    // Every statement from prepare() ends here. A cached one is kept for the
+    // next call unless it failed; an uncached one is closed.
+    void finish(size_t worker, const std::string& sql, MYSQL_STMT* stmt, bool cached, bool ok) {
+        const unsigned err = ok ? 0 : mysql_stmt_errno(stmt);
+        if (ok && cached) {
+            mysql_stmt_free_result(stmt);
+            return;
+        }
+        if (cached) conns_[worker].stmts.erase(sql);
+        mysql_stmt_close(stmt);
+        if (!ok) note_failure(worker, err);
+    }
 
     bool prepare(size_t worker, const std::string& sql,
                  const std::vector<Value>& args,
-                 MYSQL_STMT** out, std::vector<MYSQL_BIND>& binds,
+                 MYSQL_STMT** out, bool* cached, std::vector<MYSQL_BIND>& binds,
                  std::vector<std::string>& store,
                  std::unique_ptr<lux_script_my_bool[]>& nulls,
                  std::vector<unsigned long>& lens, std::string& error) {
-        MYSQL* c = conns_[worker];
-        *out = mysql_stmt_init(c);
-        if (!*out) { error = "mysql: out of memory"; return false; }
+        Conn& k  = conns_[worker];
+        auto  it = k.stmts.find(sql);
+        *cached  = it != k.stmts.end();
+        if (*cached) {
+            *out = it->second;
+        } else {
+            *out = mysql_stmt_init(k.db);
+            if (!*out) { error = "mysql: out of memory"; return false; }
 
-        if (mysql_stmt_prepare(*out, sql.c_str(),
-                               static_cast<unsigned long>(sql.size())) != 0) {
-            error = std::string("mysql: ") + mysql_stmt_error(*out);
-            mysql_stmt_close(*out);
-            *out = nullptr;
-            return false;
+            if (mysql_stmt_prepare(*out, sql.c_str(),
+                                   static_cast<unsigned long>(sql.size())) != 0) {
+                error = std::string("mysql: ") + mysql_stmt_error(*out);
+                const unsigned err = mysql_stmt_errno(*out);
+                mysql_stmt_close(*out);
+                *out = nullptr;
+                note_failure(worker, err);
+                return false;
+            }
+            *cached = k.stmts.size() < kMaxCachedStatements;
+            if (*cached) k.stmts.emplace(sql, *out);
         }
 
+        // A count mismatch is the caller's mistake, not the statement's: a
+        // cached one stays cached.
         unsigned expected = mysql_stmt_param_count(*out);
         if (expected != args.size()) {
             error = "mysql: the query has " + std::to_string(expected) +
                     " parameter(s) but " + std::to_string(args.size()) + " were passed";
-            mysql_stmt_close(*out);
+            if (!*cached) mysql_stmt_close(*out);
             *out = nullptr;
             return false;
         }
@@ -312,8 +376,8 @@ private:
             binds[i].is_null       = &nulls[i];
         }
         if (mysql_stmt_bind_param(*out, binds.data()) != 0) {
-            error = std::string("mysql: al enlazar parametros: ") + mysql_stmt_error(*out);
-            mysql_stmt_close(*out);
+            error = std::string("mysql: binding parameters: ") + mysql_stmt_error(*out);
+            finish(worker, sql, *out, *cached, false);
             *out = nullptr;
             return false;
         }

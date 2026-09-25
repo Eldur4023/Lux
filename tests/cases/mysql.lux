@@ -6,7 +6,7 @@ app:
     mysql:
         host     "127.0.0.1"
         port     3306
-        database "lux_pruebas"
+        database "lux_tests"
         user     "lux"
         password "lux"
         pool     8
@@ -49,7 +49,7 @@ get endpoint("/null_in_text"):
 # ── Parameters: input types and NULL ─────────────────────────────────────────
 
 get endpoint("/echo", int n = 7, string s = "hello"):
-    return await mysql.query("select ? as integer, ? as text_col, ? as null_value", n, s, null)
+    return await mysql.query("select ? as int_col, ? as text_col, ? as null_value", n, s, null)
 
 get endpoint("/unicode"):
     return await mysql.query("select id, title from articles where title = ?", "unicode ñ 🐻")

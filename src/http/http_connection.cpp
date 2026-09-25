@@ -65,7 +65,7 @@ void HttpConnection::arm_408(int HttpConnection::*tfd, int ms, const char* msg) 
     std::weak_ptr<HttpConnection> weak = shared_from_this();
     this->*tfd = loop_.schedule_timer(ms, [weak, tfd, msg]() {
         if (auto self = weak.lock(); self && !self->closed_) {
-            (*self).*tfd = -1;  // event loop already closed this tfd
+            (*self).*tfd = -1;  // already fired: nothing left to cancel
             self->send_error(408, msg);
             self->close();
         }
@@ -95,8 +95,12 @@ HttpConnection::~HttpConnection() {
     if (!closed_) {
         // Safe closure: we skip loop_.remove() to avoid re-entrant erase if
         // this destructor is called during EventLoop callbacks_ teardown.
+#ifdef LUX_IO_URING
+        // IoUringLoop timers are timerfds. EpollLoop's are map ids, not fds:
+        // a pending one only holds a weak_ptr and fires as a no-op.
         if (header_tfd_  >= 0) ::close(header_tfd_);
         if (timeout_tfd_ >= 0) ::close(timeout_tfd_);
+#endif
         if (file_fd_     >= 0) ::close(file_fd_);
         ::close(fd_);
     }
@@ -256,10 +260,12 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     // Keep a weak ref for WebSocket mode — do_read() routes through it.
     current_req_ = req_ptr;
 
-    // Resolve remote IP from the socket
+    // Resolve remote IP from the socket, once per connection
     sockaddr_storage ss{};
     socklen_t sslen = sizeof(ss);
-    if (::getpeername(fd_, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
+    if (!peer_ip_done_ &&
+        ::getpeername(fd_, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
+        peer_ip_done_ = true;
         char ipbuf[INET6_ADDRSTRLEN]{};
         if (ss.ss_family == AF_INET) {
             inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&ss)->sin_addr,
@@ -268,8 +274,9 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
             inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&ss)->sin6_addr,
                       ipbuf, sizeof(ipbuf));
         }
-        req_ptr->remote_ip = ipbuf;
+        peer_ip_ = ipbuf;
     }
+    req_ptr->remote_ip = peer_ip_;
 
     // Both timers are already handled by the time dispatch() runs:
     // on_headers_complete() (fired earlier, straight from the parser, the

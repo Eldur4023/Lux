@@ -53,6 +53,7 @@ ok "starts and connects"
 echo "== reading =="
 check "select without parameters" GET /all      200 '"title":"length"'
 check "select with a parameter"  GET /one/1      200 '"author":"Ana"'
+check "two reads at once"  GET /pair/1     200 '{"title":"length","count":'
 check "missing row"    GET /one/99999  404
 
 # The Lux Script placeholder is `?` and the driver translates it to $1: here it is checked
@@ -104,7 +105,7 @@ check "balances after rollback" GET  /balances           200 '"balance":70'
 echo "== errors =="
 check "missing table"    GET /bad_table          200 "no_existe"
 check "too few placeholders"    GET /too_few_placeholders 200 "were passed"
-check "mixed ? and \$1"        GET /mixed              200 "mixed"
+check "mixed ? and \$1"        GET /mixed              200 "mixes"
 
 # A 200 is not enough: one request answering with ANOTHER's row is exactly
 # the shape of the shared-bind failure already caught in mysql -- there it only

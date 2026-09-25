@@ -6,6 +6,9 @@
 #include <sqlite3.h>
 
 #include <algorithm>
+#include <atomic>
+#include <ctime>
+#include <unordered_set>
 #include <cctype>
 #include <cstring>
 
@@ -131,9 +134,45 @@ public:
         auto t = options.find("timeout_ms");
         if (t != options.end()) busy_timeout_ = std::atoi(t->second.c_str());
 
-        conns_.assign(pool_size(), nullptr);
-        cache_.assign(pool_size(), {});
+        // Past the pool's workers, one slot per event-loop thread for
+        // query_inline(). A :memory: database is private to each connection,
+        // so an inline read there would see a different, empty database.
+        inline_ok_ = file_.find(":memory:") == std::string::npos &&
+                     file_.find("mode=memory") == std::string::npos;
+        const size_t slots = pool_size() + kInlineSlots;
+        conns_.assign(slots, nullptr);
+        cache_.assign(slots, {});
+        rc_.assign(slots, SQLITE_OK);
+        deadline_ = std::vector<Deadline>(kInlineSlots);
+        slow_.assign(kInlineSlots, {});
         return true;
+    }
+
+    // Measured on the bench: a primary-key read is ~2us inside SQLite and
+    // ~15us of handoff to the pool and back. So reads run on the loop's own
+    // connection -- until one takes over kInlineBudgetNs: the progress handler
+    // interrupts it (a read, nothing to undo), it is marked slow on this
+    // thread, and it and every later call go to the pool.
+    Inline query_inline(const std::string& sql, const std::vector<Value>& args,
+                        Value& out, std::string& error) override {
+        if (!inline_ok_) return Inline::NotHandled;
+        const long slot = inline_slot();
+        if (slot < 0) return Inline::NotHandled;
+        auto& slow = slow_[static_cast<size_t>(slot) - pool_size()];
+        if (slow.count(sql)) return Inline::NotHandled;
+
+        std::string open_error;
+        if (!open(static_cast<size_t>(slot), open_error)) return Inline::NotHandled;
+
+        deadline_[static_cast<size_t>(slot) - pool_size()].at_ns = thread_cpu_ns() + kInlineBudgetNs;
+        if (query(static_cast<size_t>(slot), sql, args, out, error)) return Inline::Done;
+
+        switch (rc_[static_cast<size_t>(slot)] & 0xff) {
+            case SQLITE_INTERRUPT: slow.insert(sql); return Inline::NotHandled;
+            case SQLITE_BUSY:
+            case SQLITE_LOCKED:    return Inline::NotHandled;   // the pool may wait; the loop may not
+            default:               return Inline::Failed;       // the pool would fail the same way
+        }
     }
 
     bool open(size_t worker, std::string& error) override {
@@ -167,8 +206,13 @@ public:
         sqlite3_exec(db, "PRAGMA foreign_keys=ON", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
 
-        // Waits instead of failing when another connection holds the file.
-        sqlite3_busy_timeout(db, busy_timeout_);
+        // Waits instead of failing when another connection holds the file --
+        // except on an inline slot: the event loop never sleeps.
+        const bool inline_slot = worker >= pool_size();
+        sqlite3_busy_timeout(db, inline_slot ? 0 : busy_timeout_);
+        if (inline_slot)
+            sqlite3_progress_handler(db, 1000, &past_deadline,
+                                     &deadline_[worker - pool_size()]);
 
         conns_[worker] = db;
         return true;
@@ -188,6 +232,7 @@ public:
             if (rc == SQLITE_DONE) break;
             if (rc != SQLITE_ROW) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
+                rc_[worker] = rc;
                 release(stmt, cached);
                 return false;
             }
@@ -269,6 +314,42 @@ private:
     int                   busy_timeout_ = 5000;
     std::vector<sqlite3*> conns_;
     std::vector<std::unordered_map<std::string, sqlite3_stmt*>> cache_;
+    std::vector<int>      rc_;   // result code of each slot's last failure
+
+    // ponytail: 64 inline slots, one per event-loop thread; a 65th loop
+    // thread just uses the pool. Raise if lux ever runs more loops.
+    static constexpr size_t kInlineSlots = 64;
+    // CPU time of the loop thread, not wall time: under load the OS preempts
+    // the loop mid-query, and a 2us read measured by the wall clock blew any
+    // budget and was marked slow for good -- every statement ended up back on
+    // the pool.
+    static constexpr int64_t kInlineBudgetNs = 100'000;
+    struct Deadline { int64_t at_ns = 0; };
+    bool                                          inline_ok_ = false;
+    std::atomic<size_t>                           next_inline_{0};
+    std::vector<Deadline>                         deadline_;   // per inline slot
+    std::vector<std::unordered_set<std::string>> slow_;       // per inline slot
+
+    static int64_t thread_cpu_ns() {
+        timespec ts{};
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+        return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+    }
+    static int past_deadline(void* d) {
+        return thread_cpu_ns() > static_cast<Deadline*>(d)->at_ns;
+    }
+
+    // This thread's inline slot, claimed on first use; -1 once all are taken.
+    long inline_slot() {
+        thread_local const SqliteDriver* owner = nullptr;
+        thread_local long                slot  = -1;
+        if (owner != this) {
+            owner = this;
+            const size_t n = next_inline_.fetch_add(1);
+            slot = n < kInlineSlots ? static_cast<long>(pool_size() + n) : -1;
+        }
+        return slot;
+    }
 
     // Parameters ALWAYS go through bind, never concatenated: that is what makes
     // SQL injection impossible from Lux Script.
@@ -284,7 +365,10 @@ private:
         // eff_sql/eff_args exactly as it always worked on sql/args.
         std::string eff_sql;
         std::vector<Value> eff_args;
-        if (!expand_list_params(sql, args, eff_sql, eff_args, error)) return false;
+        if (!expand_list_params(sql, args, eff_sql, eff_args, error)) {
+            rc_[worker] = SQLITE_MISUSE;
+            return false;
+        }
 
         if (auto it = table.find(eff_sql); it != table.end()) {
             *out      = it->second;
@@ -292,8 +376,9 @@ private:
             sqlite3_reset(*out);
             sqlite3_clear_bindings(*out);
         } else {
-            if (sqlite3_prepare_v2(db, eff_sql.c_str(), -1, out, nullptr) != SQLITE_OK) {
+            if (int rc = sqlite3_prepare_v2(db, eff_sql.c_str(), -1, out, nullptr); rc != SQLITE_OK) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(db);
+                rc_[worker] = rc;
                 return false;
             }
             *cached = table.size() < kMaxCachedStatements;
@@ -304,6 +389,7 @@ private:
         if (expected != static_cast<int>(eff_args.size())) {
             error = "sqlite: the query has " + std::to_string(expected) +
                     " parameter(s) but " + std::to_string(eff_args.size()) + " were passed";
+            rc_[worker] = SQLITE_MISUSE;
             release(*out, *cached);
             *out = nullptr;
             return false;
@@ -325,6 +411,7 @@ private:
             if (rc != SQLITE_OK) {
                 error = std::string("sqlite: while binding parameter ") +
                         std::to_string(idx) + ": " + sqlite3_errmsg(db);
+                rc_[worker] = rc;
                 release(*out, *cached);
                 *out = nullptr;
                 return false;

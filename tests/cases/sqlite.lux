@@ -183,3 +183,10 @@ get endpoint("/bad_table"):
 
 get endpoint("/too_few_params"):
     return await sqlite.query("select * from articles where id = ? and title = ?", 1)
+
+# Two independent reads back to back: --native runs them at once
+# (lux::when_both). Each result must still land in its own variable.
+get endpoint("/pair/:id", int id):
+    List<Json> one = await sqlite.query("select title from articles where id = ?", id)
+    List<Json> all = await sqlite.query("select count(*) as n from articles")
+    return { "title": one[0]["title"], "count": all[0]["n"] }

@@ -6,7 +6,7 @@ app:
     postgres:
         host     "127.0.0.1"
         port     5432
-        database "lux_pruebas"
+        database "lux_tests"
         user     "lux"
         password "lux"
         pool     8
@@ -118,3 +118,10 @@ get endpoint("/too_few_placeholders"):
 
 get endpoint("/mixed"):
     return await postgres.query("select * from articles where id = $1 and title = ?", 1, "x")
+
+# Two independent reads back to back: --native runs them at once
+# (lux::when_both). Each result must still land in its own variable.
+get endpoint("/pair/:id", int id):
+    List<Json> one = await postgres.query("select title from articles where id = ?", id)
+    List<Json> all = await postgres.query("select count(*) as n from articles")
+    return { "title": one[0]["title"], "count": all[0]["n"] }

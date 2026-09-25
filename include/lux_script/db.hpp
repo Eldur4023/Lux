@@ -57,6 +57,16 @@ private:
     bool                                            stopping_ = false;
 };
 
+// ─── Idle connection liveness, without a round trip ─────────────────────────
+//
+// Between statements an idle connection has nothing to read. A server that
+// closed it (KILL, restart, idle timeout) leaves an EOF or a reset waiting in
+// the kernel, visible to a non-blocking peek -- no packet sent. Pending bytes
+// are ambiguous (a timeout notice before the close, or a TLS session ticket on
+// a healthy connection), so they answer Unknown and the driver pings.
+enum class SocketState { Alive, Dead, Unknown };
+SocketState peek_socket(int fd);
+
 // ─── Driver ──────────────────────────────────────────────────────────────────
 //
 // A driver is the minimum needed to talk to an engine: open a worker's
@@ -95,6 +105,17 @@ public:
         error = std::string(name()) + ": last_id() is not available; use "
                 "'insert ... returning id' with query()";
         return false;
+    }
+
+    // A read outside a transaction, run on the CALLING thread (the event
+    // loop) instead of the pool, for an engine where that can be cheaper
+    // than the thread handoff. NotHandled sends it to the pool as usual --
+    // the default, and the answer for anything that would block or run long.
+    enum class Inline { NotHandled, Done, Failed };
+    virtual Inline query_inline(const std::string& sql, const std::vector<Value>& args,
+                                Value& out, std::string& error) {
+        (void)sql; (void)args; (void)out; (void)error;
+        return Inline::NotHandled;
     }
 
     size_t pool_size() const { return pool_size_; }
