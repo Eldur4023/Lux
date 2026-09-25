@@ -492,16 +492,27 @@ check "a real file in a subdirectory"      GET /css/style.css 200 'body{color:re
 check "another real file at the root"      GET /test.txt      200 'plain file'
 check "unknown path falls back to index.html (spa)" GET /whatever/nope 200 '<html>index</html>'
 
+echo "== --native semantics (native_edges.lux) =="
+next_server "$HERE/cases/native_edges.lux" /mixed || exit 1
+check "a list shared by two variables"      GET /values 200 '"b":[1,2,3]'
+check "sort() on a local held as a Value"   GET /values 200 '"c":[1,4,5]'
+check "an int summed with range() elements" GET /values 200 '"total":6'
+check "int / int: exact or not"             GET /values 200 '"div":3.5,"exact":2'
+check "and/or give the winning operand"     GET /values 200 '"and":0,"or":5,"null":null'
+check "a function that awaits, with and without await" GET /awaits 200 '"x":4,"y":6'
+check "a catch whose body awaits"           GET /awaits 200 '"caught":"division by zero"'
+check "a null result is a 204"              GET /nothing 204
+
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
 compiles    "example/ app compiles"     "$HERE/../example"
-native_compiles "--native compiles the sqlite suite"   "$HERE/cases/sqlite.lux"   23
-native_compiles "--native compiles the postgres suite" "$HERE/cases/postgres.lux" 21
-native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"    16
-native_compiles "--native compiles module calls"      "$HERE/cases/modules.lux"  58
-native_compiles "--native survives its edge cases"    "$HERE/cases/native_edges.lux" 1
-native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  7
-native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 12
+native_compiles "--native compiles the sqlite suite"   "$HERE/cases/sqlite.lux"   27
+native_compiles "--native compiles the postgres suite" "$HERE/cases/postgres.lux" 22
+native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"    17
+native_compiles "--native compiles module calls"      "$HERE/cases/modules.lux"  76
+native_compiles "--native survives its edge cases"    "$HERE/cases/native_edges.lux" 5
+native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  8
+native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 48
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"
 fails_to_compile "object out of place" "$HERE/cases/bad/sse.lux"      "only exists inside a route sse"

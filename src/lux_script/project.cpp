@@ -2265,7 +2265,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         // de todas formas no se va a publicar.
         if (native && diags.empty())
             mod->native = compile_native(mod->program, fns, sigs, ".lux-native",
-                                          mod->native_warning, &mod->native_why, &mod->functions);
+                                          mod->native_warning, &mod->native_why, &mod->functions, &enums);
         if (mod->native && mod->native->bind) mod->native->bind(&mod->functions, &mod->templates);
 
         ClassTable classes;

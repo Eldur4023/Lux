@@ -10,12 +10,12 @@ app:
 fn Json mixed(int n):
     return { "name": "x", "n": n }
 
-# Cannot be native (a module call needs a route's context)...
+# A function calling a module, through the request its caller serves...
 fn string digest(string s):
     return hash.sha256(s)
 
-# ...so neither can its caller: it must fall back too, not reference a
-# native digest() that does not exist.
+# ...and its caller: when one falls back to bytecode, so must the other,
+# never reference a native digest() that does not exist.
 fn string caller(string s):
     return digest(s) + "!"
 
@@ -24,3 +24,39 @@ get endpoint("/mixed"):
 
 get endpoint("/chain"):
     return { "h": caller("a") }
+
+# Semantics --native has to keep, one per line of the response: a list
+# shared by two variables, a local held as a Value (sort() on it, an int
+# summed with a range() element), and/or on non-bools, an int division
+# that is not exact.
+get endpoint("/values"):
+    List<int> b = [1, 2]
+    List<int> a = b
+    a.add(3)
+    List<int> c = [5, 1, 4]
+    c.sort()
+    int total = 0
+    for int i in range(1, 4):
+        total = total + i
+    return { "b": b, "c": c, "total": total, "div": 7 / 2, "exact": 6 / 3, "and": 0 and 5, "or": 0 or 5, "null": null }
+
+fn int slow_double(int n):
+    await sleep(1)
+    return n * 2
+
+# A function that awaits, called with and without `await` (the VM awaits
+# both), and a catch whose body awaits.
+get endpoint("/awaits"):
+    int x = await slow_double(2)
+    int y = slow_double(3)
+    string caught = ""
+    try:
+        int z = 1 / 0
+    catch e:
+        await sleep(1)
+        caught = e.message
+    return { "x": x, "y": y, "caught": caught }
+
+get endpoint("/nothing"):
+    Json n = null
+    return n

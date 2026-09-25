@@ -92,7 +92,7 @@ private:
                                                           const ClassSigs&,
                                                           const std::filesystem::path&,
                                                           std::string&, NativeReport*,
-                                                          const FunctionTable*);
+                                                          const FunctionTable*, const EnumSigs*);
     void* handle_ = nullptr;
 };
 
@@ -115,6 +115,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const std::filesystem::path& cache_dir,
                                               std::string& aviso,
                                               NativeReport* informe = nullptr,
-                                              const FunctionTable* chunks = nullptr);
+                                              const FunctionTable* chunks = nullptr,
+                                              const EnumSigs* enums = nullptr);
 
 } // namespace lux_script

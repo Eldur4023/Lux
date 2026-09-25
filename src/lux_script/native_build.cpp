@@ -93,7 +93,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const std::filesystem::path& cache_dir,
                                               std::string& aviso,
                                               NativeReport* informe,
-                                              const FunctionTable* chunks) {
+                                              const FunctionTable* chunks,
+                                              const EnumSigs* enums) {
     aviso.clear();
     if (informe) informe->rutas.assign(prog.routes.size(), "");
 
@@ -150,17 +151,9 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         DiagnosticBag diags_ir; // descartable: si esta funcion ya compilo a
                                 // bytecode, su cuerpo tipa limpio tambien aqui.
         Chunk         descartable;
-        // classes_ = nullptr, igual que build_functions() en project.cpp:
-        // una funcion SUELTA no puede construir instancias ni llamar a un
-        // metodo (el checker real solo resuelve eso dentro de una ruta/
-        // metodo, que si reciben ClassSigs) -- pasarlo aqui haria a este
-        // check_function() mas permisivo que el compilador real, la misma
-        // clase de divergencia que motivo la correccion critica de mas
-        // arriba. Una funcion suelta SI puede recibir/devolver una
-        // instancia ya construida (un parametro/retorno de tipo clase, sin
-        // tocar sus campos ni metodos) -- eso no necesita classes_ en
-        // absoluto, solo el tipo declarado del parametro.
-        Emitter emitter(diags_ir, &sigs, nullptr, &prog.imports);
+        // The same tables bytecode checks a function with
+        // (emit_function_bodies, project.cpp): classes and enums included.
+        Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports, nullptr, enums);
         IrBlock body;
         if (!emitter.check_function(*fn, descartable, diags_ir, &body)) {
             if (informe) informe->funciones.emplace_back(nombre, "not representable yet");
@@ -213,7 +206,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
             // classes_ = &clases_sig aqui SI, igual que emit_class_bodies()
             // en project.cpp: un metodo si puede construir instancias y
             // llamar a otros metodos.
-            Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
+            Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports, nullptr, enums);
             IrBlock body;
             auto drop_method = [&] { changed |= clases.count(c.name) && clases[c.name].metodos.erase(m.name) > 0; };
             if (!emitter.check_method(c.name, m, descartable, diags_ir, &body)) { drop_method(); continue; }
@@ -248,7 +241,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // una ruta si puede construir instancias y llamar a metodos (aunque
         // esta primera fase de rutas no llegue a generar ninguno de esos
         // casos -- ver el comentario de RutaNativa).
-        Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
+        Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports, nullptr, enums);
         IrBlock  body;
         if (!emitter.check_route(r, descartable, diags_ir, &body)) {
             if (informe) informe->rutas[i] = "not representable yet";

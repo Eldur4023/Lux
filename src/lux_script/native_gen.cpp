@@ -465,7 +465,12 @@ public:
         if (!en_value && !es_escalar_json(tobj.kind()) && tobj.kind() != Type::Kind::List &&
             tobj.kind() != Type::Kind::Dict)
             return std::nullopt;
-        if (!en_value && (tobj.kind() == Type::Kind::List || tobj.kind() == Type::Kind::Dict) &&
+        // Changing a copy is fine when nothing else sees the original (a
+        // literal); a variable is held as a Value instead. A call's native
+        // result may share a list with a field, so it stays out.
+        const bool temporal = e.object && (e.object->kind == IrExprKind::ListLit ||
+                                           e.object->kind == IrExprKind::DictLit);
+        if (!en_value && !temporal && (tobj.kind() == Type::Kind::List || tobj.kind() == Type::Kind::Dict) &&
             mutan.count(e.call_name)) {
             if (e.object && e.object->kind == IrExprKind::Ident) pedir_promocion(e.object->slot);
             return std::nullopt;
@@ -520,6 +525,13 @@ public:
     std::optional<int> promocion() const { return promocion_; }
     void pedir_promocion(int slot) const {
         if (slot >= n_params_ && !promovidas_.count(slot) && !promocion_) promocion_ = slot;
+    }
+    // A native List/Dict that is not a literal may be shared with another
+    // variable: stored as a Value it would be a copy, where the VM shares.
+    bool alias_nativo(const IrExpr& v) const {
+        if (v.kind == IrExprKind::ListLit || v.kind == IrExprKind::DictLit) return false;
+        auto t = tipo_provable(v);
+        return t && (t->kind() == Type::Kind::List || t->kind() == Type::Kind::Dict) && !es_json_dinamico(*t);
     }
     static bool compatible_value(const Type& t) {
         return es_escalar_json(t.kind()) || t.kind() == Type::Kind::List || t.kind() == Type::Kind::Dict ||
@@ -1238,7 +1250,7 @@ public:
 
             case IrStmtKind::VarDecl: {
                 if (s.value && promovidas_.count(s.slot)) {
-                    if (!es_valor_json(*s.value)) return false;
+                    if (!es_valor_json(*s.value) || alias_nativo(*s.value)) return false;
                     en_value_.insert(&s);
                     registrar(s.slot, Type::json());
                     return true;
@@ -1293,7 +1305,7 @@ public:
                     }
                     // Declared as a Value (Json, List<Json>, Dict<string,Json>):
                     // any value that becomes one.
-                    if (es_json_dinamico(s.decl_type) && es_valor_json(*s.value)) {
+                    if (es_json_dinamico(s.decl_type) && es_valor_json(*s.value) && !alias_nativo(*s.value)) {
                         en_value_.insert(&s);
                         registrar(s.slot, s.decl_type);
                         return true;
@@ -1317,7 +1329,7 @@ public:
                     if (original == ranura_tipos_.end()) return false;
                     auto t = tipo_provable(*s.value);
                     if (t && *t == original->second) return true;
-                    if (!es_valor_json(*s.value)) return false;
+                    if (!es_valor_json(*s.value) || alias_nativo(*s.value)) return false;
                     if (es_json_dinamico(original->second)) {
                         en_value_.insert(&s);
                         return true;
@@ -1437,12 +1449,12 @@ public:
                 return valor_de_retorno(*s.target, retorno_fn);
             }
 
-            // Try no es "primitivos y control de flujo" en el sentido
-            // estrecho de esta fase todavia -- necesita decidir como se
-            // representa un error nativo, que es una decision de la fase 5
-            // (asincronia y errores).
+            // A native error is a LuxNativeError (lux_native_fail), the
+            // catch variable the VM's {"message": ...} (error_value).
             case IrStmtKind::Try:
-                return false;
+                if (!block_compilable(s.body, retorno_fn)) return false;
+                if (!s.name.empty()) registrar(s.slot, Type::json());
+                return block_compilable(s.orelse, retorno_fn);
         }
         return false;
     }
@@ -2138,6 +2150,21 @@ public:
                 return "while (" + cond(*s.value) + ") {\n" + block(s.body, indent + 1) +
                        pad(indent) + "}";
 
+            // The catch body runs after the handler, not in it: it may
+            // co_await, and C++ does not allow that inside a catch.
+            case IrStmtKind::Try: {
+                const std::string n = std::to_string(n_try_++);
+                std::string r = "bool l__caught" + n + " = false;\n" + pad(indent) + "std::string l__error" + n + ";\n";
+                r += pad(indent) + "try {\n" + block(s.body, indent + 1) + pad(indent) + "} catch (const LuxNativeError&) {\n";
+                r += pad(indent + 1) + "l__caught" + n + " = true;\n" + pad(indent + 1) + "l__error" + n + " = g_lux_native_error;\n";
+                r += pad(indent) + "}\n" + pad(indent) + "if (l__caught" + n + ") {\n";
+                if (!s.name.empty()) {
+                    registrar(s.slot, s.name);
+                    r += pad(indent + 1) + "Value " + nombre_cpp(s.name) + " = LuxD{}.add(\"message\", Value::str(l__error" + n + ")).done();\n";
+                }
+                return r + block(s.orelse, indent + 1) + pad(indent) + "}";
+            }
+
             case IrStmtKind::Break:    return "break;";
             case IrStmtKind::Continue: return "continue;";
 
@@ -2324,6 +2351,7 @@ private:
     bool                             retorno_json_ = false;
     bool                             asincrona_ = false;
     std::map<int, std::string>      ranura_a_nombre_;
+    mutable int                      n_try_ = 0;
 
     static std::string pad(int indent) { return std::string(static_cast<size_t>(indent) * 4, ' '); }
 
