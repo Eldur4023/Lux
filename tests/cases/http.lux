@@ -45,6 +45,15 @@ get endpoint("/status_500"):
     Json r = await http.get("http://127.0.0.1:8899/status/500")
     return r
 
+get endpoint("/public_only"):
+    Json blocked = await http.get("http://127.0.0.1:8899/echo", null, { "public_only": true })
+    Json allowed = await http.get("http://127.0.0.1:8899/echo", null, { "public_only": false })
+    return { "blocked": blocked, "allowed_status": allowed["status"] }
+
+get endpoint("/timeout"):
+    Json r = await http.get("http://127.0.0.1:8899/slow/2", null, { "timeout_ms": 300 })
+    return r
+
 get endpoint("/bad_url"):
     Json r = await http.get("not-a-url")
     return r

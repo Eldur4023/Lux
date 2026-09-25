@@ -32,6 +32,9 @@ class Echo(BaseHTTPRequestHandler):
         })
 
     def do_GET(self):
+        if self.path.startswith("/slow/"):
+            import time
+            time.sleep(float(self.path.rsplit("/", 1)[-1]))
         if self.path.startswith("/status/"):
             code = int(self.path.rsplit("/", 1)[-1])
             self._reply(code, {"forced_status": code})
