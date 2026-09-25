@@ -132,6 +132,32 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // metodo (recibiendo la instancia ya construida) y viceversa.
     std::string prototipos;
     std::string cuerpos;
+    struct RutaGenerada {
+        size_t      indice;
+        std::string simbolo;
+    };
+    std::vector<RutaGenerada> rutas_generadas;       // void(Request&, Response&)
+    std::vector<RutaGenerada> rutas_async_generadas; // Task<void>(Request&, Response&)
+    std::string               rutas_cuerpos;
+
+    // A check's Peticiones: a return or parameter becomes a Value (Json),
+    // and the whole set is generated again. Each is one type turned into
+    // Json for good, so this ends.
+    auto aplicar = [&](const Peticiones& p, const std::string& fn, const std::string& clase) {
+        bool cambio = false;
+        auto a_json = [&](Type& t) { if (!es_value(t)) { t = Type::json(); cambio = true; } };
+        if (p.retorno_value) {
+            if (clase.empty() && firmas.count(fn)) a_json(firmas[fn].retorno);
+            if (!clase.empty() && clases.count(clase) && clases[clase].metodos.count(fn))
+                a_json(clases[clase].metodos[fn].retorno);
+        }
+        for (const auto& [f, i] : p.params)
+            if (firmas.count(f) && i < firmas[f].params.size()) a_json(firmas[f].params[i]);
+        for (const auto& [c, m, i] : p.metodo_params)
+            if (clases.count(c) && clases[c].metodos.count(m) && i < clases[c].metodos[m].params.size())
+                a_json(clases[c].metodos[m].params[i]);
+        return cambio;
+    };
 
     // A fixed point: a function or method that does not compile natively
     // leaves the tables and the whole set is generated again, so a caller
@@ -142,6 +168,9 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     generadas.clear();
     prototipos.clear();
     cuerpos.clear();
+    rutas_generadas.clear();
+    rutas_async_generadas.clear();
+    rutas_cuerpos.clear();
 
     auto drop_fn = [&](const std::string& n) { changed |= firmas.erase(n) > 0; };
 
@@ -164,16 +193,10 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         }
 
         std::string motivo;
-        bool        retorno_value = false;
+        Peticiones  pet;
         auto generada = generar_funcion_nativa(*fn, body, nombre_por_indice, firmas, clases, roles,
-                                               &motivo, &retorno_value);
-        // It returns values its declared type cannot hold natively: it
-        // returns a Value, and every caller is checked again against that.
-        if (!generada && retorno_value && !es_value(firmas[nombre].retorno)) {
-            firmas[nombre].retorno = Type::json();
-            changed = true;
-            continue;
-        }
+                                               &motivo, &pet);
+        if (!generada && aplicar(pet, nombre, "")) { changed = true; continue; }
         if (!generada) {
             if (informe) informe->funciones.emplace_back(nombre, motivo);
             drop_fn(nombre);
@@ -213,26 +236,20 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
             auto drop_method = [&] { changed |= clases.count(c.name) && clases[c.name].metodos.erase(m.name) > 0; };
             if (!emitter.check_method(c.name, m, descartable, diags_ir, &body)) { drop_method(); continue; }
 
+            Peticiones pet;
             auto generada = generar_metodo_nativo(c.name, m, body, nombre_por_indice, firmas,
-                                                  clases, roles);
+                                                  clases, roles, &pet);
+            if (!generada && aplicar(pet, m.name, c.name)) { changed = true; continue; }
             if (!generada) { drop_method(); continue; }
             prototipos += generada->firma_cpp + ";\n";
             cuerpos += generada->firma_cpp + " " + generada->cuerpo_cpp + "\n\n";
         }
     }
-    }   // fixed point
 
     // Rutas (Fase 4): a diferencia de funciones/metodos, una ruta nunca
     // aporta prototipo (nadie mas la llama en C++ generado) -- su texto
     // completo (extern "C" incluido) se acumula aparte y va DESPUES de
     // cuerpos, sin que le afecte el orden alfabetico de `sigs`.
-    struct RutaGenerada {
-        size_t      indice;
-        std::string simbolo;
-    };
-    std::vector<RutaGenerada> rutas_generadas;       // void(Request&, Response&)
-    std::vector<RutaGenerada> rutas_async_generadas; // Task<void>(Request&, Response&)
-    std::string               rutas_cuerpos;
     for (size_t i = 0; i < prog.routes.size(); ++i) {
         const RouteDecl& r = prog.routes[i];
         if (r.method == "WS" || r.method == "SSE") continue;
@@ -254,15 +271,19 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
             continue;
         }
 
+        Peticiones pet;
         auto generada = generate_native_route(r, body, static_cast<int>(i), nombre_por_indice,
                                             firmas, clases, roles,
-                                            informe ? &informe->rutas[i] : nullptr);
+                                            informe ? &informe->rutas[i] : nullptr, &pet);
+        if (!generada && aplicar(pet, "", "")) { changed = true; continue; }
         if (!generada) continue;
 
         rutas_cuerpos += generada->cuerpo_cpp + "\n\n";
         (generada->asincrona ? rutas_async_generadas : rutas_generadas)
             .push_back({i, generada->simbolo});
     }
+
+    }   // fixed point
 
     if (generadas.empty() && rutas_generadas.empty() && rutas_async_generadas.empty())
         return nullptr; // nada que ofrecer nativo: no es un error

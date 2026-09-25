@@ -1013,7 +1013,13 @@ private:
                             continue;
                         }
                         auto ta = tipo_provable(*e.args[i].value);
-                        if (!ta || *ta != fit->second.params[i]) return std::nullopt;
+                        if (!ta || *ta != fit->second.params[i]) {
+                            // A Value for a native parameter: the callee
+                            // takes a Value there (compile_native, again).
+                            if (es_valor_json(*e.args[i].value) && compatible_value(fit->second.params[i]))
+                                peticiones_.params.emplace_back(fit->first, i);
+                            return std::nullopt;
+                        }
                     }
                     // Awaited even without `await` written (the VM does).
                     if (fit->second.asincrona) usa_await_ = usa_transaccion_ = true;
@@ -1086,7 +1092,11 @@ private:
                             continue;
                         }
                         auto ta = tipo_provable(*e.args[i].value);
-                        if (!ta || *ta != mit->second.params[i]) return std::nullopt;
+                        if (!ta || *ta != mit->second.params[i]) {
+                            if (es_valor_json(*e.args[i].value) && compatible_value(mit->second.params[i]))
+                                peticiones_.metodo_params.emplace_back(rit->second.clase, rit->second.metodo, i);
+                            return std::nullopt;
+                        }
                     }
                     return mit->second.retorno;
                 }
@@ -1268,12 +1278,12 @@ private:
         if (t && *t == retorno_fn) return true;
         if (!es_valor_json(v)) return false;
         if (es_json_dinamico(retorno_fn)) return true;
-        if (compatible_value(retorno_fn)) retorno_dinamico_ = true;
+        if (compatible_value(retorno_fn)) peticiones_.retorno_value = true;
         return false;
     }
 
 public:
-    bool retorno_dinamico() const { return retorno_dinamico_; }
+    const Peticiones& peticiones() const { return peticiones_; }
 
     bool block_compilable(const IrBlock& b, const Type& retorno_fn) {
         for (const auto& s : b) {
@@ -1542,7 +1552,7 @@ private:
     std::set<int>                    promovidas_;
     int                              n_params_ = 0;
     mutable std::optional<int>       promocion_;
-    mutable bool                     retorno_dinamico_ = false;
+    mutable Peticiones               peticiones_;
     mutable bool                     usa_sesion_ = false;
     std::set<const IrStmt*>          for_dinamicos_;
     std::string                      motivo_;
@@ -1992,7 +2002,8 @@ public:
             // reprogramando un temporizador de 0ms sin parar (ver el
             // comentario de clamp_sleep_ms en project.cpp).
             case IrExprKind::Await:
-                if (e.lhs->call_shape == IrCallShape::UserFunctionCall) return llamada_asincrona(*e.lhs);
+                // `await` on a function that does not await is a no-op.
+                if (e.lhs->call_shape == IrCallShape::UserFunctionCall) return expr(*e.lhs);
                 if (e.lhs->call_shape == IrCallShape::BuiltinGlobalCall)
                     // req.loop/req.cancel_token, not the bare lux::sleep(ms)
                     // overload: that one reads thread_local current_token,
@@ -2603,7 +2614,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
                                                      const TablaClases& clases,
                                                      const TablaRoles& roles,
                                                      std::string* motivo,
-                                                     bool* pide_retorno_value) {
+                                                     Peticiones* peticiones) {
     auto no = [&](std::string m) -> std::optional<FuncionNativa> {
         if (motivo) *motivo = std::move(m);
         return std::nullopt;
@@ -2625,7 +2636,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     bool ok = false;
     auto cp = comprobar(nombre_por_indice, firmas, clases, roles, firma.params, body, retorno_decl, ok);
     if (!ok) {
-        if (cp->retorno_dinamico() && pide_retorno_value) *pide_retorno_value = true;
+        if (peticiones) *peticiones = cp->peticiones();
         return no(cp->motivo());
     }
     const Comprobador& comprobador = *cp;
@@ -2635,8 +2646,13 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
     // return -- comportamiento indefinido, no "null".
-    if (retorno_decl.kind() != Type::Kind::Void && !bloque_siempre_retorna(body))
+    // Reaching the end without a return gives null, as in the VM: a Value
+    // return says so; any other asks to become one.
+    const bool cae_al_final = retorno_decl.kind() != Type::Kind::Void && !bloque_siempre_retorna(body);
+    if (cae_al_final && !es_json_dinamico(retorno_decl)) {
+        if (peticiones && Comprobador::compatible_value(retorno_decl)) peticiones->retorno_value = true;
         return no("it can reach its end without a return");
+    }
 
     FuncionNativa out;
     out.nombre_lux = fn.name;
@@ -2660,7 +2676,9 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
                          "    auto& l_pinned_workers = l_ctx.pinned_workers; (void)l_pinned_workers;\n"
                          "    auto& l_last_exec_workers = l_ctx.last_exec_workers; (void)l_last_exec_workers;\n"
                          "    auto& l_poisoned_db = l_ctx.poisoned_db; (void)l_poisoned_db;\n" +
-                         gen.block(body, 1) + (retorno_decl.kind() == Type::Kind::Void ? "    co_return;\n}" : "}");
+                         gen.block(body, 1) +
+                         (retorno_decl.kind() == Type::Kind::Void ? "    co_return;\n}"
+                          : cae_al_final ? "    co_return Value::null();\n}" : "}");
         return out;
     }
 
@@ -2680,7 +2698,8 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     gen.retorno_json(es_json_dinamico(retorno_decl));
     for (size_t i = 0; i < fn.params.size(); ++i)
         gen.registrar(static_cast<int>(i), fn.params[i].name);
-    out.cuerpo_cpp = "{\n    LuxDepth lux_depth_guard;\n" + gen.block(body, 1) + "}";
+    out.cuerpo_cpp = "{\n    LuxDepth lux_depth_guard;\n" + gen.block(body, 1) +
+                     (cae_al_final ? "    return Value::null();\n}" : "}");
 
     // El wrapper de ABI fija (ver native_abi.hpp): descomprime args[i] al
     // tipo real de cada parametro, llama a la funcion de arriba, y empaqueta
@@ -2743,7 +2762,8 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
                                                     const std::vector<std::string>& nombre_por_indice,
                                                     const TablaFirmas& firmas,
                                                     const TablaClases& clases,
-                                                    const TablaRoles& roles) {
+                                                    const TablaRoles& roles,
+                                                    Peticiones* peticiones) {
     auto cit = clases.find(clase);
     if (cit == clases.end()) return std::nullopt; // la propia clase no es representable
 
@@ -2764,7 +2784,10 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     for (const auto& t : firma.params) tipos_params.push_back(t);
     bool ok = false;
     auto cp = comprobar(nombre_por_indice, firmas, clases, roles, tipos_params, body, retorno_decl, ok);
-    if (!ok) return std::nullopt;
+    if (!ok) {
+        if (peticiones) *peticiones = cp->peticiones();
+        return std::nullopt;
+    }
     const Comprobador& comprobador = *cp;
     // Fase 5: `await` solo se representa dentro de una ruta (build_routes()
     // es el UNICO punto de entrada nativo que se invoca ya como corrutina;
@@ -2964,7 +2987,8 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
                                               const TablaFirmas& firmas,
                                               const TablaClases& clases,
                                               const TablaRoles& roles,
-                                              std::string* motivo) {
+                                              std::string* motivo,
+                                              Peticiones* peticiones) {
     auto no = [&](std::string m) -> std::optional<RutaNativa> {
         if (motivo) *motivo = std::move(m);
         return std::nullopt;
@@ -3068,7 +3092,10 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     for (const auto& p : params) tipos_params.push_back(p.tipo);
     bool ok = false;
     auto cp = comprobar(nombre_por_indice, firmas, clases, roles, tipos_params, body, Type::json(), ok);
-    if (!ok) return no(cp->motivo());
+    if (!ok) {
+        if (peticiones) *peticiones = cp->peticiones();
+        return no(cp->motivo());
+    }
     Comprobador& comprobador = *cp;
     // Fase 5: si el cuerpo demostro algun `await` (hoy: solo `await
     // sleep(ms)`, ver Comprobador::tipo_provable), esta ruta se genera

@@ -1,4 +1,5 @@
 #pragma once
+#include <tuple>
 #include <optional>
 #include <set>
 #include <string>
@@ -148,6 +149,16 @@ struct ClaseNativa {
 // Por nombre de clase Lux.
 using TablaClases = std::unordered_map<std::string, ClaseNativa>;
 
+// What a failed check asks compile_native to change before trying again: a
+// function's return, or a parameter a caller passes a Value to, held as a
+// Value (Json) from then on.
+struct Peticiones {
+    bool                                                      retorno_value = false;
+    std::vector<std::pair<std::string, size_t>>               params;          // function, parameter
+    std::vector<std::tuple<std::string, std::string, size_t>> metodo_params;   // class, method, parameter
+    bool vacia() const { return !retorno_value && params.empty() && metodo_params.empty(); }
+};
+
 // The type native code holds a declared one in: `int?`, `string?`,
 // `List<int>?` may be null, and a class held as a Dict (dinamica) is one,
 // so they are a Value (Json); so is a List/Dict whose elements are not one
@@ -198,7 +209,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
                                                      const TablaClases& clases,
                                                      const TablaRoles& roles,
                                                      std::string* motivo = nullptr,
-                                                     bool* pide_retorno_value = nullptr);
+                                                     Peticiones* peticiones = nullptr);
 
 // Igual que generar_funcion_nativa(), para el cuerpo de un metodo: `this`
 // ocupa la ranura 0 (antes que los parametros, ver Emitter::check_method),
@@ -213,7 +224,8 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
                                                     const std::vector<std::string>& nombre_por_indice,
                                                     const TablaFirmas& firmas,
                                                     const TablaClases& clases,
-                                                    const TablaRoles& roles);
+                                                    const TablaRoles& roles,
+                                                    Peticiones* peticiones = nullptr);
 
 // El texto C++ del struct/caja de una clase nativa -- LPunto, con la misma
 // semantica de referencia real (§8) que LList/LDict (caja con refcount no
@@ -321,7 +333,8 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
                                               const TablaFirmas& firmas,
                                               const TablaClases& clases,
                                               const TablaRoles& roles,
-                                              std::string* motivo = nullptr);
+                                              std::string* motivo = nullptr,
+                                              Peticiones* peticiones = nullptr);
 
 // Funciones libres que necesita el binding de parametros que genera
 // generate_native_route() -- mismo criterio, mismo formato de error, que
