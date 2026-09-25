@@ -40,3 +40,22 @@ get endpoint("/close_twice"):
     bool first = pdf.close(doc)
     bool second = pdf.close(doc)
     return { "first": first, "second": second }
+
+get endpoint("/send"):
+    int doc = pdf.create(200, 100)
+    pdf.set_font(doc, "sans", true)
+    double w = pdf.text_width(doc, "Total: 12,50 €", 12)
+    pdf.text(doc, 190 - w, 50, "Total: 12,50 €", 12)
+    pdf.send(doc, "factura \"1\".pdf")
+    pdf.close(doc)
+
+get endpoint("/width"):
+    int doc = pdf.create(200, 100)
+    double narrow = pdf.text_width(doc, "i", 12)
+    double wide = pdf.text_width(doc, "WWWW", 12)
+    pdf.close(doc)
+    return { "wider": wide > narrow * 4, "positive": narrow > 0 }
+
+get endpoint("/bad_image"):
+    int doc = pdf.create(50, 50)
+    return { "r": pdf.image(doc, "/nonexistent.png", 0, 0) }

@@ -48,5 +48,14 @@ echo "== error paths =="
 check "unknown handle"        GET /unknown_handle    500 'unknown handle'
 check "draw after finish"     GET /draw_after_finish 500 'already saved'
 check "close twice"           GET /close_twice       200 '"first":true,"second":false'
+check "image that is not a PNG" GET /bad_image       500 'as a PNG'
+
+echo "== send / text_width =="
+check "text_width measures" GET /width 200 '"wider":true,"positive":true'
+send_head=$(curl -sS -D - -o "$TMP/sent.pdf" "http://127.0.0.1:$PORT/send")
+if echo "$send_head" | grep -qi '^content-type: application/pdf' &&
+   echo "$send_head" | grep -qi 'content-disposition: inline; filename="factura 1.pdf"' &&
+   [ "$(head -c 5 "$TMP/sent.pdf")" = "%PDF-" ]; then ok "pdf.send answers with the PDF itself"
+else fail "pdf.send answers with the PDF itself" "application/pdf + %PDF-" "$send_head"; fi
 
 summary

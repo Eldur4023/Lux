@@ -78,6 +78,12 @@ check "multiline without margin" GET /multiline     200 '"sql":"SELECT id\nFROM 
 check "one-line multiline"   GET /multiline       200 '"loose":"on one line"'
 check "multiline escapes"  GET /multiline       200 '"escapes":"with \"quotes\""'
 check "truthiness"           GET /truthiness        200 '"zero":false'
+check "List first/last/sum/min/max" GET /list_more 200 '"first":3,"last":6,"none":null,"sum":31,"fsum":3.5,"min":1,"max":9'
+check "List unique/any/all/count"   GET /list_more 200 '"unique":[3,1,4,5,9,2,6],"any":true,"all":false,"count":3'
+check "List group_by/chunk"         GET /list_more 200 '"groups":{"odd":[3,1,1,5,9],"even":[4,2,6]},"chunks":[[1,2],[3,4],[5]]'
+check "float() conversion"          GET /float_conv 200 '"a":3.5,"b":2.0,"c":1000.0,"d":1.0'
+check "float() rejects non-numbers"  GET /float_bad  500 "float(): 'abc' is not a number"
+check "List pop/insert, Dict items" GET /list_more 200 '"popped":3,"stack":[0,1,9,2],"items":[["a",1],["b",2]]'
 
 # JSON has to be UTF-8 (RFC 8259).  A stray 0xFF arrives from the network by
 # several routes, and without sanitizing it produced a response that not even

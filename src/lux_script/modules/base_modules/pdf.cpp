@@ -3,12 +3,11 @@
 // already widely deployed, and already installed on most systems that do any
 // graphics work -- no new dependency to vet, just one already trustworthy.
 //
-// Stateful, like `csv` (csv.cpp) -- `create()` hands back an opaque
-// `int` handle wrapping a cairo_t*/cairo_surface_t* pair kept in this
-// module's own mutex-protected table, freed by `close()`. See that file's
-// header comment for why this needed no change to BuiltinModule itself.
+// create() hands back an int handle to a cairo surface kept in this
+// module's table until close().
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/crypto.hpp>
+#include <lux/response.hpp>
 
 #include <cairo/cairo-pdf.h>
 #include <cairo/cairo.h>
@@ -61,14 +60,9 @@ void finish(PdfDoc& d) {
     d.finished = true;
 }
 
-Value fn_pdf_create(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_num() || !args[1].is_num()) {
-        error = "pdf.create() expects width, height in points";
-        return Value::null();
-    }
+Value fn_pdf_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
     auto doc = std::make_unique<PdfDoc>();
-    doc->surface = cairo_pdf_surface_create_for_stream(write_to_buffer, &doc->buffer,
-                                                        args[0].as_float(), args[1].as_float());
+    doc->surface = cairo_pdf_surface_create_for_stream(write_to_buffer, &doc->buffer, a[0].as_float(), a[1].as_float());
     if (cairo_surface_status(doc->surface) != CAIRO_STATUS_SUCCESS) {
         error = "pdf.create(): failed to create the document";
         return Value::null();   // ~PdfDoc destroys the surface
@@ -77,137 +71,166 @@ Value fn_pdf_create(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::integer(handles().put(std::move(doc)));
 }
 
-// Every drawing function shares this shape: resolve the handle, refuse to
-// draw on a document already finish()ed (see finish() above), report the
-// same two errors the same way. Kept as a macro-free helper instead of a
-// literal macro -- a function pointer capturing the actual draw call would
-// need one lambda per caller anyway, so nothing is saved by abstracting the
-// two checks out any further.
-PdfDoc* resolve_writable(std::vector<Value>& args, std::string& error) {
-    auto* d = handles().get(static_cast<int>(args[0].as_int()));
-    if (!d) { error = "pdf: unknown handle"; return nullptr; }
-    if (d->finished) { error = "pdf: document already saved; cannot draw on it anymore"; return nullptr; }
+PdfDoc* doc(std::vector<Value>& a, std::string& error, bool drawing = true) {
+    auto* d = handles().get(static_cast<int>(a[0].as_int()));
+    if (!d) error = "pdf: unknown handle";
+    else if (drawing && d->finished) { error = "pdf: document already saved; cannot draw on it anymore"; return nullptr; }
     return d;
 }
 
-Value fn_pdf_add_page(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
+double num(const std::vector<Value>& a, size_t i) { return a[i].as_float(); }
+
+// Every drawing call: find the document, run the cairo calls, true.
+template <class F>
+Value draw(std::vector<Value>& a, std::string& error, F f) {
+    PdfDoc* d = doc(a, error);
     if (!d) return Value::null();
-    if (!args[1].is_num() || !args[2].is_num()) {
-        error = "pdf.add_page() expects width, height in points";
+    f(d->cr, d);
+    return Value::boolean(true);
+}
+
+Value fn_pdf_add_page(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    return draw(a, e, [&](cairo_t* cr, PdfDoc* d) {
+        cairo_show_page(cr);
+        cairo_pdf_surface_set_size(d->surface, num(a, 1), num(a, 2));
+    });
+}
+
+// r, g, b in 0-255.
+Value fn_pdf_set_color(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    auto c = [&](size_t i) { return std::clamp(num(a, i) / 255.0, 0.0, 1.0); };
+    return draw(a, e, [&](cairo_t* cr, PdfDoc*) { cairo_set_source_rgb(cr, c(1), c(2), c(3)); });
+}
+
+Value fn_pdf_set_font(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    const bool bold = a.size() > 2 && a[2].as_bool(), italic = a.size() > 3 && a[3].as_bool();
+    return draw(a, e, [&](cairo_t* cr, PdfDoc*) {
+        cairo_select_font_face(cr, a[1].as_str().c_str(), italic ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL,
+                               bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+    });
+}
+
+Value fn_pdf_text(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    return draw(a, e, [&](cairo_t* cr, PdfDoc*) {
+        cairo_set_font_size(cr, num(a, 4));
+        cairo_move_to(cr, num(a, 1), num(a, 2));
+        cairo_show_text(cr, a[3].as_str().c_str());
+    });
+}
+
+// How wide `text` is at `size` in the current font -- what right-aligning
+// an amount or centring a title needs.
+Value fn_pdf_text_width(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    PdfDoc* d = doc(a, error);
+    if (!d) return Value::null();
+    cairo_set_font_size(d->cr, num(a, 2));
+    cairo_text_extents_t ext;
+    cairo_text_extents(d->cr, a[1].as_str().c_str(), &ext);
+    return Value::real(ext.x_advance);
+}
+
+Value fn_pdf_rect(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    const bool filled = a.size() > 5 && a[5].as_bool();
+    return draw(a, e, [&](cairo_t* cr, PdfDoc*) {
+        cairo_rectangle(cr, num(a, 1), num(a, 2), num(a, 3), num(a, 4));
+        filled ? cairo_fill(cr) : cairo_stroke(cr);
+    });
+}
+
+Value fn_pdf_line(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    return draw(a, e, [&](cairo_t* cr, PdfDoc*) {
+        cairo_move_to(cr, num(a, 1), num(a, 2));
+        cairo_line_to(cr, num(a, 3), num(a, 4));
+        cairo_stroke(cr);
+    });
+}
+
+Value fn_pdf_set_line_width(NativeCtx&, std::vector<Value>& a, std::string& e) {
+    return draw(a, e, [&](cairo_t* cr, PdfDoc*) { cairo_set_line_width(cr, num(a, 1)); });
+}
+
+// A PNG file at x, y -- scaled to w x h when given (a logo).
+Value fn_pdf_image(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    PdfDoc* d = doc(a, error);
+    if (!d) return Value::null();
+    cairo_surface_t* img = cairo_image_surface_create_from_png(a[1].as_str().c_str());
+    if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
+        cairo_surface_destroy(img);
+        error = "pdf.image(): cannot read '" + a[1].as_str() + "' as a PNG";
         return Value::null();
     }
-    cairo_show_page(d->cr);
-    cairo_pdf_surface_set_size(d->surface, args[1].as_float(), args[2].as_float());
+    const double iw = cairo_image_surface_get_width(img), ih = cairo_image_surface_get_height(img);
+    const double w = a.size() > 4 ? num(a, 4) : iw, h = a.size() > 5 ? num(a, 5) : ih * w / iw;
+    cairo_save(d->cr);
+    cairo_translate(d->cr, num(a, 2), num(a, 3));
+    cairo_scale(d->cr, w / iw, h / ih);
+    cairo_set_source_surface(d->cr, img, 0, 0);
+    cairo_paint(d->cr);
+    cairo_restore(d->cr);
+    cairo_surface_destroy(img);
     return Value::boolean(true);
 }
 
-Value fn_pdf_set_color(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
-    if (!d) return Value::null();
-    if (!args[1].is_num() || !args[2].is_num() || !args[3].is_num()) {
-        error = "pdf.set_color() expects r, g, b (0-255)";
-        return Value::null();
-    }
-    auto clamp01 = [](double v) { return std::max(0.0, std::min(1.0, v / 255.0)); };
-    cairo_set_source_rgb(d->cr, clamp01(args[1].as_float()), clamp01(args[2].as_float()),
-                         clamp01(args[3].as_float()));
-    return Value::boolean(true);
-}
-
-Value fn_pdf_set_font(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
-    if (!d) return Value::null();
-    if (!args[1].is_str()) { error = "pdf.set_font() expects a family name"; return Value::null(); }
-    bool bold   = args.size() > 2 && args[2].is_bool() && args[2].as_bool();
-    bool italic = args.size() > 3 && args[3].is_bool() && args[3].as_bool();
-    cairo_select_font_face(d->cr, args[1].as_str().c_str(),
-                           italic ? CAIRO_FONT_SLANT_ITALIC : CAIRO_FONT_SLANT_NORMAL,
-                           bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
-    return Value::boolean(true);
-}
-
-Value fn_pdf_text(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
-    if (!d) return Value::null();
-    if (!args[1].is_num() || !args[2].is_num() || !args[3].is_str() || !args[4].is_num()) {
-        error = "pdf.text() expects x, y, text, size";
-        return Value::null();
-    }
-    cairo_set_font_size(d->cr, args[4].as_float());
-    cairo_move_to(d->cr, args[1].as_float(), args[2].as_float());
-    cairo_show_text(d->cr, args[3].as_str().c_str());
-    return Value::boolean(true);
-}
-
-Value fn_pdf_rect(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
-    if (!d) return Value::null();
-    for (int i = 1; i <= 4; ++i)
-        if (!args[i].is_num()) { error = "pdf.rect() expects x, y, w, h"; return Value::null(); }
-    bool filled = args.size() > 5 && args[5].is_bool() && args[5].as_bool();
-    cairo_rectangle(d->cr, args[1].as_float(), args[2].as_float(), args[3].as_float(),
-                    args[4].as_float());
-    if (filled) cairo_fill(d->cr); else cairo_stroke(d->cr);
-    return Value::boolean(true);
-}
-
-Value fn_pdf_line(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
-    if (!d) return Value::null();
-    for (int i = 1; i <= 4; ++i)
-        if (!args[i].is_num()) { error = "pdf.line() expects x1, y1, x2, y2"; return Value::null(); }
-    cairo_move_to(d->cr, args[1].as_float(), args[2].as_float());
-    cairo_line_to(d->cr, args[3].as_float(), args[4].as_float());
-    cairo_stroke(d->cr);
-    return Value::boolean(true);
-}
-
-Value fn_pdf_set_line_width(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = resolve_writable(args, error);
-    if (!d) return Value::null();
-    if (!args[1].is_num()) { error = "pdf.set_line_width() expects a number"; return Value::null(); }
-    cairo_set_line_width(d->cr, args[1].as_float());
-    return Value::boolean(true);
-}
-
-Value fn_pdf_save(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = handles().get(static_cast<int>(args[0].as_int()));
-    if (!d) { error = "pdf: unknown handle"; return Value::null(); }
-    if (!args[1].is_str()) { error = "pdf.save() expects a path"; return Value::null(); }
+// The finished PDF bytes, or nullptr with `error` set.
+const std::string* bytes(std::vector<Value>& a, std::string& error) {
+    PdfDoc* d = doc(a, error, false);
+    if (!d) return nullptr;
     finish(*d);
-    std::ofstream f(args[1].as_str(), std::ios::binary);
-    if (!f) { error = "pdf.save(): cannot write '" + args[1].as_str() + "'"; return Value::null(); }
-    f.write(d->buffer.data(), static_cast<std::streamsize>(d->buffer.size()));
+    return &d->buffer;
+}
+
+Value fn_pdf_save(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    const std::string* b = bytes(a, error);
+    if (!b) return Value::null();
+    std::ofstream f(a[1].as_str(), std::ios::binary);
+    if (!f.write(b->data(), static_cast<std::streamsize>(b->size()))) {
+        error = "pdf.save(): cannot write '" + a[1].as_str() + "'";
+        return Value::null();
+    }
     return Value::boolean(true);
 }
 
-Value fn_pdf_to_base64(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto* d = handles().get(static_cast<int>(args[0].as_int()));
-    if (!d) { error = "pdf: unknown handle"; return Value::null(); }
-    finish(*d);
-    return Value::str(crypto::base64_encode(d->buffer));
+Value fn_pdf_to_base64(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    const std::string* b = bytes(a, error);
+    return b ? Value::str(crypto::base64_encode(*b)) : Value::null();
 }
 
-Value fn_pdf_close(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) { error = "pdf.close() expects a handle"; return Value::null(); }
-    return Value::boolean(handles().close(static_cast<int>(args[0].as_int())));
+// The PDF as this request's response: `pdf.send(doc, "invoice.pdf")`
+// shows it in the browser; pass true as a third argument to download it.
+Value fn_pdf_send(NativeCtx& ctx, std::vector<Value>& a, std::string& error) {
+    const std::string* b = bytes(a, error);
+    if (!b) return Value::null();
+    std::string name = a.size() > 1 ? a[1].as_str() : "document.pdf";
+    std::erase_if(name, [](char c) { return c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20; });
+    const bool download = a.size() > 2 && a[2].as_bool();
+    ctx.res.header("Content-Type", "application/pdf")
+           .header("Content-Disposition", std::string(download ? "attachment" : "inline") + "; filename=\"" + name + "\"")
+           .send(*b);
+    ctx.response_written = true;
+    return Value::null();
+}
+
+Value fn_pdf_close(NativeCtx&, std::vector<Value>& a, std::string&) {
+    return Value::boolean(handles().close(static_cast<int>(a[0].as_int())));
 }
 
 } // namespace
 
 LUX_MODULE(pdf, {
-    {"create",         2, 2, fn_pdf_create},
-    {"add_page",       3, 3, fn_pdf_add_page},
-    {"set_color",      4, 4, fn_pdf_set_color},
-    {"set_font",       2, 4, fn_pdf_set_font},
-    {"text",           5, 5, fn_pdf_text},
-    {"rect",           5, 6, fn_pdf_rect},
-    {"line",           5, 5, fn_pdf_line},
-    {"set_line_width", 2, 2, fn_pdf_set_line_width},
-    {"save",           2, 2, fn_pdf_save},
-    {"to_base64",      1, 1, fn_pdf_to_base64},
-    {"close",          1, 1, fn_pdf_close},
+    {"create",         "nn",     fn_pdf_create},
+    {"add_page",       "inn",    fn_pdf_add_page},
+    {"set_color",      "innn",   fn_pdf_set_color},
+    {"set_font",       "is|bb",  fn_pdf_set_font},
+    {"text",           "innsn",  fn_pdf_text},
+    {"text_width",     "isn",    fn_pdf_text_width},
+    {"rect",           "innnn|b", fn_pdf_rect},
+    {"line",           "innnn",  fn_pdf_line},
+    {"set_line_width", "in",     fn_pdf_set_line_width},
+    {"image",          "isnn|nn", fn_pdf_image},
+    {"save",           "is",     fn_pdf_save},
+    {"to_base64",      "i",      fn_pdf_to_base64},
+    {"send",           "i|sb",   fn_pdf_send},
+    {"close",          "i",      fn_pdf_close},
 })
 
 } // namespace lux_script

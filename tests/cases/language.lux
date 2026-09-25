@@ -352,3 +352,24 @@ class EnumOrder:
 
 post endpoint("/enum_order", EnumOrder o):
     return { "status": o.status }
+
+fn string parity(int x):
+    if x % 2 == 0:
+        return "even"
+    return "odd"
+
+get endpoint("/list_more"):
+    List<int> l = [3, 1, 4, 1, 5, 9, 2, 6]
+    List<int> empty = []
+    List<int> stack = [1, 2, 3]
+    Json popped = stack.pop()
+    stack.insert(0, 0)
+    stack.insert(-1, 9)
+    return { "first": l.first(), "last": l.last(), "none": empty.first(), "sum": l.sum(), "fsum": [1, 2.5].sum(), "min": l.min(), "max": l.max(), "unique": l.unique(), "any": l.any(is_even), "all": l.all(is_even), "count": l.count(is_even), "groups": l.group_by(parity), "chunks": [1, 2, 3, 4, 5].chunk(2), "popped": popped, "stack": stack, "items": { "a": 1, "b": 2 }.items() }
+
+get endpoint("/float_conv"):
+    double x = float("3.5")
+    return { "a": x, "b": float(2), "c": float("1e3"), "d": float(true) }
+
+get endpoint("/float_bad"):
+    return { "r": float("abc") }

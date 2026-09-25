@@ -1,4 +1,5 @@
 #include <chrono>
+#include <unordered_set>
 #include <lux_script/natives.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
@@ -160,6 +161,21 @@ Value fn_len(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
 Value fn_str(NativeCtx&, std::vector<Value>& args, std::string&) {
     return Value::str(args[0].to_string());
+}
+
+Value fn_float(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    const Value& v = args[0];
+    if (v.is_num())  return Value::real(v.as_float());
+    if (v.is_bool()) return Value::real(v.as_bool() ? 1.0 : 0.0);
+    if (v.is_str()) {
+        char* end = nullptr;
+        const double d = std::strtod(v.as_str().c_str(), &end);
+        if (!v.as_str().empty() && *end == '\0') return Value::real(d);
+        error = "float(): '" + v.as_str() + "' is not a number";
+        return Value::null();
+    }
+    error = std::string("float() does not apply to ") + v.type_name();
+    return Value::null();
 }
 
 Value fn_int(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -428,7 +444,7 @@ Value fn_req_body(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.body);
 }
 
-const std::array<NativeDef, 50> kNatives = {{
+const std::array<NativeDef, 51> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -489,6 +505,7 @@ const std::array<NativeDef, 50> kNatives = {{
     {"__db_commit",   1, 1, nullptr, true},
     {"__db_rollback", 1, 1, nullptr, true},
     {"__db_last_id",  1, 1, nullptr, true},
+    {"float",           1, 1,  fn_float},
 }};
 
 } // namespace
@@ -1000,6 +1017,93 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             }
             return Value::integer(-1);
         }
+        if (name == "first" || name == "last") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            return l.empty() ? Value::null() : name == "first" ? l.front() : l.back();
+        }
+        if (name == "pop") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            if (l.empty()) return Value::null();
+            Value v = std::move(l.back());
+            l.pop_back();
+            return v;
+        }
+        if (name == "insert") {
+            if (!want(args.size(), 2, 2, name, error)) return Value::null();
+            if (!args[0].is_int()) { error = "'insert()' expects an int position"; return Value::null(); }
+            const long long n = static_cast<long long>(l.size());
+            long long i = args[0].as_int() < 0 ? args[0].as_int() + n : args[0].as_int();
+            l.insert(l.begin() + std::clamp(i, 0LL, n), args[1]);
+            return recv;
+        }
+        // Numbers only; stays an int while every value is one.
+        if (name == "sum") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            long long ints = 0; double total = 0; bool all_int = true;
+            for (const Value& v : l) {
+                if (!v.is_num()) { error = "sum(): every value must be a number"; return Value::null(); }
+                all_int = all_int && v.is_int();
+                if (v.is_int()) ints += v.as_int(); else total += v.as_float();
+            }
+            return all_int ? Value::integer(ints) : Value::real(total + static_cast<double>(ints));
+        }
+        if (name == "min" || name == "max") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            const Value* best = nullptr;
+            for (const Value& v : l) {
+                bool ok = true;
+                if (!best || (name == "min" ? v.less_than(*best, ok) : best->less_than(v, ok))) best = &v;
+                if (!ok) { error = name + "(): the List has values that cannot be compared with each other"; return Value::null(); }
+            }
+            return best ? *best : Value::null();
+        }
+        // First occurrence of each value, in order.
+        if (name == "unique") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            std::unordered_set<std::string> seen;
+            Value::List out;
+            for (const Value& v : l)
+                if (seen.insert(v.to_json_text()).second) out.push_back(v);
+            return Value::list(std::move(out));
+        }
+        // any/all/count with a predicate, or on the values' truthiness.
+        if (name == "any" || name == "all" || name == "count") {
+            if (!want(args.size(), 0, 1, name, error)) return Value::null();
+            if (!args.empty() && !args[0].is_func()) { error = "'" + name + "()' expects a function"; return Value::null(); }
+            long long hits = 0;
+            for (const Value& v : l) {
+                const bool yes = args.empty() ? v.truthy() : call_func_value(ctx, args[0], {v}, name.c_str(), error).truthy();
+                if (!error.empty()) return Value::null();
+                hits += yes;
+                if (name == "any" && yes) return Value::boolean(true);
+                if (name == "all" && !yes) return Value::boolean(false);
+            }
+            return name == "count" ? Value::integer(hits) : Value::boolean(name == "all");
+        }
+        // {key: [items...]} by what fn returns for each item.
+        if (name == "group_by") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_func()) { error = "'group_by()' expects a function"; return Value::null(); }
+            Value::Dict out;
+            for (const Value& v : l) {
+                Value key = call_func_value(ctx, args[0], {v}, name.c_str(), error);
+                if (!error.empty()) return Value::null();
+                Value& bucket = out[key.to_string()];
+                if (!bucket.is_list()) bucket = Value::list();
+                bucket.as_list().push_back(v);
+            }
+            return Value::dict(std::move(out));
+        }
+        // Lists of at most n items -- batching, table rows.
+        if (name == "chunk") {
+            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!args[0].is_int() || args[0].as_int() < 1) { error = "'chunk()' expects a positive int"; return Value::null(); }
+            const size_t n = static_cast<size_t>(args[0].as_int());
+            Value::List out;
+            for (size_t i = 0; i < l.size(); i += n)
+                out.push_back(Value::list(Value::List(l.begin() + i, l.begin() + std::min(l.size(), i + n))));
+            return Value::list(std::move(out));
+        }
         error = "Lists have no method '" + name + "'";
         return Value::null();
     }
@@ -1130,6 +1234,13 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             for (const auto& [k, v] : args[0].as_dict()) d[k] = v;
             return recv;
         }
+        // [[key, value], ...] -- for iterating both at once.
+        if (name == "items") {
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            Value::List out;
+            for (const auto& [k, v] : recv.as_dict()) out.push_back(Value::list({Value::str(k), v}));
+            return Value::list(std::move(out));
+        }
         error = "Dicts have no method '" + name + "'";
         return Value::null();
     }
@@ -1177,11 +1288,18 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
         {"reduce", 2, 2, "Json"},      {"for_each", 1, 1, nullptr},
         {"sort_by", 1, 1, nullptr},    {"find", 1, 1, "Json"},
         {"find_index", 1, 1, "int"},
+        {"first", 0, 0, "Json"},       {"last", 0, 0, "Json"},
+        {"pop", 0, 0, "Json"},         {"insert", 2, 2, nullptr},
+        {"sum", 0, 0, "Json"},         {"min", 0, 0, "Json"},
+        {"max", 0, 0, "Json"},         {"unique", 0, 0, "List"},
+        {"any", 0, 1, "bool"},         {"all", 0, 1, "bool"},
+        {"count", 0, 1, "int"},        {"group_by", 1, 1, "Dict"},
+        {"chunk", 1, 1, "List"},
     });
     static const std::vector<BuiltinMethod> kDict = with_own({
         {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
         {"values", 0, 0, "List"}, {"get", 1, 2, "Json"}, {"remove", 1, 1, "bool"},
-        {"merge", 1, 1, nullptr},
+        {"merge", 1, 1, nullptr}, {"items", 0, 0, "List"},
     });
 
     if (type == "string") return &kString;
