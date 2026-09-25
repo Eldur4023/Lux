@@ -327,6 +327,17 @@ print('ok')" "$zip_path" 2>&1 | tail -1)
 rm -rf "$(dirname "$zip_path")"
 if [ "$zip_check" = "ok" ]; then ok "zip archive is valid, names are sanitised"
 else fail "zip archive is valid, names are sanitised" "ok" "$zip_check"; fi
+zip_path=$(curl -sS --max-time 30 "http://127.0.0.1:$PORT/zip/many" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+zip_check=$(python3 -c "
+import zipfile, sys
+z = zipfile.ZipFile(sys.argv[1])
+names = z.namelist()
+assert len(names) == 70000, len(names)
+assert z.read('f69999.txt') == b'x'
+print('ok')" "$zip_path" 2>&1 | tail -1)
+rm -rf "$(dirname "$zip_path")"
+if [ "$zip_check" = "ok" ]; then ok "zip writes ZIP64 past 65535 entries"
+else fail "zip writes ZIP64 past 65535 entries" "ok" "$zip_check"; fi
 sleep 2.3
 ticks=$(curl -sS "http://127.0.0.1:$PORT/every/ticks" | python3 -c "import json,sys; print(json.load(sys.stdin)['ticks'])")
 if [ "$ticks" -ge 2 ] 2>/dev/null; then ok "every \"1s\" runs on its own ($ticks runs)"

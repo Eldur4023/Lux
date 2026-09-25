@@ -159,6 +159,18 @@ get endpoint("/zip/create"):
     Json n = await zip.create(os.path_join(dir, "out.zip"), [os.path_join(dir, "a.txt"), [os.path_join(dir, "b.bin"), "../../evil/b.bin"]])
     return { "n": n, "path": os.path_join(dir, "out.zip") }
 
+# Past 65535 entries the archive needs the ZIP64 end records.
+get endpoint("/zip/many"):
+    string dir = os.path_join(os.temp_dir(), "lux-zip-many")
+    os.make_dir(dir)
+    string src = os.path_join(dir, "a.txt")
+    await os.write_file(src, "x")
+    List<Json> items = []
+    for int i in range(70000):
+        items.add([src, "f" + str(i) + ".txt"])
+    Json n = await zip.create(os.path_join(dir, "many.zip"), items)
+    return { "n": n, "path": os.path_join(dir, "many.zip") }
+
 every "1s":
     state.incr("every_ticks")
 

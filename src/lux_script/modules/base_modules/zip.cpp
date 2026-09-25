@@ -1,10 +1,10 @@
 // "Download all as .zip". With zlib (the gzip module's build) an entry is
 // deflated unless it is compressed already (photos, video, PDFs...); without
-// it everything is stored. Files are streamed, never loaded whole.
-// ponytail: no ZIP64, so no entry or archive past 4 GB; add it if that is
-// ever needed.
+// it everything is stored. Files are streamed, never loaded whole. Past
+// 4 GB (an entry, an offset) or 65535 entries it writes ZIP64 records.
 #include <lux_script/builtin_module.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -41,7 +41,12 @@ void le(std::string& out, uint64_t v, int bytes) {
     for (int i = 0; i < bytes; ++i) out += static_cast<char>((v >> (8 * i)) & 0xFF);
 }
 
-struct Entry { std::string name; uint32_t crc, size, packed, offset; uint16_t method; };
+struct Entry { std::string name; uint32_t crc; uint64_t size, packed, offset; uint16_t method; bool zip64; };
+
+constexpr uint64_t kMax32 = 0xFFFFFFFFu;
+// Deflate can grow incompressible data a little, so an entry this close to
+// 4 GB is written as ZIP64 from its local header on.
+constexpr uint64_t kZip64From = 0xF0000000u;
 
 // Deflating a JPEG or an MP4 spends CPU to gain nothing.
 bool worth_deflating(const std::string& name) {
@@ -78,20 +83,21 @@ Value fn_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
         name = clean.generic_string();
 
         std::error_code ec;
-        const auto size = fs::file_size(path, ec);
+        const uint64_t size = fs::file_size(path, ec);
         std::ifstream in(path, std::ios::binary);
         if (ec || !in || name.empty()) { error = "zip.create(): cannot read '" + path + "'"; return Value::null(); }
-        if (size >= 0xFFFFFFFFu || offset >= 0xFFFFFFFFu) { error = "zip.create(): over 4 GB is not supported"; return Value::null(); }
 
         // Local header with bit 3 set: CRC and sizes follow the data, so
         // the file is read exactly once.
         const uint16_t method = worth_deflating(name) ? 8 : 0;   // 8 deflate, 0 stored
+        const bool zip64 = size >= kZip64From;
         std::string h;
-        le(h, 0x04034b50, 4); le(h, 20, 2); le(h, 0x0808, 2);   // bit 3 + UTF-8 names
-        le(h, method, 2); le(h, 0, 4);                           // no DOS time
-        le(h, 0, 4); le(h, 0, 4); le(h, 0, 4);
-        le(h, name.size(), 2); le(h, 0, 2);
+        le(h, 0x04034b50, 4); le(h, zip64 ? 45 : 20, 2); le(h, 0x0808, 2);   // bit 3 + UTF-8 names
+        le(h, method, 2); le(h, 0, 4);                                        // no DOS time
+        le(h, 0, 4); le(h, zip64 ? kMax32 : 0, 4); le(h, zip64 ? kMax32 : 0, 4);
+        le(h, name.size(), 2); le(h, zip64 ? 20 : 0, 2);
         h += name;
+        if (zip64) { le(h, 0x0001, 2); le(h, 16, 2); le(h, 0, 8); le(h, 0, 8); }   // sizes in the descriptor
         out.write(h.data(), static_cast<std::streamsize>(h.size()));
 
         uint32_t crc = 0;
@@ -129,27 +135,42 @@ Value fn_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
 #ifdef LUX_GZIP
         if (method == 8) deflateEnd(&z);
 #endif
+        if (!zip64 && packed >= kMax32) { error = "zip.create(): '" + path + "' grew past 4 GB while being read"; return Value::null(); }
         std::string d;
-        le(d, 0x08074b50, 4); le(d, crc, 4); le(d, packed, 4); le(d, size, 4);
+        le(d, 0x08074b50, 4); le(d, crc, 4);
+        le(d, packed, zip64 ? 8 : 4); le(d, size, zip64 ? 8 : 4);
         out.write(d.data(), static_cast<std::streamsize>(d.size()));
-        entries.push_back({name, crc, static_cast<uint32_t>(size), static_cast<uint32_t>(packed),
-                           static_cast<uint32_t>(offset), method});
+        entries.push_back({name, crc, size, packed, offset, method, zip64});
         offset += h.size() + packed + d.size();
     }
 
     std::string dir;
     for (const Entry& e : entries) {
-        le(dir, 0x02014b50, 4); le(dir, 20, 2); le(dir, 20, 2); le(dir, 0x0808, 2);
-        le(dir, e.method, 2); le(dir, 0, 4);
-        le(dir, e.crc, 4); le(dir, e.packed, 4); le(dir, e.size, 4);
-        le(dir, e.name.size(), 2); le(dir, 0, 2); le(dir, 0, 2); le(dir, 0, 2); le(dir, 0, 2);
-        le(dir, 0, 4); le(dir, e.offset, 4);
-        dir += e.name;
+        // A ZIP64 extra holds, in this order, only the fields that overflow.
+        std::string extra;
+        const bool big = e.zip64 || e.size >= kMax32 || e.packed >= kMax32;
+        if (big) { le(extra, e.size, 8); le(extra, e.packed, 8); }
+        if (e.offset >= kMax32) le(extra, e.offset, 8);
+        if (!extra.empty()) { std::string x; le(x, 0x0001, 2); le(x, extra.size(), 2); extra = x + extra; }
+        le(dir, 0x02014b50, 4); le(dir, extra.empty() ? 20 : 45, 2); le(dir, extra.empty() ? 20 : 45, 2);
+        le(dir, 0x0808, 2); le(dir, e.method, 2); le(dir, 0, 4);
+        le(dir, e.crc, 4); le(dir, big ? kMax32 : e.packed, 4); le(dir, big ? kMax32 : e.size, 4);
+        le(dir, e.name.size(), 2); le(dir, extra.size(), 2); le(dir, 0, 2); le(dir, 0, 2); le(dir, 0, 2);
+        le(dir, 0, 4); le(dir, e.offset >= kMax32 ? kMax32 : e.offset, 4);
+        dir += e.name + extra;
     }
     std::string end;
+    const uint64_t n = entries.size();
+    if (n >= 0xFFFF || dir.size() >= kMax32 || offset >= kMax32) {
+        // ZIP64 end record, then the locator that points at it.
+        le(end, 0x06064b50, 4); le(end, 44, 8); le(end, 45, 2); le(end, 45, 2);
+        le(end, 0, 4); le(end, 0, 4); le(end, n, 8); le(end, n, 8);
+        le(end, dir.size(), 8); le(end, offset, 8);
+        le(end, 0x07064b50, 4); le(end, 0, 4); le(end, offset + dir.size(), 8); le(end, 1, 4);
+    }
     le(end, 0x06054b50, 4); le(end, 0, 2); le(end, 0, 2);
-    le(end, entries.size(), 2); le(end, entries.size(), 2);
-    le(end, dir.size(), 4); le(end, offset, 4); le(end, 0, 2);
+    le(end, std::min<uint64_t>(n, 0xFFFF), 2); le(end, std::min<uint64_t>(n, 0xFFFF), 2);
+    le(end, std::min<uint64_t>(dir.size(), kMax32), 4); le(end, std::min<uint64_t>(offset, kMax32), 4); le(end, 0, 2);
     out.write(dir.data(), static_cast<std::streamsize>(dir.size()));
     out.write(end.data(), static_cast<std::streamsize>(end.size()));
     if (!out.flush()) { error = "zip.create(): write failed"; return Value::null(); }
