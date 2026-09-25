@@ -264,6 +264,30 @@ A route with group guards is **never** declarative: the native action would not 
 
 ---
 
+### Scheduled tasks
+
+`every` runs a block on a schedule, with everything a route has: databases, modules, `await`.
+
+```lux
+every "10m":
+    await sqlite.exec("delete from sessions where expires < ?", time.now())
+
+every "03:00":                      # daily, 03:00 UTC
+    List<Json> rows = await sqlite.query("select email from users where digest = 1")
+    for Json r in rows:
+        await mail.send({ "to": r["email"], "subject": "Your digest", "text": "..." })
+```
+
+The schedule is an interval (`"30s"`, `"5m"`, `"2h"`, `"1d"`) or a daily UTC time (`"HH:MM"`);
+anything else is a compile error. An interval's first run is one interval after startup. A run
+that is still going when the next one is due makes that one skip, with a warning. A task that
+fails is logged and runs again next time; it never takes the server down. A task has no
+request, so `query()`, `header()`, `session` and the like are empty in it.
+
+Tasks run in the process, on one event loop: with several instances of the app behind a load
+balancer, each instance runs them. A hot reload changes what a task does; adding a task or
+changing its schedule needs a restart.
+
 ## 5. Parameters
 
 Everything the handler needs is declared in the signature.
@@ -1610,11 +1634,43 @@ to 4 GB.
 
 ### http
 
-**await** `get(url[, headers])` `delete(url[, headers])` `post(url, body[, headers])` `put`
-`patch` → `{status, headers, body}`, with `body` parsed when it is JSON. A `Dict` body is sent
-as JSON. HTTPS through libcurl (`libcurl4-openssl-dev` at build time), certificates always
-verified, 15 s timeout, redirects only to http/https. `url_encode(s)` is the same as
+**await** `get(url[, headers, options])` `delete(url[, headers, options])`
+`post(url, body[, headers, options])` `put` `patch` → `{status, headers, body}`, with `body`
+parsed when it is JSON. A `Dict` body is sent as JSON. `options`: `timeout_ms` (default 15 s,
+up to 120 s) and `public_only` — refuse any private, loopback or link-local address (checked
+on the address actually connected to, redirects included), for a URL that comes from a user:
+
+```lux
+Json r = await http.get(webhook_url, null, { "public_only": true, "timeout_ms": 5000 })
+```
+
+HTTPS through libcurl (`libcurl4-openssl-dev` at build time), certificates always verified,
+redirects only to http/https. Connections are kept and reused across calls. `url_encode(s)` is
 `encoding.url_encode`.
+
+### mail
+
+```lux
+import mail
+
+app:
+    mail:
+        host     "smtp.example.com"
+        port     587                     # the default; 465 with tls "tls"
+        user     "apikey"
+        password env("SMTP_PASSWORD")
+        from     "My App <noreply@example.com>"
+        tls      "starttls"              # "starttls" (default), "tls" or "none"
+
+post endpoint("/contact"):
+    Json r = await mail.send({ "to": "me@example.com", "reply_to": form("email"),
+                               "subject": "Contact: " + form("subject"), "text": form("message") })
+```
+
+**await** `send({to, cc, bcc, reply_to, from, subject, text, html})` → `true`, or
+`{"error": ...}`. `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
+the mail carries both. Every header value is stripped of line breaks, so a form field cannot
+add a header, and `bcc` never appears in the message. Built with the `http` module (libcurl).
 
 ---
 

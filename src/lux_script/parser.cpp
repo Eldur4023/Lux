@@ -1,3 +1,4 @@
+#include <lux_script/schedule.hpp>
 #include <lux_script/parser.hpp>
 #include <cstdlib>
 #include <iostream>
@@ -155,6 +156,9 @@ void Parser::parse_declaration(Program& out) {
         }
 
         default:
+            // `every` is a keyword only here, so a variable may still be
+            // called that.
+            if (check(Tok::Ident) && peek().text == "every") { parse_every(out); return; }
             error_here("expected a declaration (get/post/... endpoint, or app)");
             synchronize();
             return;
@@ -266,6 +270,36 @@ void Parser::parse_fn(Program& out) {
 
     f.body = parse_block();
     out.functions.push_back(std::move(f));
+}
+
+// ─── Scheduled tasks ─────────────────────────────────────────────────────────
+//
+// `every "5m":` is a route nobody can request: method EVERY (not an HTTP
+// method, so the parser in front of the router never produces it) on an
+// internal path the scheduler dispatches to. Everything a route can do, a
+// task can -- databases, modules, await.
+
+void Parser::parse_every(Program& out) {
+    RouteDecl r;
+    r.loc    = advance().loc;                   // 'every'
+    r.method = "EVERY";
+    if (!check(Tok::String)) {
+        error_here("expected the schedule after 'every', in quotes: \"30s\", \"5m\", \"1h\", \"1d\" or \"03:00\"");
+        synchronize();
+        return;
+    }
+    r.pattern_loc = peek().loc;
+    r.every       = advance().text;
+    EverySpec spec;
+    if (!parse_every_spec(r.every, spec))
+        diags_.error(r.pattern_loc, "'" + r.every + "' is not a schedule: an interval (\"30s\", \"5m\", "
+                                    "\"1h\", \"1d\") or a daily UTC time (\"03:00\")");
+    int n = 0;
+    for (const auto& other : out.routes) n += other.method == "EVERY";
+    r.pattern = "/__every/" + std::to_string(n);
+    if (!expect(Tok::Colon, "opening the task")) { synchronize(); return; }
+    r.body = parse_block();
+    out.routes.push_back(std::move(r));
 }
 
 // ─── Error handlers ──────────────────────────────────────────────────────────

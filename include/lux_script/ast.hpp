@@ -169,6 +169,7 @@ struct RouteDecl {
     std::string              pattern;   // "/users/:id", already with the group prefix
     std::vector<Param>       params;
     std::vector<std::string> origins;   // ws only
+    std::string              every;     // EVERY only: "5m", "03:00" (schedule.hpp)
     std::vector<Guard>       guards;    // accumulated from the enclosing groups
     Block                    body;
     SourceLoc                loc;

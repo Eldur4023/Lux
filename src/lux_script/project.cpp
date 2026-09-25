@@ -1368,6 +1368,7 @@ std::string build_openapi(const Program& program, const ClassTable& classes) {
     for (const auto& r : program.routes) {
         // Streaming routes do not fit OpenAPI 3.0: they are advertised as GET
         // with the response they really return, without faking a schema.
+        if (r.method == "EVERY") continue;   // a scheduled task, not an endpoint
         std::string method = r.method;
         if (method == "SSE" || method == "WS") method = "GET";
         if (method == "*")                     method = "get";

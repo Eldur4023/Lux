@@ -559,6 +559,7 @@ void App::run(const std::string& host, uint16_t port) {
     log().info("Lux running on ", scheme, "://", host, ':', port,
                " (threads=", num_threads, ", press CTRL+C to quit)");
 
+    if (on_start_) on_start_(main_loop);
     main_loop.run();
 
     for (auto& t : threads) t.join();

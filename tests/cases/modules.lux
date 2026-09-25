@@ -155,6 +155,16 @@ get endpoint("/zip/create"):
     Json n = await zip.create(os.path_join(dir, "out.zip"), [os.path_join(dir, "a.txt"), [os.path_join(dir, "b.bin"), "../../evil/b.bin"]])
     return { "n": n, "path": os.path_join(dir, "out.zip") }
 
+every "1s":
+    state.incr("every_ticks")
+
+every "1s":
+    List<Json> none = []
+    Json boom = none[5]
+
+get endpoint("/every/ticks"):
+    return { "ticks": state.get("every_ticks", 0) }
+
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
     int h = csv.parse(data)

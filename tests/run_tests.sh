@@ -314,6 +314,13 @@ print('ok')" "$zip_path" 2>&1 | tail -1)
 rm -rf "$(dirname "$zip_path")"
 if [ "$zip_check" = "ok" ]; then ok "zip archive is valid, names are sanitised"
 else fail "zip archive is valid, names are sanitised" "ok" "$zip_check"; fi
+sleep 2.3
+ticks=$(curl -sS "http://127.0.0.1:$PORT/every/ticks" | python3 -c "import json,sys; print(json.load(sys.stdin)['ticks'])")
+if [ "$ticks" -ge 2 ] 2>/dev/null; then ok "every \"1s\" runs on its own ($ticks runs)"
+else fail "every \"1s\" runs on its own" ">= 2 runs" "$ticks"; fi
+kill -0 "$SRV" 2>/dev/null && ok "a failing task does not take the server down" \
+                           || fail "a failing task does not take the server down" "alive" "dead"
+check "every is not reachable over HTTP" GET /__every/0 404 'Not Found'
 check "csv.parse/columns/rows"     GET /csv/basic                 200 '"name":"ana","age":30,"city":"madrid"'
 check "csv row_count"              GET /csv/basic                 200 '"row_count":3'
 check "csv.read + List.filter"     GET /csv/read_and_aggregate 200 '"madrid":[{"name":"ana","age":30,"city":"madrid"},{"name":"cleo","age":35,"city":"madrid"}]'
@@ -470,6 +477,7 @@ fails_to_compile "method on a string"   "$HERE/cases/bad/method_type.lux" "have 
 fails_to_compile "field of a class"    "$HERE/cases/bad/field_type.lux"  "has no field"
 fails_to_compile "module not imported"   "$HERE/cases/bad/import.lux"   "missing 'import sqlite'"
 fails_to_compile "native module not imported" "$HERE/cases/bad/module_import.lux" "missing 'import hash'"
+fails_to_compile "a bad schedule"        "$HERE/cases/bad/every.lux"    "is not a schedule"
 fails_to_compile "'Response' as a return type" "$HERE/cases/bad/response_type.lux" "cannot be used as a return type"
 # Expression types are checked at RUN TIME: the compiler
 # it verifies names, arity, context, and the methods and fields of a receiver

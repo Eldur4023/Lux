@@ -41,6 +41,13 @@ public:
     // stopping the loops is safe.
     //
     // It blocks the shutdown for as long as it lasts, so it must finish.
+    // Runs on the main event loop's thread, right before it starts: the
+    // place to arm timers (scheduled tasks) on it.
+    App& on_start(std::function<void(core::EventLoop&)> fn) {
+        on_start_ = std::move(fn);
+        return *this;
+    }
+
     App& on_before_stop(std::function<void()> fn) {
         before_stop_ = std::move(fn);
         return *this;
@@ -364,6 +371,7 @@ private:
     std::unordered_map<int, AsyncErrorHandler> async_error_handlers_;
     AsyncErrorHandler                          catchall_async_error_handler_;
     std::function<void()>                     before_stop_;
+    std::function<void(core::EventLoop&)>     on_start_;
 
     int                                       max_connections_ = 10'000;
 

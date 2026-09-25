@@ -63,6 +63,7 @@ private:
     void parse_class(Program& out);
     void parse_enum(Program& out);
     void parse_error(Program& out);
+    void parse_every(Program& out);
     void parse_fn(Program& out);
 
     // ── Statements ───────────────────────────────────────────────────────────

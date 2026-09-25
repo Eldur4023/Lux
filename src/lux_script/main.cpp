@@ -1,4 +1,5 @@
 // The Lux binary: it reads .lux files and serves.
+#include <lux_script/schedule.hpp>
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
 #include <lux_script/autotest.hpp>
@@ -71,6 +72,20 @@ void usage() {
 // Watches the compiled files and recompiles when it detects a change.
 // If the new version does not compile, the error is printed and the previous
 // one keeps serving: a typo never takes the server down.
+// "5 route(s) — 1 declarative, 4 with logic, 2 scheduled task(s)"
+std::string route_summary(const lux_script::Module& m) {
+    size_t declarative = 0, logic = 0, tasks = 0;
+    for (const auto& r : m.route_report) {
+        if (r.method == "EVERY") ++tasks;
+        else if (r.path == "declarative") ++declarative;
+        else ++logic;
+    }
+    std::string s = std::to_string(declarative + logic) + " route(s) — " + std::to_string(declarative) +
+                    " declarative, " + std::to_string(logic) + " with logic";
+    if (tasks) s += ", " + std::to_string(tasks) + " scheduled task(s)";
+    return s;
+}
+
 void watch_loop(std::vector<fs::path> inputs) {
     while (!g_stop.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -110,15 +125,64 @@ void watch_loop(std::vector<fs::path> inputs) {
         }
 
         publish_module(next);
-        lux::log().info("reloaded: " + std::to_string(next->program.routes.size()) +
-                           " route(s) — " + std::to_string(next->declarative_routes) +
-                           " declarative, " + std::to_string(next->vm_routes) +
-                           " with logic");
+        lux::log().info("reloaded: " + route_summary(*next));
         lanzar_autotest(next);
     }
 }
 
 } // namespace
+
+// One `every` block: armed on the main loop, never run twice at once.
+struct ScheduledTask : std::enable_shared_from_this<ScheduledTask> {
+    std::string              path, label;
+    lux_script::EverySpec    spec;
+    lux::DispatchFn          dispatch;
+    bool                     running = false;   // touched only on the loop's thread
+
+    static long long now() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+    }
+
+    // In steps of at most an hour: schedule_timer takes an int of ms, and
+    // "1d" or a daily time is further away than that.
+    void arm(lux::core::EventLoop& loop, long long due) {
+        const int wait = static_cast<int>(std::clamp(due - now(), 0LL, 3'600'000LL));
+        loop.schedule_timer(wait, [self = shared_from_this(), &loop, due] {
+            if (now() < due) { self->arm(loop, due); return; }
+            self->run(loop);
+            self->arm(loop, self->spec.next(now()));
+        });
+    }
+
+    void run(lux::core::EventLoop& loop) {
+        if (running) {
+            lux::log().warn("every \"", label, "\": the previous run has not finished, skipping this one");
+            return;
+        }
+        running = true;
+        auto req = std::make_shared<lux::Request>();
+        auto res = std::make_shared<lux::Response>();
+        req->method    = "EVERY";
+        req->path      = path;
+        req->remote_ip = "127.0.0.1";
+        req->loop      = &loop;
+        auto task = [](std::shared_ptr<ScheduledTask> self, std::shared_ptr<lux::Request> req,
+                       std::shared_ptr<lux::Response> res) -> lux::Task<void> {
+            try {
+                co_await self->dispatch(*req, *res);
+                if (res->status_code() >= 400)
+                    lux::log().error("every \"", self->label, "\" failed: ", res->body());
+            } catch (const std::exception& e) {
+                lux::log().error("every \"", self->label, "\" failed: ", e.what());
+            }
+            self->running = false;
+        }(shared_from_this(), req, res);
+        auto h = task.detach();
+        h.promise().loop = &loop;
+        h.resume();
+    }
+};
 
 int main(int argc, char** argv) {
     std::vector<std::string> args;
@@ -193,10 +257,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "lux: " << inputs.size() << " file(s), "
-              << mod->program.routes.size() << " route(s) — "
-              << mod->declarative_routes << " declarative, "
-              << mod->vm_routes << " with logic\n";
+    std::cout << "lux: " << inputs.size() << " file(s), " << route_summary(*mod) << "\n";
     if (native) {
         std::cout << "lux: --native: " << (mod->native ? mod->native->compiled() : 0)
                   << " function(s), " << (mod->native ? mod->native->routes_compiled() : 0)
@@ -277,6 +338,26 @@ int main(int argc, char** argv) {
     };
     app.any("/",  dispatch);
     app.any("/*", dispatch);
+
+    // `every` blocks: one timer each on the main loop, dispatched like a
+    // request to the live module, so a hot reload changes what a task does
+    // (a new task, or a new schedule, needs a restart).
+    {
+        std::vector<std::shared_ptr<ScheduledTask>> tasks;
+        for (const auto& r : mod->program.routes) {
+            if (r.method != "EVERY") continue;
+            auto t = std::make_shared<ScheduledTask>();
+            t->path = r.pattern;
+            t->label = r.every;
+            t->dispatch = dispatch;
+            lux_script::parse_every_spec(r.every, t->spec);
+            tasks.push_back(std::move(t));
+        }
+        if (!tasks.empty())
+            app.on_start([tasks](lux::core::EventLoop& loop) {
+                for (const auto& t : tasks) t->arm(loop, t->spec.next(ScheduledTask::now()));
+            });
+    }
 
     // See App::set_route_probe's comment: router_ only ever holds the two
     // catch-all entries just above, so App::handle_request()'s own default
