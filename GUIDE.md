@@ -1651,9 +1651,10 @@ get endpoint("/admin"):
 ### zip
 
 **await** `create(dest, files)` writes an archive of the files (paths, or `[path,
-name_in_zip]` pairs) and returns how many went in. Entries are stored, not compressed — fine
-for what usually ends up in one (photos, PDFs, video), and no compression library needed; up
-to 4 GB.
+name_in_zip]` pairs) and returns how many went in. Files are streamed, not loaded. With zlib
+in the build (the `gzip` module) text-like entries are deflated and already-compressed ones
+(photos, video, PDFs, archives) are stored; without it everything is stored. Past 4 GB or
+65535 entries it writes ZIP64, which every current unzip tool reads.
 
 ### pdf
 
