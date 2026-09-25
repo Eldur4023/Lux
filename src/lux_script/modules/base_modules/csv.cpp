@@ -8,7 +8,7 @@
 // handle-based form, kept as a thin layer over the same code.
 #include <lux_script/builtin_module.hpp>
 
-#include <cerrno>
+#include <cctype>
 #include <cstdlib>
 
 namespace lux_script {
@@ -72,28 +72,45 @@ Table make_table(const std::string& text, bool header, char delim) {
     return t;
 }
 
-// A whole cell that reads as an int, a float or true/false becomes one.
-Value typed(const std::string& s) {
-    if (s == "true" || s == "false") return Value::boolean(s == "true");
-    if (!s.empty()) {
-        char* end = nullptr;
-        if (s.find_first_of(".eE") == std::string::npos) {
-            errno = 0;
-            const long long i = std::strtoll(s.c_str(), &end, 10);
-            if (*end == '\0' && errno != ERANGE) return Value::integer(i);
-        }
-        const double d = std::strtod(s.c_str(), &end);
-        if (*end == '\0') return Value::real(d);
+// A cell becomes a number only when nothing is lost: "007", "+34 600...",
+// " 5" and a 25-digit account number stay text (a zip code or a phone is
+// not a quantity), as do floats past what a double holds exactly.
+bool canonical_number(const std::string& s, bool& is_int) {
+    size_t i = s[0] == '-', digits = 0;
+    const size_t int_start = i;
+    while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i, ++digits;
+    if (i == int_start || (s[int_start] == '0' && i - int_start > 1)) return false;
+    is_int = i == s.size();
+    if (is_int) return digits <= 18;
+    if (s[i] == '.') {
+        const size_t f = ++i;
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i, ++digits;
+        if (i == f) return false;
     }
-    return Value::str(s);
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        ++i;
+        if (i < s.size() && (s[i] == '-' || s[i] == '+')) ++i;
+        const size_t e = i;
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
+        if (i == e) return false;
+    }
+    return i == s.size() && digits <= 15;
 }
 
-Value to_rows(const Table& t) {
+Value typed(const std::string& s, bool infer) {
+    if (!infer) return Value::str(s);
+    if (s == "true" || s == "false") return Value::boolean(s == "true");
+    bool is_int = false;
+    if (s.empty() || !canonical_number(s, is_int)) return Value::str(s);
+    return is_int ? Value::integer(std::strtoll(s.c_str(), nullptr, 10)) : Value::real(std::strtod(s.c_str(), nullptr));
+}
+
+Value to_rows(const Table& t, bool infer = true) {
     Value::List out;
     for (const Row& r : t.rows) {
         Value::Dict d;
         d.reserve(t.columns.size());
-        for (size_t j = 0; j < t.columns.size(); ++j) d[t.columns[j]] = typed(j < r.size() ? r[j] : "");
+        for (size_t j = 0; j < t.columns.size(); ++j) d[t.columns[j]] = typed(j < r.size() ? r[j] : "", infer);
         out.push_back(Value::dict(std::move(d)));
     }
     return Value::list(std::move(out));
@@ -133,11 +150,12 @@ bool delimiter(const std::vector<Value>& a, size_t i, char& out, std::string& er
     return true;
 }
 
-// csv.read(text[, header = true[, delimiter = ","]])
+// csv.read(text[, header = true[, delimiter = ","[, typed = true]]]):
+// typed false leaves every cell a string.
 Value fn_read(NativeCtx&, std::vector<Value>& a, std::string& error) {
     char d;
     if (!delimiter(a, 2, d, error)) return Value::null();
-    return to_rows(make_table(a[0].as_str(), a.size() < 2 || a[1].as_bool(), d));
+    return to_rows(make_table(a[0].as_str(), a.size() < 2 || a[1].as_bool(), d), a.size() < 4 || a[3].as_bool());
 }
 
 // csv.write(rows[, columns[, delimiter]]): rows are Dicts (columns default
@@ -211,7 +229,7 @@ Value fn_close(NativeCtx&, std::vector<Value>& a, std::string&) {
 } // namespace
 
 LUX_MODULE(csv, {
-    {"read",      "s|bs",  fn_read},
+    {"read",      "s|bsb", fn_read},
     {"write",     "l|Ls",  fn_write},
     {"parse",     "s|b",   fn_parse},
     {"rows",      "i",     fn_rows},

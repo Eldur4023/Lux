@@ -70,7 +70,7 @@ get endpoint("/encoding/bad_hex"):
     return { "r": encoding.hex_decode("zz") }
 
 get endpoint("/text/basic"):
-    return { "slug": text.slug("¡Café con Leche! 2024 — Łódź"), "trunc": text.truncate("Hello world", 8), "short": text.truncate("Hi", 8), "num": text.format_number(1234567.891, 2), "num_es": text.format_number(-1234567.891, 2, ".", ","), "pad": text.pad_left("7", 4, "0"), "padr": text.pad_right("ñ", 3, "."), "dist": text.distance("kitten", "sitting") }
+    return { "slug": text.slug("¡Café con Leche! 2024 — Łódź"), "slug2": text.slug("Straße Æsir Œuvre"), "trunc": text.truncate("Hello world", 8), "short": text.truncate("Hi", 8), "num": text.format_number(1234567.891, 2), "num_es": text.format_number(-1234567.891, 2, ".", ","), "half_up": text.format_number(2.675, 2), "carry": text.format_number(999.995, 2), "exact": text.format_number("1234.565", 2), "int": text.format_number(1234567), "neg_zero": text.format_number(-0.001, 2), "pad": text.pad_left("7", 4, "0"), "padr": text.pad_right("ñ", 3, "."), "dist": text.distance("kitten", "sitting") }
 
 get endpoint("/state/ttl"):
     state.remove("hits")
@@ -192,6 +192,11 @@ get endpoint("/csv/read_and_aggregate"):
 get endpoint("/csv/excel"):
     List<Json> rows = csv.read("﻿nombre;precio\n\"Pérez; J.\";1,5\n", true, ";")
     return { "rows": rows, "out": csv.write(rows, null, ";") }
+
+get endpoint("/csv/types"):
+    List<Json> rows = csv.read("zip,phone,n,f,big,neg,exp,sp,pi\n01234,+34600111222,42,2.50,1234567890123456789012,-7,1e3, 5,3.14159265358979323\n")
+    List<Json> raw = csv.read("a\n42\n", true, ",", false)
+    return { "row": rows[0], "raw": raw[0]["a"] }
 
 get endpoint("/csv/write"):
     List<Json> rows = [{ "a": 1, "b": "x,y" }, { "a": "=cmd", "b": null }]
