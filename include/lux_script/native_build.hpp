@@ -31,6 +31,14 @@ namespace lux_script {
 // aparecen aqui; quien las llame seguira sirviendolas con bytecode. Eso es
 // el modo mixto que describe el documento, aplicado a funciones sueltas
 // porque esta fase no llega todavia a rutas.
+// Why --native left something on bytecode, for `--native --check`: per
+// route (by index in Program::routes, "" when it compiled or has nothing to
+// say) and per function that did not compile.
+struct NativeReport {
+    std::vector<std::string>                         rutas;
+    std::vector<std::pair<std::string, std::string>> funciones;
+};
+
 class NativeModule {
 public:
     NativeModule() = default;
@@ -83,7 +91,8 @@ private:
     friend std::unique_ptr<NativeModule> compile_native(const Program&, const FunctionSigs&,
                                                           const ClassSigs&,
                                                           const std::filesystem::path&,
-                                                          std::string&, std::vector<std::string>*);
+                                                          std::string&, NativeReport*,
+                                                          const FunctionTable*);
     void* handle_ = nullptr;
 };
 
@@ -105,6 +114,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const ClassSigs& clases,
                                               const std::filesystem::path& cache_dir,
                                               std::string& aviso,
-                                              std::vector<std::string>* motivos_ruta = nullptr);
+                                              NativeReport* informe = nullptr,
+                                              const FunctionTable* chunks = nullptr);
 
 } // namespace lux_script

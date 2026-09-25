@@ -66,12 +66,21 @@ const FnDecl* buscar_fn(const Program& prog, const std::string& nombre) {
 // funciones, no solo las que van a terminar compilando: una funcion nativa
 // puede llamar a otra que el mapa (alfabetico, por FunctionSigs) todavia no
 // proceso.
-TablaFirmas construir_firmas(const Program& prog) {
+bool es_value(const Type& t) {
+    return t.kind() == Type::Kind::Json ||
+           ((t.kind() == Type::Kind::List || t.kind() == Type::Kind::Dict) && t.element().kind() == Type::Kind::Json);
+}
+
+TablaFirmas construir_firmas(const Program& prog, const FunctionSigs& sigs,
+                             const FunctionTable* chunks) {
     TablaFirmas firmas;
     for (const auto& f : prog.functions) {
         FirmaNativa firma;
-        firma.retorno = Type::from_declared(f.return_type);
-        for (const auto& p : f.params) firma.params.push_back(Type::from_declared(p.type));
+        firma.retorno = tipo_nativo(Type::from_declared(f.return_type));
+        for (const auto& p : f.params) firma.params.push_back(tipo_nativo(Type::from_declared(p.type)));
+        auto it = sigs.find(f.name);
+        if (chunks && it != sigs.end() && it->second.index < chunks->size() && (*chunks)[it->second.index])
+            firma.asincrona = (*chunks)[it->second.index]->has_await;
         firmas[f.name] = std::move(firma);
     }
     return firmas;
@@ -83,15 +92,16 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const ClassSigs& clases_sig,
                                               const std::filesystem::path& cache_dir,
                                               std::string& aviso,
-                                              std::vector<std::string>* motivos_ruta) {
+                                              NativeReport* informe,
+                                              const FunctionTable* chunks) {
     aviso.clear();
-    if (motivos_ruta) motivos_ruta->assign(prog.routes.size(), "");
+    if (informe) informe->rutas.assign(prog.routes.size(), "");
 
     std::vector<std::string> nombre_por_indice(sigs.size());
     for (const auto& [nombre, sig] : sigs)
         if (sig.index < nombre_por_indice.size()) nombre_por_indice[sig.index] = nombre;
 
-    TablaFirmas firmas = construir_firmas(prog);
+    TablaFirmas firmas = construir_firmas(prog, sigs, chunks);
 
     TablaClases clases;
     TablaRoles  roles;
@@ -129,11 +139,13 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     generadas.clear();
     prototipos.clear();
     cuerpos.clear();
+
     auto drop_fn = [&](const std::string& n) { changed |= firmas.erase(n) > 0; };
 
     for (const auto& [nombre, sig] : sigs) {
         const FnDecl* fn = buscar_fn(prog, nombre);
         if (!fn) continue; // no deberia pasar: sigs viene de este mismo prog
+        if (!firmas.count(nombre)) continue;   // dropped by an earlier pass, its reason noted then
 
         DiagnosticBag diags_ir; // descartable: si esta funcion ya compilo a
                                 // bytecode, su cuerpo tipa limpio tambien aqui.
@@ -150,10 +162,28 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // absoluto, solo el tipo declarado del parametro.
         Emitter emitter(diags_ir, &sigs, nullptr, &prog.imports);
         IrBlock body;
-        if (!emitter.check_function(*fn, descartable, diags_ir, &body)) { drop_fn(nombre); continue; }
+        if (!emitter.check_function(*fn, descartable, diags_ir, &body)) {
+            if (informe) informe->funciones.emplace_back(nombre, "not representable yet");
+            drop_fn(nombre);
+            continue;
+        }
 
-        auto generada = generar_funcion_nativa(*fn, body, nombre_por_indice, firmas, clases, roles);
-        if (!generada) { drop_fn(nombre); continue; }
+        std::string motivo;
+        bool        retorno_value = false;
+        auto generada = generar_funcion_nativa(*fn, body, nombre_por_indice, firmas, clases, roles,
+                                               &motivo, &retorno_value);
+        // It returns values its declared type cannot hold natively: it
+        // returns a Value, and every caller is checked again against that.
+        if (!generada && retorno_value && !es_value(firmas[nombre].retorno)) {
+            firmas[nombre].retorno = Type::json();
+            changed = true;
+            continue;
+        }
+        if (!generada) {
+            if (informe) informe->funciones.emplace_back(nombre, motivo);
+            drop_fn(nombre);
+            continue;
+        }
 
         prototipos += generada->firma_cpp + ";\n";
         cuerpos += generada->firma_cpp + " " + generada->cuerpo_cpp + "\n\n";
@@ -221,13 +251,13 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
         IrBlock  body;
         if (!emitter.check_route(r, descartable, diags_ir, &body)) {
-            if (motivos_ruta) (*motivos_ruta)[i] = "not representable yet";
+            if (informe) informe->rutas[i] = "not representable yet";
             continue;
         }
 
         auto generada = generate_native_route(r, body, static_cast<int>(i), nombre_por_indice,
                                             firmas, clases, roles,
-                                            motivos_ruta ? &(*motivos_ruta)[i] : nullptr);
+                                            informe ? &informe->rutas[i] : nullptr);
         if (!generada) continue;
 
         rutas_cuerpos += generada->cuerpo_cpp + "\n\n";

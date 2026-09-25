@@ -70,12 +70,20 @@ struct FuncionNativa {
 struct FirmaNativa {
     std::vector<Type> params;
     Type               retorno = Type::void_();
+    // It awaits (its chunk's has_await, already propagated to callers):
+    // generated as a coroutine, and every call to it is a co_await.
+    bool               asincrona = false;
 };
 // Por nombre de funcion Lux -- construida una sola vez por
 // compile_native() a partir de TODO el programa (no solo las funciones que
 // terminan compilando), porque una funcion nativa puede llamar a otra que
 // el mapa (alfabetico) todavia no proceso.
 using TablaFirmas = std::unordered_map<std::string, FirmaNativa>;
+
+// The type native code holds a declared one in: `int?`, `string?`,
+// `List<int>?` may be null, so they are a Value (Json); anything else as
+// declared.
+Type tipo_nativo(const Type& t);
 
 // Un campo de clase ya reducido a su Type -- solo entra a ClaseNativa::campos
 // si es representable (ver tipo_elemento_contenedor_soportado en
@@ -181,7 +189,9 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
                                                      const std::vector<std::string>& nombre_por_indice,
                                                      const TablaFirmas& firmas,
                                                      const TablaClases& clases,
-                                                     const TablaRoles& roles);
+                                                     const TablaRoles& roles,
+                                                     std::string* motivo = nullptr,
+                                                     bool* pide_retorno_value = nullptr);
 
 // Igual que generar_funcion_nativa(), para el cuerpo de un metodo: `this`
 // ocupa la ranura 0 (antes que los parametros, ver Emitter::check_method),

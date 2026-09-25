@@ -2026,8 +2026,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
         std::string where = r.method + " " + r.pattern;
         mod.route_report.push_back({r.method, r.pattern,
-            ridx < mod.native_why.size() && !mod.native_why[ridx].empty()
-                ? "bytecode (" + mod.native_why[ridx] + ")" : "bytecode"});
+            ridx < mod.native_why.rutas.size() && !mod.native_why.rutas[ridx].empty()
+                ? "bytecode (" + mod.native_why.rutas[ridx] + ")" : "bytecode"});
         mod.router.add_internal(r.method, r.pattern,
             [chunk, binds, where, auth, needs_upload, fn_table, native_table, tpl_table](lux::Request& req, lux::Response& res)
                 -> lux::Task<void> {
@@ -2265,7 +2265,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         // de todas formas no se va a publicar.
         if (native && diags.empty())
             mod->native = compile_native(mod->program, fns, sigs, ".lux-native",
-                                          mod->native_warning, &mod->native_why);
+                                          mod->native_warning, &mod->native_why, &mod->functions);
         if (mod->native && mod->native->bind) mod->native->bind(&mod->functions, &mod->templates);
 
         ClassTable classes;

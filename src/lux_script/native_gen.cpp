@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 
@@ -291,6 +292,14 @@ public:
     // ClassMethodCall a la clase (y, para un metodo, el nombre) que
     // corresponde a su call_index -- ver esos casos en Generador::expr.
     const TablaRoles& roles() const { return roles_; }
+    bool asincrona(const std::string& fn) const {
+        auto it = firmas_.find(fn);
+        return it != firmas_.end() && it->second.asincrona;
+    }
+    const FirmaNativa* firma(const std::string& fn) const {
+        auto it = firmas_.find(fn);
+        return it == firmas_.end() ? nullptr : &it->second;
+    }
 
     // Fase 5: ¿demostro tipo_provable() algun `await` en lo que llevamos
     // comprobado? Puesto a verdad, nunca a falso, dentro del caso
@@ -362,14 +371,7 @@ public:
     }
 
     bool es_valor_json(const IrExpr& e) const {
-        // A Dict/List literal is generated as an immediately-invoked lambda
-        // (Generador::valor_json), and a lambda cannot co_await: `{"id":
-        // await db.last_id()}` failed g++ and took the whole module down to
-        // bytecode. Rejected here, only that route stays on bytecode.
-        if ((e.kind == IrExprKind::DictLit || e.kind == IrExprKind::ListLit) && contiene_await(e))
-            return false;
         if (e.kind == IrExprKind::DictLit) {
-            if (e.entries.empty()) return false;
             for (const auto& entry : e.entries) {
                 if (!entry.key || !entry.value) return false;
                 auto tk = tipo_provable(*entry.key);
@@ -379,7 +381,6 @@ public:
             return true;
         }
         if (e.kind == IrExprKind::ListLit) {
-            if (e.items.empty()) return false;
             for (const auto& item : e.items)
                 if (!item || !es_valor_json(*item)) return false;
             return true;
@@ -465,8 +466,10 @@ public:
             tobj.kind() != Type::Kind::Dict)
             return std::nullopt;
         if (!en_value && (tobj.kind() == Type::Kind::List || tobj.kind() == Type::Kind::Dict) &&
-            mutan.count(e.call_name))
+            mutan.count(e.call_name)) {
+            if (e.object && e.object->kind == IrExprKind::Ident) pedir_promocion(e.object->slot);
             return std::nullopt;
+        }
         for (const auto& a : e.args)
             if (!a.value || !a.name.empty() || !es_valor_json(*a.value)) return std::nullopt;
         dinamicas_.insert(&e);
@@ -490,7 +493,7 @@ public:
     static bool llamada_reservada_generica(const IrExpr& e) {
         if (e.call_index < 0) return false;
         const std::string n = native_at(e.call_index).name;
-        return n.rfind("__req_", 0) == 0 || n.rfind("__log_", 0) == 0;
+        return n.rfind("__req_", 0) == 0 || n.rfind("__log_", 0) == 0 || n.rfind("__state_", 0) == 0;
     }
 
     // A synchronous builtin (range, float, query, header, cookie, form,
@@ -507,6 +510,21 @@ public:
         return std::string(d.name) == "range" ? Type::list_of(Type::json()) : Type::json();
     }
     bool dinamica(const IrExpr& e) const { return dinamicas_.count(&e) > 0; }
+    // A VarDecl/Assign whose value is built with valor_json(): the local is a Value.
+    bool en_value(const IrStmt& s) const { return en_value_.count(&s) > 0; }
+
+    // The locals to hold as Values, found by earlier passes (see
+    // comprobar()); the first `n_params` slots are parameters, bound
+    // natively, never promoted.
+    void promover(std::set<int> slots, int n_params) { promovidas_ = std::move(slots); n_params_ = n_params; }
+    std::optional<int> promocion() const { return promocion_; }
+    void pedir_promocion(int slot) const {
+        if (slot >= n_params_ && !promovidas_.count(slot) && !promocion_) promocion_ = slot;
+    }
+    static bool compatible_value(const Type& t) {
+        return es_escalar_json(t.kind()) || t.kind() == Type::Kind::List || t.kind() == Type::Kind::Dict ||
+               t.kind() == Type::Kind::Json;
+    }
     bool for_dinamico(const IrStmt& s) const { return for_dinamicos_.count(&s) > 0; }
 
     // Does this Binary run on Values (lux_json_*), not on native types?
@@ -538,6 +556,19 @@ public:
     }
 
     std::optional<Type> tipo_provable(const IrExpr& e) const {
+        // A literal that is not one native List<T>/Dict<string,T> (mixed,
+        // nested, holding Json) is a Value, as in the VM.
+        if (e.kind == IrExprKind::ListLit || e.kind == IrExprKind::DictLit) {
+            auto t = tipo_provable_(e);
+            if (t && !es_json_dinamico(*t)) return t;
+            const bool vacio = e.kind == IrExprKind::ListLit ? e.items.empty() : e.entries.empty();
+            if (!vacio && es_valor_json(e)) {
+                dinamicas_.insert(&e);
+                return e.kind == IrExprKind::ListLit ? Type::list_of(Type::json()) : Type::dict_of(Type::json());
+            }
+            if (!fallo_) fallo_ = &e;
+            return std::nullopt;
+        }
         auto t = tipo_provable_(e);
         if (!t && !fallo_) fallo_ = &e;   // the innermost one: children return first
         return t;
@@ -596,6 +627,11 @@ private:
                     usa_await_ = true;
                     return tipo_retorno_modulo(fn);
                 }
+
+                // A user function that awaits: a coroutine of its own
+                // (generar_funcion_nativa), co_awaited with the request's
+                // ctx. It may open a transaction the caller has to close.
+                if (call.call_shape == IrCallShape::UserFunctionCall) return tipo_provable(call);
 
                 if (call.call_shape == IrCallShape::DbModuleCall) {
                     // query/exec: el primer argumento es la SQL (string), el
@@ -674,9 +710,15 @@ private:
                 return std::nullopt;
             }
 
+            // Memoized per node: Generador asks again after the whole body
+            // was checked, when a slot another variable reused (a sibling
+            // block's) may hold a different type.
             case IrExprKind::Ident: {
+                if (auto m = tipos_ident_.find(&e); m != tipos_ident_.end()) return m->second;
                 auto it = ranura_tipos_.find(e.slot);
-                return it == ranura_tipos_.end() ? std::nullopt : std::optional<Type>(it->second);
+                if (it == ranura_tipos_.end()) return std::nullopt;
+                tipos_ident_.emplace(&e, it->second);
+                return it->second;
             }
 
             // [a, b, c]: demostrable solo si TODOS los elementos demuestran
@@ -739,14 +781,20 @@ private:
                 auto tobj = tipo_provable(*e.object);
                 auto tidx = tipo_provable(*e.lhs);
                 if (!tobj || !tidx) return std::nullopt;
-                if (es_json_dinamico(*tobj)) {
-                    if (tidx->kind() == Type::Kind::Int || tidx->kind() == Type::Kind::String)
-                        return Type::json();
-                    return std::nullopt;
+                if (es_json_dinamico(*tobj) &&
+                    (tidx->kind() == Type::Kind::Int || tidx->kind() == Type::Kind::String))
+                    return Type::json();
+                if (tobj->kind() == Type::Kind::List && !es_json_dinamico(*tobj) &&
+                    tidx->kind() == Type::Kind::Int)
+                    return tobj->element();
+                // Any other pair (a Json index, a native Dict) as Op::GetIndex.
+                // ponytail: a native Dict is copied into a Value per access;
+                // give LDict a lookup if a hot loop ever indexes one.
+                if (es_valor_json(*e.object) && es_valor_json(*e.lhs)) {
+                    dinamicas_.insert(&e);
+                    return Type::json();
                 }
-                if (tobj->kind() != Type::Kind::List) return std::nullopt;
-                if (tidx->kind() != Type::Kind::Int) return std::nullopt;
-                return tobj->element();
+                return std::nullopt;
             }
 
             case IrExprKind::Unary: {
@@ -830,6 +878,10 @@ private:
             case IrExprKind::PostStep: {
                 if (!e.lhs || e.lhs->kind != IrExprKind::Ident) return std::nullopt;
                 auto t = tipo_provable(*e.lhs);
+                if (t && es_json_dinamico(*t)) {
+                    dinamicas_.insert(&e);
+                    return Type::json();
+                }
                 return (t && es_numerico(t->kind())) ? t : std::nullopt;
             }
 
@@ -838,57 +890,61 @@ private:
                     if (!e.object) return std::nullopt;
                     auto tobj = tipo_provable(*e.object);
                     if (!tobj) return std::nullopt;
-
-                    if (tobj->kind() == Type::Kind::String) {
-                        if (!metodo_string_soportado(e.call_name)) return std::nullopt;
-                        for (const auto& a : e.args)
-                            if (!a.value || !tipo_provable(*a.value)) return std::nullopt;
-                        return metodo_string_devuelve_bool(e.call_name)
-                                   ? Type::primitive(Type::Kind::Bool)
-                                   : Type::primitive(Type::Kind::String);
-                    }
-                    // El unico metodo de List que reconoce metodos_de()
-                    // (natives.cpp: kList) es "add" -- muta la lista en
-                    // sitio y devuelve la MISMA lista (recv), igual que
-                    // call_method(). El argumento tiene que ser exactamente
-                    // el tipo del elemento -- SALVO sobre List<Json>
-                    // (Fase 5.10): el patron mas comun para construirla a
-                    // mano es un DictLit HETEROGENEO (`{"id": i, "name":
-                    // ..., "active": bool}`, cada valor de un tipo
-                    // distinto), y tipo_provable(DictLit) exige valores
-                    // homogeneos -- nunca demuestra nada de un literal asi
-                    // (esa es la via de "Dict<string,V> ya tipado", una
-                    // cosa distinta). Le basta con ser cualquier cosa
-                    // construible como Value (es_valor_json(), la MISMA
-                    // regla que ya usa el valor de retorno de una ruta o
-                    // un parametro de sqlite.exec()) -- List<Json>.add(x)
-                    // es, en tiempo de ejecucion, exactamente
-                    // items.push_back(x) sobre un LList<Value>.
-                    if (tobj->kind() == Type::Kind::List && e.call_name == "add") {
-                        if (e.args.size() != 1 || !e.args[0].value) return std::nullopt;
-                        if (tobj->element().kind() == Type::Kind::Json)
-                            return es_valor_json(*e.args[0].value) ? tobj : std::nullopt;
-                        auto targ = tipo_provable(*e.args[0].value);
-                        if (!targ || *targ != tobj->element()) return std::nullopt;
-                        return tobj;
-                    }
-                    // Los dos metodos de Dict que reconoce metodos_de()
-                    // (natives.cpp: kDict) sin depender de un contexto de
-                    // ruta (el tercero, "save", solo existe sobre un File
-                    // subido): "has" comprueba una clave, "keys" devuelve
-                    // List<string> con todas -- ninguno de los dos tiene la
-                    // ambiguedad de leer un valor por indice.
-                    if (tobj->kind() == Type::Kind::Dict && e.call_name == "has") {
-                        if (e.args.size() != 1 || !e.args[0].value) return std::nullopt;
-                        auto tk = tipo_provable(*e.args[0].value);
-                        return (tk && tk->kind() == Type::Kind::String)
-                                   ? std::optional<Type>(Type::primitive(Type::Kind::Bool))
-                                   : std::nullopt;
-                    }
-                    if (tobj->kind() == Type::Kind::Dict && e.call_name == "keys") {
-                        if (!e.args.empty()) return std::nullopt;
-                        return Type::list_of(Type::primitive(Type::Kind::String));
-                    }
+                    // The forms with a native version first; any other
+                    // through the VM's own (metodo_dinamico).
+                    if (auto t = [&]() -> std::optional<Type> {
+                        if (tobj->kind() == Type::Kind::String) {
+                            if (!metodo_string_soportado(e.call_name)) return std::nullopt;
+                            for (const auto& a : e.args)
+                                if (!a.value || !tipo_provable(*a.value)) return std::nullopt;
+                            return metodo_string_devuelve_bool(e.call_name)
+                                       ? Type::primitive(Type::Kind::Bool)
+                                       : Type::primitive(Type::Kind::String);
+                        }
+                        // El unico metodo de List que reconoce metodos_de()
+                        // (natives.cpp: kList) es "add" -- muta la lista en
+                        // sitio y devuelve la MISMA lista (recv), igual que
+                        // call_method(). El argumento tiene que ser exactamente
+                        // el tipo del elemento -- SALVO sobre List<Json>
+                        // (Fase 5.10): el patron mas comun para construirla a
+                        // mano es un DictLit HETEROGENEO (`{"id": i, "name":
+                        // ..., "active": bool}`, cada valor de un tipo
+                        // distinto), y tipo_provable(DictLit) exige valores
+                        // homogeneos -- nunca demuestra nada de un literal asi
+                        // (esa es la via de "Dict<string,V> ya tipado", una
+                        // cosa distinta). Le basta con ser cualquier cosa
+                        // construible como Value (es_valor_json(), la MISMA
+                        // regla que ya usa el valor de retorno de una ruta o
+                        // un parametro de sqlite.exec()) -- List<Json>.add(x)
+                        // es, en tiempo de ejecucion, exactamente
+                        // items.push_back(x) sobre un LList<Value>.
+                        if (tobj->kind() == Type::Kind::List && e.call_name == "add") {
+                            if (e.args.size() != 1 || !e.args[0].value) return std::nullopt;
+                            if (tobj->element().kind() == Type::Kind::Json)
+                                return es_valor_json(*e.args[0].value) ? tobj : std::nullopt;
+                            auto targ = tipo_provable(*e.args[0].value);
+                            if (!targ || *targ != tobj->element()) return std::nullopt;
+                            return tobj;
+                        }
+                        // Los dos metodos de Dict que reconoce metodos_de()
+                        // (natives.cpp: kDict) sin depender de un contexto de
+                        // ruta (el tercero, "save", solo existe sobre un File
+                        // subido): "has" comprueba una clave, "keys" devuelve
+                        // List<string> con todas -- ninguno de los dos tiene la
+                        // ambiguedad de leer un valor por indice.
+                        if (tobj->kind() == Type::Kind::Dict && !es_json_dinamico(*tobj) && e.call_name == "has") {
+                            if (e.args.size() != 1 || !e.args[0].value) return std::nullopt;
+                            auto tk = tipo_provable(*e.args[0].value);
+                            return (tk && tk->kind() == Type::Kind::String)
+                                       ? std::optional<Type>(Type::primitive(Type::Kind::Bool))
+                                       : std::nullopt;
+                        }
+                        if (tobj->kind() == Type::Kind::Dict && !es_json_dinamico(*tobj) && e.call_name == "keys") {
+                            if (!e.args.empty()) return std::nullopt;
+                            return Type::list_of(Type::primitive(Type::Kind::String));
+                        }
+                        return std::nullopt;
+                    }()) return t;
                     return metodo_dinamico(e, *tobj);
                 }
                 if (e.call_shape == IrCallShape::UserFunctionCall) {
@@ -900,9 +956,17 @@ private:
                         return std::nullopt;
                     for (size_t i = 0; i < e.args.size(); ++i) {
                         if (!e.args[i].value) return std::nullopt;
+                        // A Value parameter (Json, `string?`...) takes any
+                        // JSON-able argument (Generador::argumentos_usuario).
+                        if (es_json_dinamico(fit->second.params[i])) {
+                            if (!es_valor_json(*e.args[i].value)) return std::nullopt;
+                            continue;
+                        }
                         auto ta = tipo_provable(*e.args[i].value);
                         if (!ta || *ta != fit->second.params[i]) return std::nullopt;
                     }
+                    // Awaited even without `await` written (the VM does).
+                    if (fit->second.asincrona) usa_await_ = usa_transaccion_ = true;
                     return fit->second.retorno;
                 }
                 // ClassName(args...): solo el constructor SIN cuerpo
@@ -971,58 +1035,62 @@ private:
                 // que un resultado de BD: lo que hay guardado en la clave
                 // puede ser cualquier cosa, o nada.
                 if (e.call_shape == IrCallShape::ReservedMemberCall) {
-                    if (e.call_index == state_incr_id() || e.call_index == state_decr_id()) {
-                        if (e.args.empty() || e.args.size() > 2 || !e.args[0].value)
-                            return std::nullopt;
-                        auto tk = tipo_provable(*e.args[0].value);
-                        if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
-                        if (e.args.size() == 2) {
-                            if (!e.args[1].value) return std::nullopt;
-                            auto tb = tipo_provable(*e.args[1].value);
-                            if (!tb || tb->kind() != Type::Kind::Int) return std::nullopt;
-                        }
-                        return Type::primitive(Type::Kind::Int);
-                    }
-                    if (e.call_index == state_remove_id()) {
-                        if (e.args.size() != 1 || !e.args[0].value) return std::nullopt;
-                        auto tk = tipo_provable(*e.args[0].value);
-                        if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
-                        return Type::primitive(Type::Kind::Bool);
-                    }
-                    if (e.call_index == state_get_id()) {
-                        if (e.args.empty() || e.args.size() > 2 || !e.args[0].value)
-                            return std::nullopt;
-                        auto tk = tipo_provable(*e.args[0].value);
-                        if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
-                        if (e.args.size() == 2) {
-                            if (!e.args[1].value) return std::nullopt;
-                            auto td = tipo_provable(*e.args[1].value);
-                            if (!td || !(es_escalar_json(td->kind()) ||
-                                        td->kind() == Type::Kind::List ||
-                                        td->kind() == Type::Kind::Dict ||
-                                        td->kind() == Type::Kind::Json))
+                    // state.* has a native version; past it, request./log./
+                    // state. through the VM's builtin (nativa_dinamica).
+                    if (auto t = [&]() -> std::optional<Type> {
+                        if (e.call_index == state_incr_id() || e.call_index == state_decr_id()) {
+                            if (e.args.empty() || e.args.size() > 2 || !e.args[0].value)
                                 return std::nullopt;
+                            auto tk = tipo_provable(*e.args[0].value);
+                            if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
+                            if (e.args.size() == 2) {
+                                if (!e.args[1].value) return std::nullopt;
+                                auto tb = tipo_provable(*e.args[1].value);
+                                if (!tb || tb->kind() != Type::Kind::Int) return std::nullopt;
+                            }
+                            return Type::primitive(Type::Kind::Int);
                         }
-                        return Type::json();
-                    }
-                    if (llamada_reservada_generica(e)) return nativa_dinamica(e);
-                    if (e.call_index == state_set_id()) {
-                        if (e.args.size() != 2 || !e.args[0].value || !e.args[1].value)
-                            return std::nullopt;
-                        auto tk = tipo_provable(*e.args[0].value);
-                        if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
-                        // fn_state_set devuelve el MISMO valor que recibio
-                        // (identidad) -- el tipo de la llamada es el del
-                        // segundo argumento, tal cual.
-                        auto tv = tipo_provable(*e.args[1].value);
-                        if (!tv || !(es_escalar_json(tv->kind()) ||
-                                    tv->kind() == Type::Kind::List ||
-                                    tv->kind() == Type::Kind::Dict ||
-                                    tv->kind() == Type::Kind::Json))
-                            return std::nullopt;
-                        return tv;
-                    }
-                    return std::nullopt;
+                        if (e.call_index == state_remove_id()) {
+                            if (e.args.size() != 1 || !e.args[0].value) return std::nullopt;
+                            auto tk = tipo_provable(*e.args[0].value);
+                            if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
+                            return Type::primitive(Type::Kind::Bool);
+                        }
+                        if (e.call_index == state_get_id()) {
+                            if (e.args.empty() || e.args.size() > 2 || !e.args[0].value)
+                                return std::nullopt;
+                            auto tk = tipo_provable(*e.args[0].value);
+                            if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
+                            if (e.args.size() == 2) {
+                                if (!e.args[1].value) return std::nullopt;
+                                auto td = tipo_provable(*e.args[1].value);
+                                if (!td || !(es_escalar_json(td->kind()) ||
+                                            td->kind() == Type::Kind::List ||
+                                            td->kind() == Type::Kind::Dict ||
+                                            td->kind() == Type::Kind::Json))
+                                    return std::nullopt;
+                            }
+                            return Type::json();
+                        }
+                        if (e.call_index == state_set_id()) {
+                            if (e.args.size() != 2 || !e.args[0].value || !e.args[1].value)
+                                return std::nullopt;
+                            auto tk = tipo_provable(*e.args[0].value);
+                            if (!tk || tk->kind() != Type::Kind::String) return std::nullopt;
+                            // fn_state_set devuelve el MISMO valor que recibio
+                            // (identidad) -- el tipo de la llamada es el del
+                            // segundo argumento, tal cual.
+                            auto tv = tipo_provable(*e.args[1].value);
+                            if (!tv || !(es_escalar_json(tv->kind()) ||
+                                        tv->kind() == Type::Kind::List ||
+                                        tv->kind() == Type::Kind::Dict ||
+                                        tv->kind() == Type::Kind::Json))
+                                return std::nullopt;
+                            return tv;
+                        }
+                        return std::nullopt;
+                    }()) return t;
+                    return llamada_reservada_generica(e) ? nativa_dinamica(e) : std::nullopt;
                 }
                 // Tres builtins globales puros (natives.cpp: fn_str/fn_len/
                 // fn_int), el resto (sleep/render/status/text/...) o tienen
@@ -1124,7 +1192,22 @@ private:
         return "line " + std::to_string((e ? e->loc : s.loc).line) + ": " + que;
     }
 
+    // What a function returns: exactly its native type, or anything that
+    // becomes a Value when it returns one. A value of another type (`return
+    // os.getenv(...)` from a `fn string`) asks for the function to return
+    // a Value instead (retorno_dinamico(); compile_native checks it again).
+    bool valor_de_retorno(const IrExpr& v, const Type& retorno_fn) const {
+        auto t = tipo_provable(v);
+        if (t && *t == retorno_fn) return true;
+        if (!es_valor_json(v)) return false;
+        if (es_json_dinamico(retorno_fn)) return true;
+        if (compatible_value(retorno_fn)) retorno_dinamico_ = true;
+        return false;
+    }
+
 public:
+    bool retorno_dinamico() const { return retorno_dinamico_; }
+
     bool block_compilable(const IrBlock& b, const Type& retorno_fn) {
         for (const auto& s : b) {
             fallo_ = nullptr;
@@ -1147,14 +1230,19 @@ public:
                 if (retorno_fn.kind() == Type::Kind::Json)
                     return !s.value || es_llamada_respuesta(*s.value) || es_valor_json(*s.value);
                 if (!s.value) return retorno_fn.kind() == Type::Kind::Void;
-                auto t = tipo_provable(*s.value);
-                return t && *t == retorno_fn;
+                return valor_de_retorno(*s.value, retorno_fn);
             }
 
             case IrStmtKind::ExprStmt:
                 return s.value && tipo_provable(*s.value).has_value();
 
             case IrStmtKind::VarDecl: {
+                if (s.value && promovidas_.count(s.slot)) {
+                    if (!es_valor_json(*s.value)) return false;
+                    en_value_.insert(&s);
+                    registrar(s.slot, Type::json());
+                    return true;
+                }
                 if (s.value) {
                     auto t = tipo_provable(*s.value);
                     if (!t) {
@@ -1203,6 +1291,13 @@ public:
                         registrar(s.slot, Type::json());
                         return true;
                     }
+                    // Declared as a Value (Json, List<Json>, Dict<string,Json>):
+                    // any value that becomes one.
+                    if (es_json_dinamico(s.decl_type) && es_valor_json(*s.value)) {
+                        en_value_.insert(&s);
+                        registrar(s.slot, s.decl_type);
+                        return true;
+                    }
                     return false;
                 }
                 if (!tipo_soportado(s.decl_type, &clases_)) return false;
@@ -1221,7 +1316,17 @@ public:
                     auto original = ranura_tipos_.find(s.assign_slot);
                     if (original == ranura_tipos_.end()) return false;
                     auto t = tipo_provable(*s.value);
-                    return t && *t == original->second;
+                    if (t && *t == original->second) return true;
+                    if (!es_valor_json(*s.value)) return false;
+                    if (es_json_dinamico(original->second)) {
+                        en_value_.insert(&s);
+                        return true;
+                    }
+                    // A native local given a value of another type (`total =
+                    // total + i` with a dynamic i): check again with that
+                    // local as a Value from its declaration on.
+                    if (compatible_value(original->second)) pedir_promocion(s.assign_slot);
+                    return false;
                 }
                 if (s.assign_target == IrAssignTarget::Index) {
                     // xs[i] = v: solo sobre una variable (una expresion
@@ -1238,11 +1343,21 @@ public:
                     auto tobj = tipo_provable(*s.assign_object);
                     auto tidx = tipo_provable(*s.assign_index);
                     auto tval = tipo_provable(*s.value);
-                    if (!tobj || !tidx || !tval) return false;
-                    if (tobj->kind() == Type::Kind::List)
-                        return tidx->kind() == Type::Kind::Int && *tval == tobj->element();
-                    if (tobj->kind() == Type::Kind::Dict)
-                        return tidx->kind() == Type::Kind::String && *tval == tobj->element();
+                    if (!tobj || !tidx) return false;
+                    if (es_json_dinamico(*tobj)) {
+                        // Op::SetIndex on a Value (lux_json_set_index).
+                        if (!es_valor_json(*s.assign_index) || !es_valor_json(*s.value)) return false;
+                        en_value_.insert(&s);
+                        return true;
+                    }
+                    if (tval && tobj->kind() == Type::Kind::List && tidx->kind() == Type::Kind::Int &&
+                        *tval == tobj->element())
+                        return true;
+                    if (tval && tobj->kind() == Type::Kind::Dict && tidx->kind() == Type::Kind::String &&
+                        *tval == tobj->element())
+                        return true;
+                    if (es_valor_json(*s.value) && es_valor_json(*s.assign_index))
+                        pedir_promocion(s.assign_object->slot);
                     return false;
                 }
                 if (s.assign_target == IrAssignTarget::Member) {
@@ -1319,8 +1434,7 @@ public:
                 // comparar, ver es_llamada_respuesta().
                 if (es_llamada_respuesta(*s.target)) return true;
                 if (retorno_fn.kind() == Type::Kind::Json) return es_valor_json(*s.target);
-                auto t = tipo_provable(*s.target);
-                return t && *t == retorno_fn;
+                return valor_de_retorno(*s.target, retorno_fn);
             }
 
             // Try no es "primitivos y control de flujo" en el sentido
@@ -1344,6 +1458,12 @@ private:
     mutable const IrExpr*            fallo_ = nullptr;
     mutable std::set<const IrExpr*>  binarias_json_;
     mutable std::set<const IrExpr*>  dinamicas_;
+    mutable std::map<const IrExpr*, Type> tipos_ident_;
+    std::set<const IrStmt*>          en_value_;
+    std::set<int>                    promovidas_;
+    int                              n_params_ = 0;
+    mutable std::optional<int>       promocion_;
+    mutable bool                     retorno_dinamico_ = false;
     std::set<const IrStmt*>          for_dinamicos_;
     std::string                      motivo_;
 };
@@ -1428,6 +1548,7 @@ public:
             // solo con los elementos, sin que Generador tenga que saber el
             // tipo aqui.
             case IrExprKind::ListLit: {
+                if (comprobador_.dinamica(e)) return valor_json(e);
                 std::string s = "LList{";
                 for (size_t i = 0; i < e.items.size(); ++i) {
                     if (i) s += ", ";
@@ -1446,6 +1567,7 @@ public:
             // explicito (tipo_provable() ya lo demostro) no hace falta
             // deducir nada.
             case IrExprKind::DictLit: {
+                if (comprobador_.dinamica(e)) return valor_json(e);
                 const Type tipo = *comprobador_.tipo_provable(e);
                 std::string s = "LDict<" + tipo_cpp(tipo.element()) + ">{";
                 for (size_t i = 0; i < e.entries.size(); ++i) {
@@ -1464,6 +1586,8 @@ public:
                 // de generacion (el indice demostro Int o String, nunca los
                 // dos), aunque el objeto en si solo se sepa en tiempo de
                 // ejecucion.
+                if (comprobador_.dinamica(e))
+                    return "lux_json_index(" + valor_json(*e.object) + ", " + valor_json(*e.lhs) + ")";
                 auto tobj = comprobador_.tipo_provable(*e.object);
                 if (es_json_dinamico(*tobj)) {
                     auto tidx = comprobador_.tipo_provable(*e.lhs);
@@ -1485,8 +1609,8 @@ public:
             // generacion -- Comprobador::tipo_provable() ya demostro que
             // `o` es de una clase que de verdad tiene ese campo.
             case IrExprKind::Member:
-                if (!e.object) return "lux_dyn_global(" + std::string(ruta_ ? "l_ctx" : "lux_ctx()") + ", " +
-                                      std::to_string(e.call_index) + ", {})";
+                if (!e.object) return "lux_dyn_global(" + std::string(con_ctx() ? "l_ctx" : "lux_ctx()") + ", " +
+                                      std::to_string(e.call_index) + ", Value::List{})";
                 if (comprobador_.dinamica(e))
                     return "lux_json_member(" + valor_json(*e.object) + ", " + literal_string(e.text) + ")";
                 return expr(*e.object) + ".campo_" + e.text + "()";
@@ -1547,6 +1671,13 @@ public:
 
             case IrExprKind::PreStep:
             case IrExprKind::PostStep: {
+                if (comprobador_.dinamica(e)) {
+                    const std::string v = nombre_cpp(e.lhs->text);
+                    const std::string paso = "lux_json_" + std::string(e.text == "+" ? "add(" : "arit(") + v +
+                                             ", Value::integer(1)" + (e.text == "+" ? ")" : ", '-')");
+                    return e.kind == IrExprKind::PreStep ? "(" + v + " = " + paso + ")"
+                                                         : "([&]{ Value __o = " + v + "; " + v + " = " + paso + "; return __o; }())";
+                }
                 const std::string op = (e.text == "+") ? "++" : "--";
                 const std::string v  = nombre_cpp(e.lhs->text);
                 return e.kind == IrExprKind::PreStep ? ("(" + op + v + ")") : ("(" + v + op + ")");
@@ -1555,10 +1686,10 @@ public:
             case IrExprKind::Call: {
                 if (e.call_shape == IrCallShape::BuiltinModuleCall) return llamada_modulo(e, false);
                 if (comprobador_.dinamica(e)) {
-                    const std::string ctx = ruta_ ? "l_ctx" : "lux_ctx()";
-                    std::string args = "{";
-                    for (size_t i = 0; i < e.args.size(); ++i) args += (i ? ", " : "") + valor_json(*e.args[i].value);
-                    args += "}";
+                    const std::string ctx = con_ctx() ? "l_ctx" : "lux_ctx()";
+                    std::string args = "LuxL{}";
+                    for (const auto& a : e.args) args += ".add(" + valor_json(*a.value) + ")";
+                    args += ".items()";
                     if (e.call_shape == IrCallShape::BuiltinMethodCall)
                         return "lux_dyn_method(" + ctx + ", " + valor_json(*e.object) + ", " +
                                literal_string(e.call_name) + ", " + args + ")";
@@ -1589,7 +1720,7 @@ public:
                 if (e.call_shape == IrCallShape::ClassMethodCall) {
                     const auto& rol = comprobador_.roles().at(e.call_index);
                     const std::string f = "l_" + rol.clase + "_" + rol.metodo;
-                    std::string s = ruta_ ? "lux_call_in(l_ctx, " + f + ", " + expr(*e.object)
+                    std::string s = con_ctx() ? "lux_call_in(l_ctx, " + f + ", " + expr(*e.object)
                                           : f + "(" + expr(*e.object);
                     for (const auto& a : e.args) s += ", " + expr(*a.value);
                     s += ")";
@@ -1737,18 +1868,21 @@ public:
                 // argumentos -- mismo orden que call_method(recv, args) en
                 // natives.cpp, solo que en tiempo de compilacion en vez de
                 // por nombre en tiempo de ejecucion.
+                if (e.call_shape == IrCallShape::UserFunctionCall &&
+                    comprobador_.asincrona(nombre_por_indice_.at(static_cast<size_t>(e.call_index))))
+                    return llamada_asincrona(e);
                 const bool metodo = e.call_shape == IrCallShape::BuiltinMethodCall;
                 std::string s = metodo ? "lux_str_" + e.call_name
                                        : nombre_cpp(nombre_por_indice_.at(static_cast<size_t>(e.call_index)));
-                const bool en_ctx = !metodo && ruta_;
+                const bool en_ctx = !metodo && con_ctx();
                 s = en_ctx ? "lux_call_in(l_ctx, " + s : s + "(";
-                if (metodo) s += expr(*e.object);
-                for (size_t i = 0; i < e.args.size(); ++i) {
-                    if (i || metodo || en_ctx) s += ", ";
-                    s += expr(*e.args[i].value);
+                if (metodo) {
+                    s += expr(*e.object);
+                    for (const auto& a : e.args) s += ", " + expr(*a.value);
+                    return s + ")";
                 }
-                s += ")";
-                return s;
+                const std::string args = argumentos_usuario(e);
+                return s + (en_ctx && !args.empty() ? ", " : "") + args + ")";
             }
 
             // `await sleep(ms)` (Fase 5, el unico await que Comprobador::
@@ -1760,6 +1894,7 @@ public:
             // reprogramando un temporizador de 0ms sin parar (ver el
             // comentario de clamp_sleep_ms en project.cpp).
             case IrExprKind::Await:
+                if (e.lhs->call_shape == IrCallShape::UserFunctionCall) return llamada_asincrona(*e.lhs);
                 if (e.lhs->call_shape == IrCallShape::BuiltinGlobalCall)
                     // req.loop/req.cancel_token, not the bare lux::sleep(ms)
                     // overload: that one reads thread_local current_token,
@@ -1806,12 +1941,12 @@ public:
     // check included), with a NativeCtx over this route's req/res. Its
     // result is converted to the C++ type its signature declares.
     std::string llamada_modulo(const IrExpr& call, bool awaited) const {
-        std::string params = "lux_db_params(";
-        for (size_t i = 0; i < call.args.size(); ++i) params += (i ? ", " : "") + valor_json(*call.args[i].value);
-        params += ")";
+        std::string params = "LuxL{}";
+        for (const auto& a : call.args) params += ".add(" + valor_json(*a.value) + ")";
+        params += ".items()";
         const std::string id = std::to_string(call.call_index);
         const std::string v = awaited ? "(co_await lux_module_await(l_ctx, " + id + ", " + params + "))"
-                            : ruta_ ? "lux_module_call(l_ctx, " + id + ", " + params + ")"
+                            : con_ctx() ? "lux_module_call(l_ctx, " + id + ", " + params + ")"
                                     : "lux_fn_module_call(" + id + ", " + params + ")";
         const std::string& r = builtin_module_function_at(call.call_index).returns;
         if (r == "string") return "lux_module_str(" + v + ")";
@@ -1819,6 +1954,26 @@ public:
         if (r == "bool")   return "lux_module_bool(" + v + ")";
         if (r == "float")  return "lux_module_float(" + v + ")";
         return v;
+    }
+
+    // A user function that awaits (FirmaNativa::asincrona), with or without
+    // `await` written: its coroutine, over this request's ctx.
+    std::string llamada_asincrona(const IrExpr& call) const {
+        const std::string args = argumentos_usuario(call);
+        return "(co_await " + nombre_cpp(nombre_por_indice_.at(static_cast<size_t>(call.call_index))) +
+               "(l_ctx" + (args.empty() ? "" : ", " + args) + "))";
+    }
+
+    // A user function's arguments; one for a Value parameter goes through
+    // valor_json() (Comprobador accepted any JSON-able value there).
+    std::string argumentos_usuario(const IrExpr& call) const {
+        const FirmaNativa* f = comprobador_.firma(nombre_por_indice_.at(static_cast<size_t>(call.call_index)));
+        std::string s;
+        for (size_t i = 0; i < call.args.size(); ++i) {
+            const bool value = f && i < f->params.size() && es_json_dinamico(f->params[i]);
+            s += (i ? ", " : "") + (value ? valor_json(*call.args[i].value) : expr(*call.args[i].value));
+        }
+        return s;
     }
 
     // The await_db(...) call for `await <module>.query/exec/...(...)`, without
@@ -1913,8 +2068,9 @@ public:
                 if (ruta_ && s.value && comprobador_.es_llamada_respuesta(*s.value))
                     return codigo_llamada_respuesta(*s.value) + "; " + ret_vacio();
                 if (ruta_) return respuesta_de_retorno(s.value.get());
-                if (!s.value) return "return;";
-                return "return " + (retorno_json_ ? valor_json(*s.value) : expr(*s.value)) + ";";
+                if (!s.value) return asincrona_ ? "co_return;" : "return;";
+                return (asincrona_ ? "co_return " : "return ") +
+                       (retorno_json_ ? valor_json(*s.value) : expr(*s.value)) + ";";
 
             case IrStmtKind::ExprStmt:
                 return expr(*s.value) + ";";
@@ -1942,6 +2098,8 @@ public:
                 // declaración, así que `{}` invoca el constructor por
                 // defecto de ESE tipo exacto sin que haga falta deducir
                 // nada de un literal sin elementos.
+                if (comprobador_.en_value(s))
+                    return "Value " + nombre_cpp(s.name) + " = " + valor_json(*s.value) + ";";
                 auto t_valor    = s.value ? comprobador_.tipo_provable(*s.value) : std::nullopt;
                 Type tipo_real  = t_valor ? *t_valor : s.decl_type;
                 std::string val = (!s.value || !t_valor) ? valor_por_defecto(s.decl_type)
@@ -1950,6 +2108,11 @@ public:
             }
 
             case IrStmtKind::Assign: {
+                if (comprobador_.en_value(s) && s.assign_target == IrAssignTarget::Index)
+                    return "lux_json_set_index(" + expr(*s.assign_object) + ", " + valor_json(*s.assign_index) +
+                           ", " + valor_json(*s.value) + ");";
+                if (comprobador_.en_value(s))
+                    return nombre_cpp(ranura_a_nombre_.at(s.assign_slot)) + " = " + valor_json(*s.value) + ";";
                 if (s.assign_target == IrAssignTarget::Index)
                     return expr(*s.assign_object) + ".lux_set(" + expr(*s.assign_index) +
                            ", " + expr(*s.value) + ");";
@@ -2023,7 +2186,7 @@ public:
                 if (ruta_)
                     return "if (!" + cond(*s.value) + ") { " +
                            respuesta_de_retorno(s.target.get()) + " }";
-                return "if (!" + cond(*s.value) + ") { return " +
+                return "if (!" + cond(*s.value) + ") { " + (asincrona_ ? "co_return " : "return ") +
                        (retorno_json_ ? valor_json(*s.target) : expr(*s.target)) + "; }";
 
             default:
@@ -2056,20 +2219,17 @@ public:
     // diferencia de expr(), un DictLit/ListLit aqui NO tiene que ser
     // homogeneo: cada entrada se convierte por su cuenta, recursivamente.
     std::string valor_json(const IrExpr& e) const {
-        // reserve(): the key count is known here, same as the VM's MakeDict
-        // -- without it a 4-key literal reallocates its vector three times.
+        // A chain of calls (LuxL/LuxD): see route_runtime_prelude.
         if (e.kind == IrExprKind::DictLit) {
-            std::string s = "([&]{ Value::Dict d; d.reserve(" + std::to_string(e.entries.size()) + "); ";
+            std::string s = "LuxD{}";
             for (const auto& entry : e.entries)
-                s += "d[" + expr(*entry.key) + "] = " + valor_json(*entry.value) + "; ";
-            s += "return Value::dict(std::move(d)); }())";
-            return s;
+                s += ".add(" + expr(*entry.key) + ", " + valor_json(*entry.value) + ")";
+            return s + ".done()";
         }
         if (e.kind == IrExprKind::ListLit) {
-            std::string s = "([&]{ Value::List l; l.reserve(" + std::to_string(e.items.size()) + "); ";
-            for (const auto& item : e.items) s += "l.push_back(" + valor_json(*item) + "); ";
-            s += "return Value::list(std::move(l)); }())";
-            return s;
+            std::string s = "LuxL{}";
+            for (const auto& item : e.items) s += ".add(" + valor_json(*item) + ")";
+            return s + ".done()";
         }
         // Fase 5.8: `<valor>.status(codigo)` -- ver el comentario de
         // Comprobador::es_valor_json, mismo caso. El operador coma
@@ -2147,6 +2307,9 @@ public:
     // de una transaccion abierta ya es un fallo grave del motor, y este
     // documento evita a proposito que bytecode y --native diverjan en que
     // limpian y que no.
+    // A route, or an async function: it has the request's NativeCtx as l_ctx.
+    bool con_ctx() const { return ruta_ || asincrona_; }
+
     std::string ret_vacio() const {
         if (!asincrona_) return "return;";
         if (comprobador_.usa_transaccion())
@@ -2259,44 +2422,98 @@ std::vector<std::string> pattern_params(const std::string& pattern) {
 
 } // namespace
 
+Type tipo_nativo(const Type& t) {
+    if (!t.is_optional() || t.kind() == Type::Kind::Class) return t;
+    return Type::json();
+}
+
+// Checks `body`, again each time Comprobador asks to hold one more local as
+// a Value (Comprobador::promocion) -- at most once per local, so it ends.
+// `params` are the first slots, in order.
+std::unique_ptr<Comprobador> comprobar(const std::vector<std::string>& nombre_por_indice,
+                                       const TablaFirmas& firmas, const TablaClases& clases,
+                                       const TablaRoles& roles, const std::vector<Type>& params,
+                                       const IrBlock& body, const Type& retorno, bool& ok) {
+    std::set<int> promovidas;
+    for (;;) {
+        auto c = std::make_unique<Comprobador>(nombre_por_indice, firmas, clases, roles);
+        c->promover(promovidas, static_cast<int>(params.size()));
+        for (size_t i = 0; i < params.size(); ++i) c->registrar(static_cast<int>(i), params[i]);
+        ok = c->block_compilable(body, retorno);
+        auto p = c->promocion();
+        if (ok || !p || !promovidas.insert(*p).second) return c;
+    }
+}
+
 std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBlock& body,
                                                      const std::vector<std::string>& nombre_por_indice,
                                                      const TablaFirmas& firmas,
                                                      const TablaClases& clases,
-                                                     const TablaRoles& roles) {
-    const Type retorno_decl = Type::from_declared(fn.return_type);
-    if (!tipo_soportado(retorno_decl, &clases)) return std::nullopt;
-    for (const auto& p : fn.params)
-        if (!tipo_soportado(Type::from_declared(p.type), &clases)) return std::nullopt;
+                                                     const TablaRoles& roles,
+                                                     std::string* motivo,
+                                                     bool* pide_retorno_value) {
+    auto no = [&](std::string m) -> std::optional<FuncionNativa> {
+        if (motivo) *motivo = std::move(m);
+        return std::nullopt;
+    };
+    // From its FirmaNativa, not the declaration: `string?` is a Value there
+    // (tipo_nativo), and so is a return compile_native promoted.
+    auto fit = firmas.find(fn.name);
+    if (fit == firmas.end()) return no("");
+    const FirmaNativa& firma = fit->second;
+    const Type retorno_decl = firma.retorno;
+    if (!tipo_soportado(retorno_decl, &clases)) return no("returns " + retorno_decl.to_string());
+    for (size_t i = 0; i < fn.params.size(); ++i)
+        if (!tipo_soportado(firma.params[i], &clases))
+            return no("parameter " + fn.params[i].name + ": type " + firma.params[i].to_string());
 
-    Comprobador comprobador(nombre_por_indice, firmas, clases, roles);
     // check_function declara los parametros, en orden, antes que nada mas
     // (ver Emitter::check_function): la ranura i-esima es siempre el
     // parametro i-esimo -- mismo orden que Generador::registrar() mas abajo.
-    for (size_t i = 0; i < fn.params.size(); ++i)
-        comprobador.registrar(static_cast<int>(i), Type::from_declared(fn.params[i].type));
-    if (!comprobador.block_compilable(body, retorno_decl)) return std::nullopt;
-    // Fase 5: `await` solo se representa dentro de una ruta (build_routes()
-    // es el UNICO punto de entrada nativo que se invoca ya como corrutina;
-    // una funcion/metodo suelto se llama directamente en C++ desde otra
-    // funcion nativa, nunca con `co_await`, asi que suspenderse a mitad no
-    // tiene a quien avisar). Rechazar aqui dejala en bytecode entera, igual
-    // que cualquier otra pieza fuera de alcance.
-    if (comprobador.usa_await()) return std::nullopt;
+    bool ok = false;
+    auto cp = comprobar(nombre_por_indice, firmas, clases, roles, firma.params, body, retorno_decl, ok);
+    if (!ok) {
+        if (cp->retorno_dinamico() && pide_retorno_value) *pide_retorno_value = true;
+        return no(cp->motivo());
+    }
+    const Comprobador& comprobador = *cp;
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
     // return -- comportamiento indefinido, no "null".
     if (retorno_decl.kind() != Type::Kind::Void && !bloque_siempre_retorna(body))
-        return std::nullopt;
+        return no("it can reach its end without a return");
 
     FuncionNativa out;
     out.nombre_lux = fn.name;
 
+    // A function that awaits is a coroutine taking the request's NativeCtx,
+    // co_awaited by a native route or another such function (Generador,
+    // IrExprKind::Await). It never crosses the ABI: the VM calls its
+    // bytecode. The route's names (req, res, the pinned connections) are
+    // the ctx's, so the same generated code serves both.
+    // ponytail: no LuxDepth here -- a thread_local count is wrong across
+    // suspensions; recursion through await grows the heap, not the stack.
+    if (comprobador.usa_await()) {
+        std::string params = "lux_script::NativeCtx& l_ctx";
+        for (size_t i = 0; i < fn.params.size(); ++i)
+            params += ", " + tipo_cpp(firma.params[i]) + " " + nombre_cpp(fn.params[i].name);
+        out.firma_cpp = "lux::Task<" + tipo_cpp(retorno_decl) + "> " + nombre_cpp(fn.name) + "(" + params + ")";
+        Generador gen(nombre_por_indice, comprobador, /*ruta=*/false, /*asincrona=*/true);
+        gen.retorno_json(es_json_dinamico(retorno_decl));
+        for (size_t i = 0; i < fn.params.size(); ++i) gen.registrar(static_cast<int>(i), fn.params[i].name);
+        out.cuerpo_cpp = "{\n    lux::Request& req = l_ctx.req; lux::Response& res = l_ctx.res; (void)req; (void)res;\n"
+                         "    auto& l_pinned_workers = l_ctx.pinned_workers; (void)l_pinned_workers;\n"
+                         "    auto& l_last_exec_workers = l_ctx.last_exec_workers; (void)l_last_exec_workers;\n"
+                         "    auto& l_poisoned_db = l_ctx.poisoned_db; (void)l_poisoned_db;\n" +
+                         gen.block(body, 1) + (retorno_decl.kind() == Type::Kind::Void ? "    co_return;\n}" : "}");
+        return out;
+    }
+
     std::string params;
     for (size_t i = 0; i < fn.params.size(); ++i) {
         if (i) params += ", ";
-        params += tipo_cpp(Type::from_declared(fn.params[i].type)) + " " +
+        params += tipo_cpp(firma.params[i]) + " " +
                   nombre_cpp(fn.params[i].name);
     }
     out.firma_cpp = tipo_cpp(retorno_decl) + " " + nombre_cpp(fn.name) + "(" + params + ")";
@@ -2306,7 +2523,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // decidir nada, para el tipo C++ de la variable de un `for` y el valor
     // de un DictLit (ver esos casos en Generador::expr/stmt).
     Generador gen(nombre_por_indice, comprobador);
-    gen.retorno_json(retorno_decl.kind() == Type::Kind::Json);
+    gen.retorno_json(es_json_dinamico(retorno_decl));
     for (size_t i = 0; i < fn.params.size(); ++i)
         gen.registrar(static_cast<int>(i), fn.params[i].name);
     out.cuerpo_cpp = "{\n    LuxDepth lux_depth_guard;\n" + gen.block(body, 1) + "}";
@@ -2327,14 +2544,13 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // beneficia -- pero sin wrapper, se queda fuera del despacho desde la
     // VM.
     bool frontera_cruza_abi = tipo_abi_soportado(retorno_decl);
-    for (const auto& p : fn.params)
-        frontera_cruza_abi = frontera_cruza_abi && tipo_abi_soportado(Type::from_declared(p.type));
+    for (const auto& t : firma.params) frontera_cruza_abi = frontera_cruza_abi && tipo_abi_soportado(t);
     if (!frontera_cruza_abi) return out;
 
     out.simbolo_abi = "lux_native_" + fn.name;
     std::string cuerpo_wrapper = "    (void)argc;\n    try {\n";
     for (size_t i = 0; i < fn.params.size(); ++i) {
-        const Type t = Type::from_declared(fn.params[i].type);
+        const Type& t = firma.params[i];
         cuerpo_wrapper += "        " + tipo_cpp(t) + " " + nombre_cpp(fn.params[i].name) +
                           " = args[" + std::to_string(i) + "]." + campo_abi(t.kind()) + ";\n";
     }
@@ -2382,13 +2598,14 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     for (const auto& p : fn.params)
         if (!tipo_soportado(Type::from_declared(p.type), &clases)) return std::nullopt;
 
-    Comprobador comprobador(nombre_por_indice, firmas, clases, roles);
     // check_method declara "this" ANTES que los parametros (ranura 0), al
     // reves que check_function -- ver el comentario de Emitter::check_method.
-    comprobador.registrar(0, Type::class_ref(clase));
-    for (size_t i = 0; i < fn.params.size(); ++i)
-        comprobador.registrar(static_cast<int>(i + 1), Type::from_declared(fn.params[i].type));
-    if (!comprobador.block_compilable(body, retorno_decl)) return std::nullopt;
+    std::vector<Type> tipos_params{Type::class_ref(clase)};
+    for (const auto& p : fn.params) tipos_params.push_back(Type::from_declared(p.type));
+    bool ok = false;
+    auto cp = comprobar(nombre_por_indice, firmas, clases, roles, tipos_params, body, retorno_decl, ok);
+    if (!ok) return std::nullopt;
+    const Comprobador& comprobador = *cp;
     // Fase 5: `await` solo se representa dentro de una ruta (build_routes()
     // es el UNICO punto de entrada nativo que se invoca ya como corrutina;
     // una funcion/metodo suelto se llama directamente en C++ desde otra
@@ -2413,7 +2630,7 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     out.firma_cpp = tipo_cpp(retorno_decl) + " l_" + clase + "_" + fn.name + "(" + params + ")";
 
     Generador gen(nombre_por_indice, comprobador);
-    gen.retorno_json(retorno_decl.kind() == Type::Kind::Json);
+    gen.retorno_json(es_json_dinamico(retorno_decl));
     // "this" no necesita registrarse por nombre (This tiene su propio caso
     // en Generador::expr, "l_this" fijo); los parametros si, para poder
     // resolver un Assign(Local) por su nombre C++.
@@ -2679,17 +2896,19 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         params.push_back({p.name, std::move(t), en_path, con_defecto, std::move(texto_defecto)});
     }
 
-    Comprobador comprobador(nombre_por_indice, firmas, clases, roles);
     // check_route declara los parametros de la ruta, en orden, antes que
     // nada mas (ver Emitter::check_route) -- mismo orden que se registra
     // aqui y en Generador::registrar() mas abajo.
-    for (size_t i = 0; i < params.size(); ++i)
-        comprobador.registrar(static_cast<int>(i), params[i].tipo);
     // Type::json() es el centinela de "esto es una ruta": Return/Require
     // solo tienen que demostrar que su valor es construible como Value
     // (Comprobador::es_valor_json), no un Type nativo exacto -- ver esos dos
     // casos en Comprobador::stmt_compilable.
-    if (!comprobador.block_compilable(body, Type::json())) return no(comprobador.motivo());
+    std::vector<Type> tipos_params;
+    for (const auto& p : params) tipos_params.push_back(p.tipo);
+    bool ok = false;
+    auto cp = comprobar(nombre_por_indice, firmas, clases, roles, tipos_params, body, Type::json(), ok);
+    if (!ok) return no(cp->motivo());
+    Comprobador& comprobador = *cp;
     // Fase 5: si el cuerpo demostro algun `await` (hoy: solo `await
     // sleep(ms)`, ver Comprobador::tipo_provable), esta ruta se genera
     // como una corrutina de verdad -- ver el comentario del constructor de
@@ -2771,9 +2990,12 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // abierto. Declarados siempre que la ruta es asincrona, se usen o no:
     // mas simple que detectar de antemano si el cuerpo de verdad toca una
     // base de datos, y el coste de un std::map vacio es insignificante.
+    // The ctx's own: an async function called from here pins the same
+    // connections (NativeCtx is what the VM shares across calls too).
     if (asincrona)
-        cuerpo += "    std::map<std::string, int> l_pinned_workers, l_last_exec_workers;\n"
-                  "    std::set<std::string> l_poisoned_db;\n";
+        cuerpo += "    auto& l_pinned_workers = l_ctx.pinned_workers;\n"
+                  "    auto& l_last_exec_workers = l_ctx.last_exec_workers;\n"
+                  "    auto& l_poisoned_db = l_ctx.poisoned_db;\n";
     for (const auto& p : params) {
         if (p.es_cuerpo) {
             cuerpo += codigo_bind_cuerpo(p.nombre, p.tipo.class_name(), *p.clase, gen);
@@ -2930,10 +3152,12 @@ std::string generar_clase_runtime(const std::string& nombre_clase, const ClaseNa
     // de CUALQUIER instancia -- ver el comentario de §7/§8).
     s += "class " + tipo + " {\npublic:\n";
     s += "    " + tipo + "(" + params_tipados + ") : b_(new " + caja + "(" + params_nombres + ")) {}\n";
-    s += "    " + tipo + "(const " + tipo + "& o) : b_(o.b_) { ++b_->rc; }\n";
+    // Empty: only the slot lux::Task<T> keeps until co_return fills it.
+    if (!clase.campos.empty()) s += "    " + tipo + "() : b_(nullptr) {}\n";
+    s += "    " + tipo + "(const " + tipo + "& o) : b_(o.b_) { if (b_) ++b_->rc; }\n";
     s += "    " + tipo + "(" + tipo + "&& o) noexcept : b_(o.b_) { o.b_ = nullptr; }\n";
     s += "    " + tipo + "& operator=(const " + tipo + "& o) {\n"
-         "        if (b_ != o.b_) { rel(); b_ = o.b_; ++b_->rc; }\n"
+         "        if (b_ != o.b_) { rel(); b_ = o.b_; if (b_) ++b_->rc; }\n"
          "        return *this;\n"
          "    }\n";
     s += "    " + tipo + "& operator=(" + tipo + "&& o) noexcept {\n"
@@ -3373,6 +3597,20 @@ std::string route_runtime_prelude() {
         "    if (!e.empty()) lux_native_fail(std::move(e));\n"
         "    return v;\n"
         "}\n"
+        // A literal as a chain of calls: `a.add(x).add(y)` evaluates x
+        // before y (C++17), and unlike a lambda or a braced list (a GCC 13
+        // ICE) one of them may co_await.
+        "struct LuxL {\n"
+        "    Value::List l;\n"
+        "    LuxL&& add(Value v) && { l.push_back(std::move(v)); return std::move(*this); }\n"
+        "    Value done() && { return Value::list(std::move(l)); }\n"
+        "    Value::List items() && { return std::move(l); }\n"
+        "};\n"
+        "struct LuxD {\n"
+        "    Value::Dict d;\n"
+        "    LuxD&& add(const std::string& k, Value v) && { d[k] = std::move(v); return std::move(*this); }\n"
+        "    Value done() && { return Value::dict(std::move(d)); }\n"
+        "};\n"
         // Op::GetMember.
         "inline Value lux_json_member(const Value& o, const char* name) {\n"
         "    if (!o.is_dict()) lux_native_fail(std::string(\"'\") + name + \"' on \" + o.type_name() + \", which has no fields\");\n"
@@ -3561,6 +3799,33 @@ std::string route_runtime_prelude() {
         "    }\n"
         "    if (obj.is_list()) lux_native_fail(\"a List index must be an int\");\n"
         "    lux_native_fail(std::string(\"cannot index \") + obj.type_name());\n"
+        "}\n"
+        // Op::GetIndex / Op::SetIndex, with an index only known at run time.
+        "inline Value lux_json_index(const Value& obj, const Value& idx) {\n"
+        "    if (obj.is_list()) {\n"
+        "        if (!idx.is_int()) lux_native_fail(\"a List index must be an int\");\n"
+        "        return lux_json_index_int(obj, idx.as_int());\n"
+        "    }\n"
+        "    if (obj.is_dict()) {\n"
+        "        if (!idx.is_str()) lux_native_fail(idx.is_int() ? dict_int_index_error(obj) : std::string(\"a Dict key must be a string\"));\n"
+        "        return lux_json_index_str(obj, idx.as_str());\n"
+        "    }\n"
+        "    lux_native_fail(std::string(\"cannot index \") + obj.type_name());\n"
+        "}\n"
+        "inline void lux_json_set_index(Value obj, const Value& idx, Value v) {\n"
+        "    if (obj.is_list()) {\n"
+        "        if (!idx.is_int()) lux_native_fail(\"a List index must be an int\");\n"
+        "        auto& l = obj.as_list();\n"
+        "        const int64_t i = idx.as_int();\n"
+        "        if (i < 0 || i >= (int64_t)l.size())\n"
+        "            lux_native_fail(\"index out of range: \" + std::to_string(i) + \" (size \" + std::to_string(l.size()) + \")\");\n"
+        "        l[(size_t)i] = std::move(v);\n"
+        "    } else if (obj.is_dict()) {\n"
+        "        if (!idx.is_str()) lux_native_fail(\"a Dict key must be a string\");\n"
+        "        obj.as_dict()[idx.as_str()] = std::move(v);\n"
+        "    } else {\n"
+        "        lux_native_fail(std::string(\"cannot index \") + obj.type_name());\n"
+        "    }\n"
         "}\n"
         // len()/int() sobre un Json -- mismas reglas que fn_len/fn_int
         // (natives.cpp).

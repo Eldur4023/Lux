@@ -273,6 +273,8 @@ int main(int argc, char** argv) {
             if (r.path == "declarative" || r.path == "ws" || r.path == "sse") continue;
             std::cout << "lux:   " << r.method << " " << r.pattern << " -> " << r.path << "\n";
         }
+        for (const auto& [fn, why] : mod->native_why.funciones)
+            std::cout << "lux:   fn " << fn << " -> bytecode" << (why.empty() ? "" : " (" + why + ")") << "\n";
         // A partial (or total) degradation to bytecode is never a compile
         // error -- see the comment on Module::native_warning -- but it
         // should not pass in silence either.

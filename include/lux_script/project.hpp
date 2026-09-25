@@ -71,7 +71,7 @@ struct Module {
         std::string path; // "declarative" | "native" | "native (async)" | "bytecode" | "ws" | "sse"
     };
     std::vector<RouteReport> route_report;
-    std::vector<std::string> native_why;   // by route index: why --native left it on bytecode
+    NativeReport native_why;   // why --native left a route or function on bytecode
 
     // mtimes of the compiled files, to detect changes.
     std::vector<std::pair<std::filesystem::path,
