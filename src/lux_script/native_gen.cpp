@@ -453,6 +453,62 @@ public:
 
     // Nullopt si no se puede demostrar; si no, el Type exacto que el VM
     // SIEMPRE produciria para esta expresion, con los mismos valores.
+    // Any other builtin method, through the VM's own call_method() on a
+    // Value receiver (lux_dyn_method). A native List/Dict becomes a Value
+    // copy on the way in, so the methods that change it in place stay out
+    // for those; a Value shares its list, as in the VM.
+    std::optional<Type> metodo_dinamico(const IrExpr& e, const Type& tobj) const {
+        static const std::set<std::string> mutan = {"add", "remove_at", "sort", "reverse", "pop",
+                                                    "insert", "sort_by", "remove", "merge"};
+        const bool en_value = es_json_dinamico(tobj);
+        if (!en_value && !es_escalar_json(tobj.kind()) && tobj.kind() != Type::Kind::List &&
+            tobj.kind() != Type::Kind::Dict)
+            return std::nullopt;
+        if (!en_value && (tobj.kind() == Type::Kind::List || tobj.kind() == Type::Kind::Dict) &&
+            mutan.count(e.call_name))
+            return std::nullopt;
+        for (const auto& a : e.args)
+            if (!a.value || !a.name.empty() || !es_valor_json(*a.value)) return std::nullopt;
+        dinamicas_.insert(&e);
+        const std::vector<BuiltinMethod>* ms =
+            tobj.kind() == Type::Kind::Json ? nullptr : methods_of(tobj.base_name());
+        if (ms)
+            for (const auto& m : *ms)
+                if (e.call_name == m.name) {
+                    if (!m.return_type) return en_value ? tobj : Type::json();
+                    const std::string r = m.return_type;
+                    if (r == "List") return Type::list_of(Type::json());
+                    if (r == "Dict") return Type::dict_of(Type::json());
+                    return Type::json();
+                }
+        return Type::json();
+    }
+
+    // request.*/log.*: they read the request or write the log, and need
+    // nothing a native route's NativeCtx does not have. session/jwt/error/
+    // sse/ws do.
+    static bool llamada_reservada_generica(const IrExpr& e) {
+        if (e.call_index < 0) return false;
+        const std::string n = native_at(e.call_index).name;
+        return n.rfind("__req_", 0) == 0 || n.rfind("__log_", 0) == 0;
+    }
+
+    // A synchronous builtin (range, float, query, header, cookie, form,
+    // send_file...) called as the VM does it: NativeDef::fn over a
+    // NativeCtx (lux_dyn_global). render() compiles its template in the
+    // emitter, so it is not one of them.
+    std::optional<Type> nativa_dinamica(const IrExpr& e) const {
+        if (e.call_index < 0 || e.call_name == "render") return std::nullopt;
+        const NativeDef& d = native_at(e.call_index);
+        if (!d.fn || d.is_async) return std::nullopt;
+        for (const auto& a : e.args)
+            if (!a.value || !a.name.empty() || !es_valor_json(*a.value)) return std::nullopt;
+        dinamicas_.insert(&e);
+        return std::string(d.name) == "range" ? Type::list_of(Type::json()) : Type::json();
+    }
+    bool dinamica(const IrExpr& e) const { return dinamicas_.count(&e) > 0; }
+    bool for_dinamico(const IrStmt& s) const { return for_dinamicos_.count(&s) > 0; }
+
     // Does this Binary run on Values (lux_json_*), not on native types?
     bool binaria_json(const IrExpr& e) const { return binarias_json_.count(&e) > 0; }
 
@@ -601,9 +657,16 @@ private:
             // ninguna busqueda que ahorrar en runtime, a diferencia de
             // GetMember en el VM).
             case IrExprKind::Member: {
-                if (!e.object) return std::nullopt;
+                // request.path, a reserved object's member with no call.
+                if (!e.object) return !e.call_name.empty() && llamada_reservada_generica(e) ? nativa_dinamica(e) : std::nullopt;
                 auto tobj = tipo_provable(*e.object);
-                if (!tobj || tobj->kind() != Type::Kind::Class) return std::nullopt;
+                if (!tobj) return std::nullopt;
+                // row.name on a Value: Op::GetMember (lux_json_member).
+                if (tobj->kind() != Type::Kind::Class && es_valor_json(*e.object)) {
+                    dinamicas_.insert(&e);
+                    return Type::json();
+                }
+                if (tobj->kind() != Type::Kind::Class) return std::nullopt;
                 auto cit = clases_.find(tobj->class_name());
                 if (cit == clases_.end()) return std::nullopt;
                 for (const auto& c : cit->second.campos)
@@ -826,7 +889,7 @@ private:
                         if (!e.args.empty()) return std::nullopt;
                         return Type::list_of(Type::primitive(Type::Kind::String));
                     }
-                    return std::nullopt;
+                    return metodo_dinamico(e, *tobj);
                 }
                 if (e.call_shape == IrCallShape::UserFunctionCall) {
                     if (e.call_index < 0 ||
@@ -942,6 +1005,7 @@ private:
                         }
                         return Type::json();
                     }
+                    if (llamada_reservada_generica(e)) return nativa_dinamica(e);
                     if (e.call_index == state_set_id()) {
                         if (e.args.size() != 2 || !e.args[0].value || !e.args[1].value)
                             return std::nullopt;
@@ -997,6 +1061,7 @@ private:
                         if (t && (es_escalar_json(t->kind()) || es_json_dinamico(*t)))
                             return Type::primitive(Type::Kind::Int);
                     }
+                    return nativa_dinamica(e);
                 }
                 if (e.call_shape == IrCallShape::BuiltinModuleCall) {
                     const BuiltinModuleFn& fn = builtin_module_function_at(e.call_index);
@@ -1227,8 +1292,16 @@ public:
             case IrStmtKind::For: {
                 if (!s.target) return false;
                 auto titer = tipo_provable(*s.target);
-                if (!titer || titer->kind() != Type::Kind::List) return false;
-                registrar(s.slot, titer->element());
+                if (!titer) return false;
+                if (titer->kind() == Type::Kind::List && !es_json_dinamico(*titer)) {
+                    registrar(s.slot, titer->element());
+                    return block_compilable(s.body, retorno_fn);
+                }
+                // Anything else walks what IterList gives at run time: a
+                // list, a dict's keys, a string's characters.
+                if (!es_valor_json(*s.target)) return false;
+                for_dinamicos_.insert(&s);
+                registrar(s.slot, Type::json());
                 return block_compilable(s.body, retorno_fn);
             }
 
@@ -1270,6 +1343,8 @@ private:
     mutable bool                     usa_transaccion_ = false;
     mutable const IrExpr*            fallo_ = nullptr;
     mutable std::set<const IrExpr*>  binarias_json_;
+    mutable std::set<const IrExpr*>  dinamicas_;
+    std::set<const IrStmt*>          for_dinamicos_;
     std::string                      motivo_;
 };
 
@@ -1410,6 +1485,10 @@ public:
             // generacion -- Comprobador::tipo_provable() ya demostro que
             // `o` es de una clase que de verdad tiene ese campo.
             case IrExprKind::Member:
+                if (!e.object) return "lux_dyn_global(" + std::string(ruta_ ? "l_ctx" : "lux_ctx()") + ", " +
+                                      std::to_string(e.call_index) + ", {})";
+                if (comprobador_.dinamica(e))
+                    return "lux_json_member(" + valor_json(*e.object) + ", " + literal_string(e.text) + ")";
                 return expr(*e.object) + ".campo_" + e.text + "()";
 
             case IrExprKind::Unary:
@@ -1475,6 +1554,16 @@ public:
 
             case IrExprKind::Call: {
                 if (e.call_shape == IrCallShape::BuiltinModuleCall) return llamada_modulo(e, false);
+                if (comprobador_.dinamica(e)) {
+                    const std::string ctx = ruta_ ? "l_ctx" : "lux_ctx()";
+                    std::string args = "{";
+                    for (size_t i = 0; i < e.args.size(); ++i) args += (i ? ", " : "") + valor_json(*e.args[i].value);
+                    args += "}";
+                    if (e.call_shape == IrCallShape::BuiltinMethodCall)
+                        return "lux_dyn_method(" + ctx + ", " + valor_json(*e.object) + ", " +
+                               literal_string(e.call_name) + ", " + args + ")";
+                    return "lux_dyn_global(" + ctx + ", " + std::to_string(e.call_index) + ", " + args + ")";
+                }
                 // ClassName(args...): el UNICO constructor de la clase C++
                 // generada (generar_clase_runtime) es, a proposito, el
                 // automapeo -- un valor por campo, en orden -- asi que
@@ -1721,8 +1810,8 @@ public:
         for (size_t i = 0; i < call.args.size(); ++i) params += (i ? ", " : "") + valor_json(*call.args[i].value);
         params += ")";
         const std::string id = std::to_string(call.call_index);
-        const std::string v = awaited ? "(co_await lux_module_await(req, res, " + id + ", " + params + "))"
-                            : ruta_ ? "lux_module_call(req, res, " + id + ", " + params + ")"
+        const std::string v = awaited ? "(co_await lux_module_await(l_ctx, " + id + ", " + params + "))"
+                            : ruta_ ? "lux_module_call(l_ctx, " + id + ", " + params + ")"
                                     : "lux_fn_module_call(" + id + ", " + params + ")";
         const std::string& r = builtin_module_function_at(call.call_index).returns;
         if (r == "string") return "lux_module_str(" + v + ")";
@@ -1899,6 +1988,17 @@ public:
             // verdad, no hace falta ningun parcheo de saltos como en el
             // bytecode.
             case IrStmtKind::For: {
+                if (comprobador_.for_dinamico(s)) {
+                    std::string r = "{\n";
+                    r += pad(indent + 1) + "Value l__for_items = lux_iter(" + valor_json(*s.target) + ");\n";
+                    r += pad(indent + 1) + "const int64_t l__for_count = (int64_t)l__for_items.as_list().size();\n";
+                    r += pad(indent + 1) + "for (int64_t l__for_i = 0; l__for_i < l__for_count; ++l__for_i) {\n";
+                    r += pad(indent + 2) + "Value " + nombre_cpp(s.name) + " = lux_json_index_int(l__for_items, l__for_i);\n";
+                    r += block(s.body, indent + 2);
+                    r += pad(indent + 1) + "}\n";
+                    r += pad(indent) + "}";
+                    return r;
+                }
                 const std::string tipo_var = tipo_cpp(comprobador_.tipo_provable(*s.target)->element());
                 std::string r = "{\n";
                 r += pad(indent + 1) + "const auto& l__for_items = " + expr(*s.target) + ";\n";
@@ -1938,14 +2038,14 @@ public:
     // Like bytecode's ctx.response_written: when something in the body
     // already wrote the response (pdf.send()), the return value is dropped.
     std::string respuesta_de_retorno(const IrExpr* e) const {
-        if (!e) return "if (!res.is_committed()) res.status(204).send(\"\"); " + ret_vacio();
+        if (!e) return "if (!lux_answered(res, l_ctx)) res.status(204).send(\"\"); " + ret_vacio();
         // A dynamic value may turn out null at run time: a 204, as in bytecode.
         auto t = comprobador_.tipo_provable(*e);
         if (t && es_json_dinamico(*t))
-            return "{ Value __r = " + valor_json(*e) + "; if (!res.is_committed()) { if (__r.is_null()) "
+            return "{ Value __r = " + valor_json(*e) + "; if (!lux_answered(res, l_ctx)) { if (__r.is_null()) "
                    "res.status(204).send(\"\"); else res.header(\"Content-Type\", \"application/json; "
                    "charset=utf-8\").send(__r.to_json_text()); } } " + ret_vacio();
-        return "if (!res.is_committed()) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
+        return "if (!lux_answered(res, l_ctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
                valor_json(*e) + ".to_json_text()); " + ret_vacio();
     }
 
@@ -2772,7 +2872,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // mismo cierre de transaccion que cualquier otra salida.
     if (asincrona && comprobador.usa_transaccion())
         cuerpo += "    co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop);\n";
-    cuerpo += "    if (!res.is_committed()) res.status(204).send(\"\");\n";
+    cuerpo += "    if (!lux_answered(res, l_ctx)) res.status(204).send(\"\");\n";
     cuerpo += "    } catch (const LuxNativeError&) {\n";
     cuerpo += "        Value::Dict __e;\n";
     // is_production_mode() (natives.hpp) -- same function bytecode's own
@@ -3228,18 +3328,19 @@ std::string route_runtime_prelude() {
         "}\n"
         // Module calls (Generador::llamada_modulo): the function, a
         // NativeCtx over the route's req/res, a failure raised.
-        "inline Value lux_module_call(lux::Request& req, lux::Response& res, int id, std::vector<Value> args) {\n"
-        "    lux_script::NativeCtx ctx = lux_route_ctx(req, res);\n"
+        "inline bool lux_answered(lux::Response& res, const lux_script::NativeCtx& c) {\n"
+        "    return res.is_committed() || c.response_written;\n"
+        "}\n"
+        "inline Value lux_module_call(lux_script::NativeCtx& ctx, int id, std::vector<Value> args) {\n"
         "    std::string e;\n"
         "    Value v = lux_script::builtin_module_function_at(id).call(ctx, args, e);\n"
         "    if (!e.empty()) lux_native_fail(std::move(e));\n"
         "    return v;\n"
         "}\n"
-        "inline lux::Task<Value> lux_module_await(lux::Request& req, lux::Response& res, int id, std::vector<Value> args) {\n"
-        "    lux_script::NativeCtx ctx = lux_route_ctx(req, res);\n"
+        "inline lux::Task<Value> lux_module_await(lux_script::NativeCtx& ctx, int id, std::vector<Value> args) {\n"
         "    std::string e;\n"
         "    Value v;\n"
-        "    co_await lux::BlockingAwaitable{req.loop, [&] {\n"
+        "    co_await lux::BlockingAwaitable{ctx.req.loop, [&] {\n"
         "        v = lux_script::builtin_module_function_at(id).call(ctx, args, e);\n"
         "    }, &lux::io_blocking_pool()};\n"
         "    if (!e.empty()) lux_native_fail(std::move(e));\n"
@@ -3257,6 +3358,35 @@ std::string route_runtime_prelude() {
         "    Value v = lux_script::builtin_module_function_at(id).call(lux_ctx(), args, e);\n"
         "    if (!e.empty()) lux_native_fail(std::move(e));\n"
         "    return v;\n"
+        "}\n"
+        // A builtin method or function the native code has no own version
+        // of: the VM's own, on Values.
+        "inline Value lux_dyn_method(lux_script::NativeCtx& c, Value recv, const char* name, std::vector<Value> args) {\n"
+        "    std::string e;\n"
+        "    Value v = lux_script::call_method(c, recv, name, args, e);\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    return v;\n"
+        "}\n"
+        "inline Value lux_dyn_global(lux_script::NativeCtx& c, int id, std::vector<Value> args) {\n"
+        "    std::string e;\n"
+        "    Value v = lux_script::native_at(id).fn(c, args, e);\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    return v;\n"
+        "}\n"
+        // Op::GetMember.
+        "inline Value lux_json_member(const Value& o, const char* name) {\n"
+        "    if (!o.is_dict()) lux_native_fail(std::string(\"'\") + name + \"' on \" + o.type_name() + \", which has no fields\");\n"
+        "    auto it = o.as_dict().find(name);\n"
+        "    return it == o.as_dict().end() ? Value::null() : it->second;\n"
+        "}\n"
+        // Op::IterList: what a `for` walks.
+        "inline Value lux_iter(Value v) {\n"
+        "    if (v.is_list()) return v;\n"
+        "    Value::List out;\n"
+        "    if (v.is_dict()) { for (const auto& [k, _] : v.as_dict()) out.push_back(Value::str(k)); }\n"
+        "    else if (v.is_str()) { for (auto& ch : lux_script::utf8_chars(v.as_str())) out.push_back(Value::str(std::move(ch))); }\n"
+        "    else lux_native_fail(std::string(\"cannot iterate over \") + v.type_name() + \" with 'for'\");\n"
+        "    return Value::list(std::move(out));\n"
         "}\n"
         // A route calling a user function: its arguments are evaluated
         // first (they may co_await, and another request may run on this
