@@ -481,6 +481,7 @@ fails_to_compile "method on a string"   "$HERE/cases/bad/method_type.lux" "have 
 fails_to_compile "field of a class"    "$HERE/cases/bad/field_type.lux"  "has no field"
 fails_to_compile "module not imported"   "$HERE/cases/bad/import.lux"   "missing 'import sqlite'"
 fails_to_compile "native module not imported" "$HERE/cases/bad/module_import.lux" "missing 'import hash'"
+fails_to_compile "a module's return type is checked" "$HERE/cases/bad/module_return.lux" "have no method 'uppercase'"
 fails_to_compile "a bad schedule"        "$HERE/cases/bad/every.lux"    "is not a schedule"
 fails_to_compile "'Response' as a return type" "$HERE/cases/bad/response_type.lux" "cannot be used as a return type"
 # Expression types are checked at RUN TIME: the compiler

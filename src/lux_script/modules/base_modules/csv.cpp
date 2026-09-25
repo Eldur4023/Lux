@@ -229,14 +229,14 @@ Value fn_close(NativeCtx&, std::vector<Value>& a, std::string&) {
 } // namespace
 
 LUX_MODULE(csv, {
-    {"read",      "s|bsb", fn_read},
-    {"write",     "l|Ls",  fn_write},
-    {"parse",     "s|b",   fn_parse},
-    {"rows",      "i",     fn_rows},
-    {"columns",   "i",     fn_columns},
-    {"row_count", "i",     fn_row_count},
-    {"to_csv",    "i",     fn_to_csv},
-    {"close",     "i",     fn_close},
+    {"read",      "s|bsb>l", fn_read},
+    {"write",     "l|Ls>s",  fn_write},
+    {"parse",     "s|b>i",   fn_parse},
+    {"rows",      "i>l",     fn_rows},
+    {"columns",   "i>l",     fn_columns},
+    {"row_count", "i>i",     fn_row_count},
+    {"to_csv",    "i>s",     fn_to_csv},
+    {"close",     "i>b",     fn_close},
 })
 
 } // namespace lux_script

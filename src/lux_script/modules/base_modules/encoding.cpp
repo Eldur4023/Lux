@@ -130,16 +130,16 @@ Value fn_url_parse(NativeCtx& c, std::vector<Value>& a, std::string& e) {
 } // namespace
 
 LUX_MODULE(encoding, {
-    {"base64_encode", "s|b", fn_base64_encode},
-    {"base64_decode", "s",   fn_base64_decode},
-    {"hex_encode",    "s",   fn_hex_encode},
-    {"hex_decode",    "s",   fn_hex_decode},
-    {"url_encode",    "s",   fn_url_encode},
-    {"url_decode",    "s",   fn_url_decode},
-    {"query_encode",  "d",   fn_query_encode},
-    {"query_decode",  "s",   fn_query_decode},
-    {"url_parse",     "s",   fn_url_parse},
-    {"html_escape",   "s",   fn_html_escape},
+    {"base64_encode", "s|b>s", fn_base64_encode},
+    {"base64_decode", "s>s",   fn_base64_decode},
+    {"hex_encode",    "s>s",   fn_hex_encode},
+    {"hex_decode",    "s>s",   fn_hex_decode},
+    {"url_encode",    "s>s",   fn_url_encode},
+    {"url_decode",    "s>s",   fn_url_decode},
+    {"query_encode",  "d>s",   fn_query_encode},
+    {"query_decode",  "s>d",   fn_query_decode},
+    {"url_parse",     "s>d",   fn_url_parse},
+    {"html_escape",   "s>s",   fn_html_escape},
 })
 
 } // namespace lux_script

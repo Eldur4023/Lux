@@ -183,13 +183,13 @@ Value fn_regex_escape(NativeCtx&, std::vector<Value>& args, std::string&) {
 } // namespace
 
 LUX_MODULE(regex, {
-    {"test",     "ss",  fn_regex_test},
+    {"test",     "ss>b",  fn_regex_test},
     {"find",     "ss",  fn_regex_find},
-    {"find_all", "ss",  fn_regex_find_all},
+    {"find_all", "ss>l",  fn_regex_find_all},
     {"groups",   "ss",  fn_regex_groups},
-    {"replace",  "sss", fn_regex_replace},
-    {"split",    "ss",  fn_regex_split},
-    {"escape",   "s",   fn_regex_escape},
+    {"replace",  "sss>s", fn_regex_replace},
+    {"split",    "ss>l",  fn_regex_split},
+    {"escape",   "s>s",   fn_regex_escape},
 })
 
 } // namespace lux_script

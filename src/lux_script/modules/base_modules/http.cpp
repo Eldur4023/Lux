@@ -265,12 +265,12 @@ Value fn_http_url_encode(NativeCtx&, std::vector<Value>& a, std::string&) {
 } // namespace
 
 LUX_MODULE(http, {
-    {"get",        "s|DD",  fn_http_get,    /*is_async=*/true},
-    {"post",       "sx|DD", fn_http_post,   /*is_async=*/true},
-    {"put",        "sx|DD", fn_http_put,    /*is_async=*/true},
-    {"patch",      "sx|DD", fn_http_patch,  /*is_async=*/true},
-    {"delete",     "s|DD",  fn_http_delete, /*is_async=*/true},
-    {"url_encode", "s",     fn_http_url_encode},
+    {"get",        "s|DD>d",  fn_http_get,    /*is_async=*/true},
+    {"post",       "sx|DD>d", fn_http_post,   /*is_async=*/true},
+    {"put",        "sx|DD>d", fn_http_put,    /*is_async=*/true},
+    {"patch",      "sx|DD>d", fn_http_patch,  /*is_async=*/true},
+    {"delete",     "s|DD>d",  fn_http_delete, /*is_async=*/true},
+    {"url_encode", "s>s",     fn_http_url_encode},
 })
 
 } // namespace lux_script

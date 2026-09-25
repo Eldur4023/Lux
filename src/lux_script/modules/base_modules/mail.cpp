@@ -158,7 +158,7 @@ public:
     const char* name() const override { return "mail"; }
     const std::vector<BuiltinModuleFn>& functions() const override {
         static const std::vector<BuiltinModuleFn> fns = {
-            {"send", "d", fn_send, /*is_async=*/true},
+            {"send", "d>b", fn_send, /*is_async=*/true},
         };
         return fns;
     }

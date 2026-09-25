@@ -189,16 +189,16 @@ Value fn_ago(NativeCtx&, std::vector<Value>& a, std::string& error) {
 } // namespace
 
 LUX_MODULE(time, {
-    {"now",         "",      fn_now},
-    {"now_seconds", "",      fn_now_seconds},
-    {"format",      "is|i",  fn_format},
-    {"format_iso",  "i",     fn_format_iso},
+    {"now",         ">i",      fn_now},
+    {"now_seconds", ">i",      fn_now_seconds},
+    {"format",      "is|i>s",  fn_format},
+    {"format_iso",  "i>s",     fn_format_iso},
     {"parse",       "ss",    fn_parse},
     {"parse_iso",   "s",     fn_parse_iso},
-    {"parts",       "i|i",   fn_parts},
-    {"start_of",    "is|i",  fn_start_of},
-    {"add_months",  "ii",    fn_add_months},
-    {"ago",         "i|Is",  fn_ago},
+    {"parts",       "i|i>d",   fn_parts},
+    {"start_of",    "is|i>i",  fn_start_of},
+    {"add_months",  "ii>i",    fn_add_months},
+    {"ago",         "i|Is>s",  fn_ago},
 })
 
 } // namespace lux_script

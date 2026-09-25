@@ -1,0 +1,7 @@
+import hash
+
+app:
+    port 8000
+
+get endpoint("/x"):
+    return { "h": hash.sha256("x").uppercase() }

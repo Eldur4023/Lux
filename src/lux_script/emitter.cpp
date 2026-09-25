@@ -552,6 +552,15 @@ Type Emitter::type_of(const Expr& e) const {
             }
 
             if (e.object->kind != ExprKind::Member) return Type::unknown();
+
+            // `hash.sha256(s)`: an imported module's function, typed by its
+            // signature's return.
+            if (e.object->object->kind == ExprKind::Ident && imports_ &&
+                imports_->count(e.object->object->text) && resolve_local(e.object->object->text) < 0) {
+                const BuiltinModuleFn* fn =
+                    BuiltinModuleRegistry::instance().find(e.object->object->text, e.object->text);
+                return fn && !fn->returns.empty() ? Type::from_legacy_name(fn->returns) : Type::unknown();
+            }
             const Type recv = type_of(*e.object->object);
 
             // A method on a user-defined class (`p.square()`), typed by
@@ -1125,7 +1134,9 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         // these calls is not attempted yet: with type Json, native_gen.cpp's
         // tipo_provable() simply never proves this shape, and the route
         // falls back to bytecode like any other unsupported construct.
-        r->type = Type::json();
+        // The declared return type when there is one (a signature's '>'),
+        // so a chained method is checked like on a variable; Json otherwise.
+        r->type = fn->returns.empty() ? Type::json() : Type::from_legacy_name(fn->returns);
         return r;
     }
 

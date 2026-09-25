@@ -34,8 +34,8 @@ Value fn_ip_version(NativeCtx&, std::vector<Value>& a, std::string&) {
 } // namespace
 
 LUX_MODULE(net, {
-    {"ip_in",      "sx", fn_ip_in},
-    {"is_private", "s",  fn_is_private},
+    {"ip_in",      "sx>b", fn_ip_in},
+    {"is_private", "s>b",  fn_is_private},
     {"ip_version", "s",  fn_ip_version},
 })
 

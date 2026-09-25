@@ -160,12 +160,12 @@ Value fn_rooms_count(NativeCtx&, std::vector<Value>& args, std::string&) {
 } // namespace
 
 LUX_MODULE(rooms, {
-    {"join",             "s",  fn_rooms_join},
-    {"leave",            "s",  fn_rooms_leave},
-    {"leave_all",        "",   fn_rooms_leave_all},
-    {"broadcast",        "sx", fn_rooms_broadcast},
-    {"broadcast_others", "sx", fn_rooms_broadcast_others},
-    {"count",            "s",  fn_rooms_count},
+    {"join",             "s>b",  fn_rooms_join},
+    {"leave",            "s>b",  fn_rooms_leave},
+    {"leave_all",        ">i",   fn_rooms_leave_all},
+    {"broadcast",        "sx>i", fn_rooms_broadcast},
+    {"broadcast_others", "sx>i", fn_rooms_broadcast_others},
+    {"count",            "s>i",  fn_rooms_count},
 })
 
 } // namespace lux_script

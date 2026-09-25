@@ -133,17 +133,17 @@ Value fn_unsign(NativeCtx&, std::vector<Value>& a, std::string&) {
 } // namespace
 
 LUX_MODULE(hash, {
-    {"sha256",      "s",   fn_sha256},
-    {"hmac_sha256", "ss",  fn_hmac_sha256},
-    {"equal",       "ss",  fn_equal},
-    {"random_hex",  "i",   fn_random_hex},
-    {"token",       "|i",  fn_token},
-    {"uuid",        "|i",  fn_uuid},
-    {"sign",        "xs",  fn_sign},
+    {"sha256",      "s>s",   fn_sha256},
+    {"hmac_sha256", "ss>s",  fn_hmac_sha256},
+    {"equal",       "ss>b",  fn_equal},
+    {"random_hex",  "i>s",   fn_random_hex},
+    {"token",       "|i>s",  fn_token},
+    {"uuid",        "|i>s",  fn_uuid},
+    {"sign",        "xs>s",  fn_sign},
     {"unsign",      "ss|i", fn_unsign},
     // CPU-bound by design: off the event loop.
-    {"password",    "s",   fn_password, /*is_async=*/true},
-    {"verify",      "ss",  fn_verify,   /*is_async=*/true},
+    {"password",    "s>s",   fn_password, /*is_async=*/true},
+    {"verify",      "ss>b",  fn_verify,   /*is_async=*/true},
 })
 
 } // namespace lux_script

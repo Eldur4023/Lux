@@ -138,12 +138,12 @@ Value fn_distance(NativeCtx&, std::vector<Value>& a, std::string& error) {
 } // namespace
 
 LUX_MODULE(text, {
-    {"slug",          "s",     fn_slug},
-    {"truncate",      "si|s",  fn_truncate},
-    {"format_number", "x|iss", fn_format_number},
-    {"pad_left",      "si|s",  fn_pad_left},
-    {"pad_right",     "si|s",  fn_pad_right},
-    {"distance",      "ss",    fn_distance},
+    {"slug",          "s>s",     fn_slug},
+    {"truncate",      "si|s>s",  fn_truncate},
+    {"format_number", "x|iss>s", fn_format_number},
+    {"pad_left",      "si|s>s",  fn_pad_left},
+    {"pad_right",     "si|s>s",  fn_pad_right},
+    {"distance",      "ss>i",    fn_distance},
 })
 
 } // namespace lux_script

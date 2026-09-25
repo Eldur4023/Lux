@@ -108,7 +108,7 @@ Value fn_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
 } // namespace
 
 LUX_MODULE(zip, {
-    {"create", "sl", fn_create, /*is_async=*/true},
+    {"create", "sl>i", fn_create, /*is_async=*/true},
 })
 
 } // namespace lux_script

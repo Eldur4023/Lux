@@ -229,7 +229,7 @@ Value fn_temp_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 constexpr long long kDefaultTimeoutMs = 15'000, kMaxTimeoutMs = 120'000;
 
-// run(cmd, args, {"cwd", "env", "input", "timeout_ms"}) -> {status,
+// run(cmd, args, {"cwd", "env>s", "input", "timeout_ms"}) -> {status,
 // stdout, stderr}. `input` is written to the child's stdin while its
 // output is read, in one poll loop: a child that fills its stdout before
 // reading all its stdin cannot deadlock the two against each other (and one
@@ -299,31 +299,31 @@ Value fn_run(NativeCtx&, std::vector<Value>& a, std::string& error) {
 LUX_MODULE(os, {
     {"getenv",        "s|x",  fn_getenv},
     {"cwd",           "",     fn_cwd},
-    {"path_join",     "x*",   fn_path_join},
-    {"path_basename", "s",    fn_path_basename},
-    {"path_dirname",  "s",    fn_path_dirname},
-    {"path_ext",      "s",    fn_path_ext},
-    {"path_abs",      "s",    fn_path_abs},
-    {"path_exists",   "s",    fn_path_exists},
-    {"is_dir",        "s",    fn_is_dir},
-    {"is_file",       "s",    fn_is_file},
-    {"file_size",     "s",    fn_file_size},
-    {"mtime_ms",      "s",    fn_mtime_ms},
-    {"mime",          "s",    fn_mime},
+    {"path_join",     "x*>s",   fn_path_join},
+    {"path_basename", "s>s",    fn_path_basename},
+    {"path_dirname",  "s>s",    fn_path_dirname},
+    {"path_ext",      "s>s",    fn_path_ext},
+    {"path_abs",      "s>s",    fn_path_abs},
+    {"path_exists",   "s>b",    fn_path_exists},
+    {"is_dir",        "s>b",    fn_is_dir},
+    {"is_file",       "s>b",    fn_is_file},
+    {"file_size",     "s>i",    fn_file_size},
+    {"mtime_ms",      "s>i",    fn_mtime_ms},
+    {"mime",          "s>s",    fn_mime},
     {"list_dir",      "s|b",  fn_list_dir},
-    {"glob",          "s",    fn_glob},
-    {"remove_file",   "s",    fn_remove_file},
-    {"remove_dir",    "s|b",  fn_remove_dir},
-    {"make_dir",      "s",    fn_make_dir},
-    {"temp_dir",      "",     fn_temp_dir},
-    {"temp_file",     "|s",   fn_temp_file},
+    {"glob",          "s>l",    fn_glob},
+    {"remove_file",   "s>b",    fn_remove_file},
+    {"remove_dir",    "s|b>b",  fn_remove_dir},
+    {"make_dir",      "s>b",    fn_make_dir},
+    {"temp_dir",      ">s",     fn_temp_dir},
+    {"temp_file",     "|s>s",   fn_temp_file},
     // Moving file content or waiting on a process: off the event loop.
     {"read_file",     "s",    fn_read_file,   /*is_async=*/true},
-    {"write_file",    "ss",   fn_write_file,  /*is_async=*/true},
-    {"append_file",   "ss",   fn_append_file, /*is_async=*/true},
-    {"copy_file",     "ss|b", fn_copy_file,   /*is_async=*/true},
-    {"move",          "ss",   fn_move,        /*is_async=*/true},
-    {"run",           "s|ld", fn_run,         /*is_async=*/true},
+    {"write_file",    "ss>b",   fn_write_file,  /*is_async=*/true},
+    {"append_file",   "ss>b",   fn_append_file, /*is_async=*/true},
+    {"copy_file",     "ss|b>b", fn_copy_file,   /*is_async=*/true},
+    {"move",          "ss>b",   fn_move,        /*is_async=*/true},
+    {"run",           "s|ld>d", fn_run,         /*is_async=*/true},
 })
 
 } // namespace lux_script

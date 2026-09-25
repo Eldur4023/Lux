@@ -216,20 +216,20 @@ Value fn_pdf_close(NativeCtx&, std::vector<Value>& a, std::string&) {
 } // namespace
 
 LUX_MODULE(pdf, {
-    {"create",         "nn",     fn_pdf_create},
-    {"add_page",       "inn",    fn_pdf_add_page},
-    {"set_color",      "innn",   fn_pdf_set_color},
-    {"set_font",       "is|bb",  fn_pdf_set_font},
-    {"text",           "innsn",  fn_pdf_text},
-    {"text_width",     "isn",    fn_pdf_text_width},
-    {"rect",           "innnn|b", fn_pdf_rect},
-    {"line",           "innnn",  fn_pdf_line},
-    {"set_line_width", "in",     fn_pdf_set_line_width},
-    {"image",          "isnn|nn", fn_pdf_image},
-    {"save",           "is",     fn_pdf_save},
-    {"to_base64",      "i",      fn_pdf_to_base64},
+    {"create",         "nn>i",     fn_pdf_create},
+    {"add_page",       "inn>b",    fn_pdf_add_page},
+    {"set_color",      "innn>b",   fn_pdf_set_color},
+    {"set_font",       "is|bb>b",  fn_pdf_set_font},
+    {"text",           "innsn>b",  fn_pdf_text},
+    {"text_width",     "isn>r",    fn_pdf_text_width},
+    {"rect",           "innnn|b>b", fn_pdf_rect},
+    {"line",           "innnn>b",  fn_pdf_line},
+    {"set_line_width", "in>b",     fn_pdf_set_line_width},
+    {"image",          "isnn|nn>b", fn_pdf_image},
+    {"save",           "is>b",     fn_pdf_save},
+    {"to_base64",      "i>s",      fn_pdf_to_base64},
     {"send",           "i|sb",   fn_pdf_send},
-    {"close",          "i",      fn_pdf_close},
+    {"close",          "i>b",      fn_pdf_close},
 })
 
 } // namespace lux_script

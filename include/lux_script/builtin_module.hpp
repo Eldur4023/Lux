@@ -48,8 +48,11 @@ struct BuiltinModuleFn {
     // Argument types, checked by call() before fn runs, so a function body
     // can trust them: s string, i int, n int or float, b bool, l List,
     // d Dict, f function, x anything; uppercase also accepts null; after
-    // '|' the rest are optional; a trailing '*' takes any number more.
+    // '|' the rest are optional; a trailing '*' takes any number more;
+    // '>' then one letter is what it returns (s i b l d, r float; anything else,
+    // or nothing, is Json), which the compiler checks the call site against.
     std::string sig;
+    std::string returns;      // "string", "int", ... or "" (Json)
     std::string full_name;    // "hash.sha256", filled in by the registry
 
     BuiltinModuleFn(std::string n, int min, int max, NativeFn f, bool async = false)

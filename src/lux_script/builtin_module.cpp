@@ -92,6 +92,18 @@ int BuiltinModuleRegistry::id_of(const std::string& module, const std::string& f
 
 BuiltinModuleFn::BuiltinModuleFn(std::string n, const char* signature, NativeFn f, bool async)
     : name(std::move(n)), min_args(0), max_args(0), fn(f), is_async(async), sig(signature) {
+    if (const size_t gt = sig.find('>'); gt != std::string::npos) {
+        switch (gt + 1 < sig.size() ? sig[gt + 1] : 'x') {
+            case 's': returns = "string"; break;
+            case 'i': returns = "int";    break;
+            case 'b': returns = "bool";   break;
+            case 'r': returns = "float";  break;
+            case 'l': returns = "List";   break;
+            case 'd': returns = "Dict";   break;
+            default:  break;
+        }
+        sig.resize(gt);
+    }
     const size_t bar = sig.find('|');
     const size_t types = sig.size() - (bar != std::string::npos) - (!sig.empty() && sig.back() == '*');
     min_args = static_cast<int>(bar == std::string::npos ? types : bar);

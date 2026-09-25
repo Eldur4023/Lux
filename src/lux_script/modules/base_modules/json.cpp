@@ -47,7 +47,7 @@ Value fn_stringify(NativeCtx&, std::vector<Value>& a, std::string&) {
 
 LUX_MODULE(json, {
     {"parse",     "s",   fn_parse},
-    {"stringify", "x|i", fn_stringify},
+    {"stringify", "x|i>s", fn_stringify},
 })
 
 } // namespace lux_script

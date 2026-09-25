@@ -371,13 +371,13 @@ Value fn_proc_close(NativeCtx&, std::vector<Value>& args, std::string&) {
 } // namespace
 
 LUX_MODULE(proc, {
-    {"start", "s|ld", fn_proc_start},
-    {"alive", "i",    fn_proc_alive},
-    {"write", "iS",   fn_proc_write},
+    {"start", "s|ld>i", fn_proc_start},
+    {"alive", "i>b",    fn_proc_alive},
+    {"write", "iS>i",   fn_proc_write},
     // Both block their worker for up to timeout_ms (kMaxTimeoutMs).
     {"read",  "iii",  fn_proc_read,  /*is_async=*/true},
     {"wait",  "ii",   fn_proc_wait,  /*is_async=*/true},
-    {"kill",  "i|i",  fn_proc_kill},
+    {"kill",  "i|i>b",  fn_proc_kill},
     {"close", "i",    fn_proc_close},
 })
 
