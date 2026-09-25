@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
+#include <memory>
 #include <mutex>
 
 namespace lux_script {
@@ -57,11 +59,20 @@ struct CurlGlobal {
     ~CurlGlobal() { curl_share_cleanup(share); curl_global_cleanup(); }
 };
 
+// Where the response body goes: memory (capped), or a file (save_to).
+struct BodySink {
+    std::string body;
+    FILE*       file    = nullptr;
+    uint64_t    written = 0, max = kMaxResponseBodyBytes;
+};
+
 size_t write_body(char* ptr, size_t size, size_t nmemb, void* userdata) {
-    auto*  out = static_cast<std::string*>(userdata);
+    auto*  out = static_cast<BodySink*>(userdata);
     size_t n   = size * nmemb;
-    if (out->size() + n > kMaxResponseBodyBytes) return 0; // short write -> curl aborts
-    out->append(ptr, n);
+    if (out->written + n > out->max) return 0;   // short write -> curl aborts
+    out->written += n;
+    if (out->file) return std::fwrite(ptr, 1, n, out->file);
+    out->body.append(ptr, n);
     return n;
 }
 
@@ -109,7 +120,12 @@ int only_public(void*, char* ip, char*, int, int) {
     return netaddr::parse(ip, a) && !netaddr::is_private(a) ? CURL_PREREQFUNC_OK : CURL_PREREQFUNC_ABORT;
 }
 
-struct Options { long timeout_ms = kDefaultTimeoutMs; bool public_only = false; };
+struct Options {
+    long         timeout_ms = kDefaultTimeoutMs;
+    bool         public_only = false, form = false;
+    std::string  save_to;
+    const Value* files = nullptr;
+};
 
 bool read_options(const Value* v, Options& o, const std::string& method, std::string& error) {
     if (!v) return true;
@@ -122,11 +138,16 @@ bool read_options(const Value* v, Options& o, const std::string& method, std::st
         o.timeout_ms = static_cast<long>(it->second.as_int());
     }
     if (auto it = d.find("public_only"); it != d.end()) o.public_only = it->second.truthy();
+    if (auto it = d.find("form"); it != d.end()) o.form = it->second.truthy();
+    if (auto it = d.find("save_to"); it != d.end()) o.save_to = it->second.to_string();
+    if (auto it = d.find("files"); it != d.end() && it->second.is_dict()) o.files = &it->second;
     return true;
 }
 
-Value do_request(const std::string& method, const std::string& url,
-                 const std::string* body, bool body_is_json,
+// The body: a string goes as is; with `files` it is multipart/form-data
+// (the Dict's fields plus the files); with `form` a urlencoded form (what
+// OAuth token endpoints want); anything else JSON.
+Value do_request(const std::string& method, const std::string& url, const Value* body_value,
                  const Value* headers_arg, const Value* options_arg, std::string& error) {
     static CurlGlobal global;
 
@@ -148,8 +169,41 @@ Value do_request(const std::string& method, const std::string& url,
     curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_SHARE, global.share);
 
-    std::string response_body;
+    BodySink    sink;
     HeaderSink  response_headers;
+    std::string body;
+    bool        body_is_json = false;
+    const char* body_type = nullptr;
+    std::unique_ptr<curl_mime, decltype(&curl_mime_free)> mime(nullptr, curl_mime_free);
+    if (body_value && opts.files) {
+        mime.reset(curl_mime_init(curl));
+        if (body_value->is_dict())
+            for (const auto& [k, v] : body_value->as_dict()) {
+                curl_mimepart* part = curl_mime_addpart(mime.get());
+                curl_mime_name(part, k.c_str());
+                curl_mime_data(part, v.to_string().c_str(), CURL_ZERO_TERMINATED);
+            }
+        for (const auto& [field, path] : opts.files->as_dict()) {
+            curl_mimepart* part = curl_mime_addpart(mime.get());
+            curl_mime_name(part, field.c_str());
+            if (curl_mime_filedata(part, path.to_string().c_str()) != CURLE_OK) {
+                error = "http." + method + "(): cannot read '" + path.to_string() + "'";
+                return Value::null();
+            }
+        }
+    } else if (body_value && opts.form && body_value->is_dict()) {
+        for (const auto& [k, v] : body_value->as_dict())
+            body += (body.empty() ? "" : "&") + lux::percent_encode(k) + "=" + lux::percent_encode(v.to_string());
+        body_type = "Content-Type: application/x-www-form-urlencoded";
+    } else if (body_value) {
+        body_is_json = !body_value->is_str();
+        body = body_is_json ? body_value->to_json_text() : body_value->as_str();
+    }
+    if (!opts.save_to.empty()) {
+        sink.file = std::fopen(opts.save_to.c_str(), "wb");
+        if (!sink.file) { error = "http." + method + "(): cannot write '" + opts.save_to + "'"; return Value::null(); }
+        sink.max = 4ULL << 30;
+    }
     struct curl_slist* header_list = nullptr;
     bool content_type_set = false;
 
@@ -175,12 +229,8 @@ Value do_request(const std::string& method, const std::string& url,
             if (lower == "content-type") content_type_set = true;
         }
     }
-    if (body && body_is_json && !content_type_set) {
-        // Only for a body the CALLER passed as a Dict/List/Json (auto-
-        // serialized in do_body_verb below) -- a raw string body is sent
-        // exactly as given, with no assumption about its content type.
-        header_list = curl_slist_append(header_list, "Content-Type: application/json");
-    }
+    if (!content_type_set && (body_is_json || body_type))
+        header_list = curl_slist_append(header_list, body_type ? body_type : "Content-Type: application/json");
     if (header_list) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
 
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -190,13 +240,14 @@ Value do_request(const std::string& method, const std::string& url,
     else if (method == "delete") curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
     // "get" needs neither option: CURLOPT_HTTPGET is curl's default state.
 
-    if (body) {
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body->c_str());
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body->size()));
+    if (mime) curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime.get());
+    else if (body_value) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
     }
 
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_body);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, write_header);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, opts.timeout_ms);
@@ -215,6 +266,10 @@ Value do_request(const std::string& method, const std::string& url,
 
     const CURLcode rc = curl_easy_perform(curl);
     if (header_list) curl_slist_free_all(header_list);
+    if (sink.file && std::fclose(sink.file) != 0 && rc == CURLE_OK) {
+        error = "http." + method + "(): could not finish writing '" + opts.save_to + "'";
+        return Value::null();
+    }
     if (rc != CURLE_OK) {
         error = std::string("http.") + method + "(): " +
                 (rc == CURLE_ABORTED_BY_CALLBACK ? "the address is not public (public_only)" : curl_easy_strerror(rc));
@@ -226,10 +281,12 @@ Value do_request(const std::string& method, const std::string& url,
     Value::Dict out;
     out["status"] = Value::integer(status);
     out["headers"] = Value::dict(std::move(response_headers.headers));
-    // Parsed when it is JSON, the raw text otherwise.
+    // Parsed when it is JSON, the raw text otherwise; with save_to, the
+    // body is in the file and `saved` says how many bytes.
     Value parsed;
-    if (Value::parse_json(response_body, parsed)) out["body"] = parsed;
-    else out["body"] = Value::str(response_body);
+    if (sink.file) { out["body"] = Value::null(); out["saved"] = Value::integer(static_cast<long long>(sink.written)); }
+    else if (Value::parse_json(sink.body, parsed)) out["body"] = parsed;
+    else out["body"] = Value::str(sink.body);
     return Value::dict(std::move(out));
 }
 
@@ -238,18 +295,15 @@ const Value* opt(std::vector<Value>& args, size_t i) {
 }
 
 Value fn_http_get(NativeCtx&, std::vector<Value>& a, std::string& e) {
-    return do_request("get", a[0].as_str(), nullptr, false, opt(a, 1), opt(a, 2), e);
+    return do_request("get", a[0].as_str(), nullptr, opt(a, 1), opt(a, 2), e);
 }
 
 Value fn_http_delete(NativeCtx&, std::vector<Value>& a, std::string& e) {
-    return do_request("delete", a[0].as_str(), nullptr, false, opt(a, 1), opt(a, 2), e);
+    return do_request("delete", a[0].as_str(), nullptr, opt(a, 1), opt(a, 2), e);
 }
 
-// post/put/patch: a string body goes as is, anything else as JSON.
 Value do_body_verb(const char* method, std::vector<Value>& a, std::string& e) {
-    const bool json = !a[1].is_str();
-    const std::string body = json ? a[1].to_json_text() : a[1].as_str();
-    return do_request(method, a[0].as_str(), &body, json, opt(a, 2), opt(a, 3), e);
+    return do_request(method, a[0].as_str(), &a[1], opt(a, 2), opt(a, 3), e);
 }
 
 Value fn_http_post(NativeCtx&, std::vector<Value>& a, std::string& e)  { return do_body_verb("post", a, e); }

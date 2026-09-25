@@ -60,6 +60,14 @@ check "connection refused"   GET /connection_refused 500 '"error":"http.get()'
 check "public_only refuses a private address" GET /public_only 200 '"blocked":"http.get(): the address is not public (public_only)","allowed_status":200'
 check "timeout_ms"           GET /timeout            500 '"error":"http.get(): Timeout'
 
+echo "== bodies and downloads =="
+check "form: true sends a urlencoded form" GET /form_post 200 '"body":"grant_type=code\u0026redirect=a%20b%26c","type":"application/x-www-form-urlencoded"'
+check "files: sends multipart/form-data"  GET /multipart 200 'multipart/form-data; boundary='
+check "multipart carries the field and the file" GET /multipart 200 'name=\"doc\"; filename=\"range_fixture.bin\"'
+check "save_to streams the body to a file" GET /save_to 200 '"saved_positive":true,"body":null'
+saved=$(python3 -c "import json; print(json.load(open('/tmp/lux-http-save-test.json'))['path'])" 2>&1); rm -f /tmp/lux-http-save-test.json
+if [ "$saved" = "/echo?saved=1" ]; then ok "the saved file is the response"; else fail "the saved file is the response" "/echo?saved=1" "$saved"; fi
+
 echo "== mail =="
 check "mail.send delivers" GET /mail_send 200 '"r":true'
 mail_check=$(python3 -c "

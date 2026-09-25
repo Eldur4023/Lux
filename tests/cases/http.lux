@@ -66,6 +66,19 @@ get endpoint("/timeout"):
     Json r = await http.get("http://127.0.0.1:8899/slow/2", null, { "timeout_ms": 300 })
     return r
 
+get endpoint("/form_post"):
+    Json r = await http.post("http://127.0.0.1:8899/echo", { "grant_type": "code", "redirect": "a b&c" }, null, { "form": true })
+    return { "body": r["body"]["body"], "type": r["body"]["headers"]["content-type"] }
+
+get endpoint("/multipart"):
+    Json r = await http.post("http://127.0.0.1:8899/echo", { "title": "hello" }, null, { "files": { "doc": "tests/cases/range_fixture.bin" } })
+    return { "body": r["body"]["body"], "type": r["body"]["headers"]["content-type"] }
+
+get endpoint("/save_to"):
+    string path = "/tmp/lux-http-save-test.json"
+    Json r = await http.get("http://127.0.0.1:8899/echo?saved=1", null, { "save_to": path })
+    return { "saved_positive": r["saved"] > 10, "body": r["body"], "path": path }
+
 get endpoint("/bad_url"):
     Json r = await http.get("not-a-url")
     return r
