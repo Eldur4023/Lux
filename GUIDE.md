@@ -955,15 +955,24 @@ get endpoint("/counter"):
 
 | | |
 |---|---|
-| `state.incr(key)` / `state.incr(key, n)` | Adds and returns the new value |
+| `state.incr(key)` / `state.incr(key, n)` / `state.incr(key, n, ttl_ms)` | Adds and returns the new value; a TTL starts when the key is created |
 | `state.decr(key)` / `state.decr(key, n)` | Subtracts |
 | `state.get(key)` / `state.get(key, default)` | Reads |
-| `state.set(key, value)` | Writes |
+| `state.set(key, value)` / `state.set(key, value, ttl_ms)` | Writes; with a TTL the key expires |
 | `state.remove(key)` | Deletes |
 
 It is the **only** shared-state path between the event loops: each VM has its own stack and
 heap and shares nothing. That is why it exposes operations and not properties —
 `state.x = state.x + 1` would be a race between the read and the write.
+
+`incr` with a TTL is a rate limiter in one line — the count resets when the window the first
+hit opened is over:
+
+```lux
+post endpoint("/login"):
+    if state.incr("login:" + request.ip, 1, 60000) > 5:
+        return status(429)
+```
 
 It lives in process memory: it is lost on restart, and is not shared between machines.
 
@@ -1277,7 +1286,7 @@ string role = age >= 18 ? "adult" : "minor"
 | `render(template, k=v, ...)` | Renders a Lux Script template |
 | `status(code)` `redirect(target[, code])` `send_file(path)` | |
 | `len(v)` | Size of a string, List or Dict |
-| `str(v)` `int(v)` | Explicit conversion |
+| `str(v)` `int(v)` `float(v)` | Explicit conversion |
 | `range(n)` `range(start, end)` `range(start, end, step)` | A `List<int>`, Python's `range()` shape |
 | `header(name[, default])` | Request header |
 | `query(name[, default])` | Query parameter |
@@ -1308,8 +1317,8 @@ asynchronous: they are called with `await`.
 |---|---|
 | Any | `status(code)` `header(k, v)` `cookie(k, v, ...)` |
 | `string` | `starts_with` `ends_with` `contains` `upper` `lower` `trim` `index_of` `replace` `split` `slice` `repeat` |
-| `List` | `add(v)` `contains(v)` `index_of(v)` `remove_at(i)` `sort()` `reverse()` `slice(start[, end])` `concat(other)` `join(sep)` `map(fn)` `filter(fn)` `reduce(fn, initial)` `for_each(fn)` |
-| `Dict` | `has(key)` `keys()` `values()` `get(key[, default])` `remove(key)` `merge(other)` |
+| `List` | `add(v)` `insert(i, v)` `pop()` `remove_at(i)` `contains(v)` `index_of(v)` `first()` `last()` `sort()` `sort_by(fn)` `reverse()` `slice(start[, end])` `concat(other)` `join(sep)` `unique()` `chunk(n)` `map(fn)` `filter(fn)` `reduce(fn, initial)` `for_each(fn)` `find(fn)` `find_index(fn)` `any([fn])` `all([fn])` `count([fn])` `group_by(fn)` `sum()` `min()` `max()` |
+| `Dict` | `has(key)` `keys()` `values()` `items()` `get(key[, default])` `remove(key)` `merge(other)` |
 | `File` | `save(directory)` |
 
 `index_of` and `slice` work in byte offsets, not Unicode codepoints — correct for ASCII and for
@@ -1419,164 +1428,201 @@ suspension, so a legitimate SSE loop can live for hours.
 
 ## 23. Native modules
 
-Beyond `sqlite`/`postgres`/`mysql`, `import` also reaches compiled-in capability modules, ten
-so far. Most are fully synchronous (no `await` anywhere); `http` (every function) and `proc`
-(`read`/`wait` only — the two that can genuinely block for a while) are the exceptions. None of
-them usually needs an `<name>: { ... }` block in `app:` at all:
+Beyond `sqlite`/`postgres`/`mysql`, `import` reaches the compiled-in modules below. A call is
+checked at compile time (the module exists, it is imported, the argument count fits) and its
+argument types are checked when it runs, with one message format:
 
-- **`hash`** — `sha256(s)`, `hmac_sha256(key, msg)`, `random_hex(n)`, all hex-encoded.
-- **`csv`** — parse, filter (`filter_eq`/`filter_gt`/`filter_lt`/`filter_ge`/`filter_le`/
-  `filter_contains`), `select`, `sort_by`, `slice`, aggregate (`sum`/`mean`/`min`/`max`/`count`/
-  `group_sum`), and `to_csv` to serialize back — pandas-*shaped*, not pandas-equivalent: with no
-  function values in the language, filtering is explicit verbs (`filter_gt(h, "age", 18)`)
-  instead of an arbitrary predicate. Every operation takes and/or returns an opaque `int`
-  handle; free one with `csv.close(handle)` when done with it.
-- **`pdf`** — `create`/`add_page`, `text`/`rect`/`line`, `set_color`/`set_font`/
-  `set_line_width`, and `save(handle, path)`/`to_base64(handle)` to get the document out, either
-  to disk or as a string ready to send in an HTTP response. Needs cairo at build time
-  (`LUX_PDF`, on by default when `libcairo2-dev` is present) — check your build's startup log
-  or `lux --check` if `import pdf` reports itself missing.
-- **`http`** — outbound `get(url)`/`post(url, body)`/`put`/`patch`/`delete`, each with an
-  optional trailing headers `Dict`. Returns `{"status", "headers", "body"}` — `body` parsed as
-  JSON when the response looks like JSON, the raw text otherwise. A request body that is a
-  `string` is sent as-is; anything else (a `Dict`, say) is JSON-serialized automatically with
-  `Content-Type: application/json` set. Speaks real HTTPS (libcurl, `LUX_HTTP`, needs
-  `libcurl4-openssl-dev`) — the one deliberate, narrow exception to "Lux never links TLS": that
-  principle is about not terminating TLS on the *inbound* side, which an outbound client has no
-  reverse proxy to delegate to. **Blocks the calling thread for the duration of the request**
-  (bounded by a fixed 15s timeout) — every native module is synchronous today (see
-  [NATIVE-MODULES.md](NATIVE-MODULES.md) §2), and this is the one module where that is a real
-  cost, not a theoretical one, under real concurrent load. `url_encode(s)` is the exception to
-  all of that: RFC 3986 percent-encoding (`A-Za-z0-9-_.~` untouched, everything else —
-  including a space, as `%20`, never `+`, which is the `application/x-www-form-urlencoded`
-  variant this is not — as `%XX`, byte by byte, so a UTF-8 multi-byte character becomes one
-  `%XX` per byte). No network, no `await`, safe to splice straight into a query string value:
-  `"?q=" + http.url_encode(text)`.
-- **`os`** — environment (`getenv(name[, default])`), paths (`cwd()`, `path_join(...)`,
-  `path_exists`/`path_basename`/`path_dirname`/`path_abs`), stat (`is_dir(path)`/
-  `is_file(path)`, both `false` — neither one, not an error — for a missing path or a dangling
-  symlink; `file_size(path)` and `mtime_ms(path)`, a Unix timestamp in milliseconds, both `-1`
-  for a missing path, and `file_size()` on a directory is `-1` too, not some arbitrary
-  filesystem-reported number), file I/O (`read_file`/`write_file`/`list_dir`/`remove_file`/
-  `make_dir`/`remove_dir(path[, recursive])`/`copy_file(from, to[, overwrite])`/
-  `move(from, to)`), and running external commands (`run(command[, args])`, an argv `List`,
-  never a shell string — see [NATIVE-MODULES.md](NATIVE-MODULES.md) §4 for why). `remove_dir`
-  only removes an EMPTY directory unless `recursive` is `true` (mirroring Python's
-  `os.rmdir()`/`shutil.rmtree()` split as one function instead of two names), and errors —
-  rather than silently taking everything inside along with it — on a non-empty one when it
-  isn't. `move` works on files and directories, and across filesystems too: it tries an atomic
-  rename first and only falls back to copy-then-delete-the-source when source and destination
-  are on different mounts (a downloads volume and a media library volume routinely are, in a
-  container/NAS setup) — that fallback is not atomic, an inherent limitation of moving across
-  filesystems at all, not something this does worse than any other tool. `run()` and
-  `copy_file`/`move` share `http`'s blocking-thread treatment for real, unbounded I/O — `run()`
-  additionally bounded by a fixed timeout (15s); every other function here is a plain `stat()`
-  or metadata op, microseconds regardless. No path sandboxing — trusts the caller exactly as
-  much as Python's `os`/`open()`/`subprocess`/`shutil` do.
-- **`math`** — `abs`/`min`/`max`/`round`/`floor`/`ceil`/`sqrt`/`pow`/`log`, plus
-  `random()` (`[0.0, 1.0)`) and `random_int(lo, hi)` (inclusive on both ends).
-- **`time`** — a timestamp is a plain `int` (milliseconds since the Unix epoch, UTC always, no
-  server-local timezone anywhere): `now()`/`now_seconds()`,
-  `format(ms, strftime_fmt, utc_offset_minutes = 0)`/`format_iso(ms)`,
-  `parse(s, strftime_fmt)`/`parse_iso(s)` — the last two are `null`, not an error, when `s`
-  does not match. `format`'s optional 3rd argument is a fixed UTC offset applied before
-  formatting, for displaying local time without making the stored timestamp itself
-  timezone-dependent (`time.format(ms, "%H:%M", 60)` for CET). `parse_iso` accepts the common
-  real-world variations on ISO 8601, not one exact spelling: a date with no time
-  ("2026-09-23"), a space instead of `T` (what SQLite's `CURRENT_TIMESTAMP` produces),
-  milliseconds (`Date.toISOString()`'s own format), and an explicit `+HH:MM`/`-HHMM` offset in
-  place of `Z` — all normalized to UTC. Being a plain `int` means duration arithmetic ("5
-  minutes from now") is just `time.now() + 5 * 60 * 1000` — the language's own `+` already
-  does it, no method needed.
-- **`regex`** — `test(pattern, text)` (bool), `find`/`find_all` (first match / every match, as
-  strings), `groups(pattern, text)` (a `List` — index 0 is the whole match, 1.. are capture
-  groups — or `null` on no match), `replace(pattern, text, replacement)` (every match, `$1`/`$2`
-  backreferences), `split(pattern, text)`. A deliberate ECMAScript-like SUBSET, not `std::regex`:
-  literals, `.`, `^$`, `[...]`/negation/ranges/`\d\w\s\D\W\S`, groups, `|`, `* + ? {n,m}` — no
-  non-capturing groups, lookaround, or backreferences inside the pattern itself (only in a
-  `replace()` replacement string). Its own engine (a Thompson-NFA/Pike-VM), specifically so
-  that running it on request data can never become a stack overflow or a multi-second stall:
-  every pattern runs in time proportional to `pattern size * subject size`, with no
-  exponential-blowup case for a "normal-looking" pattern to hit, unlike a backtracking engine.
-  Compiles the pattern fresh on every call, no caching — fine for the microsecond-scale
-  patterns most routes need, a real (not yet addressed) repeated cost for a complex one reused
-  very often. **Every `regex.*` call still rejects a `text` (subject) over 4096 bytes**, with a
-  clear error — a bound on a single call's cost is good hygiene even with a linear-time engine
-  underneath, not a workaround for a crash. Chop a long text into pieces yourself first — with
-  `string.index_of()`/`string.slice()` (no length limit of their own), a line-by-line
-  `string.split(text, "\n")`, or whatever structure the text already has — and run `regex.*`
-  on each piece, not the whole thing at once.
-- **`rooms`** — cross-connection WebSocket broadcast: `join(name)`/`leave(name)`/`leave_all()`
-  (the current connection; `ws` route only), `broadcast(name, message)`/
-  `broadcast_others(name, message)` (everyone in the room, or everyone but the caller; either
-  works from any route), `count(name)`. See [§14](#14-websockets)'s "Broadcasting to a room" for
-  the full example. Membership in a room a connection never explicitly `leave()`s is dropped
-  lazily, on the next `join`/`broadcast`/`count` that touches that room, not the instant the
-  connection closes.
-- **`proc`** — a subprocess handle that outlives a single call, for when `os.run()`'s "spawn,
-  capture everything, wait, all in one blocking call" shape does not fit: a long-running
-  process one request starts and a LATER, different request reads from, checks on, or kills
-  (a transcoding session across a video player's requests; a background job a status page
-  polls for hours). `start(command, args[, options])` returns a handle immediately, without
-  waiting for any output or for the process to exit — `options` is a `Dict` with `"stdout"`
-  (`"pipe"` (default) / `"null"` / a file path) and `"stderr"` (`"null"` (default) / a file
-  path — never `"pipe"`, since nothing reads a second stream). `alive(handle)` never blocks.
-  `await read(handle, max_bytes, timeout_ms)` returns new output (possibly `""` if none arrived
-  before the timeout — the process may still be running), or `null` on EOF. `await
-  wait(handle, timeout_ms)` returns the exit code, or `null` if it is still running when the
-  timeout elapses — call it again, or in a loop, for a job that outlives one call's timeout.
-  `kill(handle[, signal])` (default `SIGTERM`) only signals; it does not wait to see whether
-  the process actually died — `kill(); wait(h, 5000); if that is null, kill(h, 9)` is the
-  pattern for "ask nicely, then insist". `close(handle)` releases the handle; it never kills
-  anything, and reaps the process only if it had already exited — a still-running one is left
-  for a background sweep instead of waited on right there (see the module's own comment,
-  `src/lux_script/modules/base_modules/proc.cpp`, for why). Same argv-list-never-a-shell-string
-  rule as `os.run()`, same reason.
-
-```lux
-import hash
-import csv
-import pdf
-import http
-import os
-import math
-import time
-import regex
-import rooms
-import proc
-
-get endpoint("/hash/:s", string s):
-    return { "sha256": hash.sha256(s) }
-
-get endpoint("/report"):
-    int h = csv.parse(some_csv_text)
-    return { "by_city": csv.group_sum(h, "city", "revenue") }
-
-get endpoint("/invoice"):
-    int doc = pdf.create(595, 842)
-    pdf.text(doc, 50, 50, "Invoice", 24)
-    return { "pdf_base64": pdf.to_base64(doc) }
-
-get endpoint("/weather/:city", string city):
-    Json r = await http.get("https://api.example.com/weather?city=" + city)
-    return r["body"]
-
-get endpoint("/token/:ttl_minutes", int ttl_minutes):
-    string id = str(math.random_int(100000, 999999))
-    int expires = time.now() + ttl_minutes * 60 * 1000
-    await os.write_file(os.path_join(os.getenv("TOKEN_DIR", "/tmp"), id), str(expires))
-    return { "id": id, "expires_iso": time.format_iso(expires) }
-
-get endpoint("/valid_email/:s", string s):
-    return { "valid": regex.test("^[\\w.+-]+@[\\w-]+\\.[a-zA-Z]{2,}$", s) }
+```
+hash.sha256(): argument 1 must be a string, not int
 ```
 
-Using a module it does not recognize, or one not `import`ed, is a compile error, the same as an
-undeclared name anywhere else:
+Functions marked **await** do real I/O or CPU work and run on the I/O pool, never on the event
+loop: `await` is mandatory, and a failure comes back as `{"error": message}` instead of failing
+the handler. Everything else is synchronous and fast.
+
+### hash
+
+| | |
+|---|---|
+| `sha256(s)` `hmac_sha256(key, msg)` | Hex digests |
+| `equal(a, b)` | Constant-time comparison — use it for signatures and tokens, never `==` |
+| `random_hex(n)` `token([n])` | Random: `n` bytes as hex; a URL-safe token (default 32 bytes) for API keys and one-time links |
+| `uuid()` `uuid(7)` | UUID v4, or v7 (time-ordered — kinder to a database index) |
+| **await** `password(pw)` `verify(pw, stored)` | PBKDF2-HMAC-SHA256, 600k iterations, in Django's `pbkdf2_sha256$...` format |
+| `sign(value, key)` `unsign(token, key[, max_age_s])` | A tamper-proof token carrying any value; `unsign` is `null` if it was altered or is older than `max_age_s` |
+
+```lux
+post endpoint("/login"):
+    List<Json> rows = await sqlite.query("select id, hash from users where email = ?", form("email"))
+    if len(rows) == 0 or not await hash.verify(form("password"), rows[0]["hash"]):
+        return status(401)
+    session.user = rows[0]["id"]
+    return redirect("/")
+
+get endpoint("/reset/:token", string token):
+    Json who = hash.unsign(token, os.getenv("SECRET"), 3600)   # a link valid for one hour
+    if who == null:
+        return status(410)
+```
+
+### encoding
+
+`base64_encode(s[, url_safe])` `base64_decode(s)` (either alphabet) · `hex_encode(s)`
+`hex_decode(s)` · `url_encode(s)` `url_decode(s)` (RFC 3986: a space is `%20`) ·
+`query_encode(dict)` (`{"q": "a b", "tag": ["x", "y"]}` → `q=a%20b&tag=x&tag=y`) ·
+`query_decode(s)` · `html_escape(s)` · `url_parse(url)` → `{scheme, host, port, path, query,
+fragment}`.
+
+`url_parse` reads a URL the way a browser does (`\` is `/`, leading spaces are dropped), so
+it is the check for an open redirect:
+
+```lux
+string next = query("next", "/")
+if encoding.url_parse(next)["host"] != "":
+    next = "/"                # only paths on this site
+return redirect(next)
+```
+
+### text
+
+| | |
+|---|---|
+| `slug(s)` | `"¡Café con Leche!"` → `"cafe-con-leche"` (Latin letters transliterated) |
+| `truncate(s, n[, suffix])` | At most `n` characters, `suffix` (default `…`) included |
+| `format_number(x[, decimals, thousands, point])` | `format_number(1234.5, 2, ".", ",")` → `"1.234,50"` |
+| `pad_left(s, n[, ch])` `pad_right(s, n[, ch])` | `pad_left("7", 4, "0")` → `"0007"` |
+| `distance(a, b)` | Levenshtein distance, for "did you mean…?" |
+
+### math
+
+`abs` `sign` `min` `max` (two or more numbers, or one `List`) `clamp(x, lo, hi)` ·
+`round(x[, digits])` `floor` `ceil` · `sqrt` `exp` `log(x[, base])` `log10` `pow` ·
+`sin` `cos` `tan` `asin` `acos` `atan` `atan2` `hypot` · `pi()` `e()` ·
+`random()` (`[0, 1)`) `random_int(lo, hi)` (inclusive) `choice(list)` `shuffle(list)`
+`sample(list, k)`. A result stays an `int` when the input was one and the answer is whole;
+`sqrt(-1)` and friends are a `math domain error`.
+
+### time
+
+A time is a plain `int`: milliseconds since the Unix epoch, UTC. So "in 5 minutes" is
+`time.now() + 5 * 60 * 1000`. Where a function takes an offset it is a fixed number of minutes
+(`60` for CET), never a server timezone.
+
+| | |
+|---|---|
+| `now()` `now_seconds()` | |
+| `format(ts, fmt[, offset])` `format_iso(ts)` | strftime formats |
+| `parse(s, fmt)` `parse_iso(s)` | `null` when it does not match. `parse_iso` takes a bare date, `T` or a space, milliseconds and `Z`/`+02:00` |
+| `parts(ts[, offset])` | `{year, month, day, hour, minute, second, weekday (1 = Monday), yearday}` |
+| `start_of(ts, unit[, offset])` | Start of the `"day"`, `"week"`, `"month"` or `"year"` |
+| `add_months(ts, n)` | Calendar months: Jan 31 + 1 is Feb 28/29 |
+| `ago(ts[, from, lang])` | `"3 minutes ago"`, `"in 2 hours"`; `lang` `"es"` gives `"hace 3 minutos"` |
+
+### regex
+
+`test(pattern, text)` · `find` / `find_all` · `groups` (`[whole, group 1, ...]`, or `null`) ·
+`replace(pattern, text, with)` (`$1`, `$&`) · `split` · `escape(s)` (user input inside a
+pattern). Its own linear-time engine: no pattern can blow up on hostile input, and compiled
+patterns are cached. A deliberate subset — no lookaround, no non-capturing groups, no
+backreferences inside the pattern — and a subject is capped at 4096 bytes.
+
+### json
+
+`parse(s)` (a catchable error on invalid input) · `stringify(v[, indent])`.
+
+### csv
+
+`read(text[, header, delimiter])` → a `List` of `Dict`s with typed cells; `write(rows[,
+columns, delimiter])` → text. A UTF-8 BOM is dropped, `;` works as a delimiter (what Excel
+writes in many locales), and a cell that would run as a spreadsheet formula (`=`, `+`, `-`,
+`@`) is written defused. Filter, sort and aggregate with the `List` methods:
+
+```lux
+fn bool paid(Json r):
+    return r["status"] == "paid"
+
+get endpoint("/export"):
+    List<Json> rows = await sqlite.query("select * from orders")
+    return text(csv.write(rows.filter(paid)))
+```
+
+The handle-based `parse`/`rows`/`columns`/`row_count`/`to_csv`/`close` still work.
+
+### os
+
+| | |
+|---|---|
+| `getenv(name[, default])` `cwd()` | |
+| `path_join(...)` `path_basename` `path_dirname` `path_ext` `path_abs` | |
+| `path_exists` `is_dir` `is_file` `file_size` `mtime_ms` | `-1` size/time for a missing path |
+| `mime(path)` | `"image/jpeg"` for `"IMG_01.JPG"` |
+| `list_dir(dir[, recursive])` `glob("uploads/*.jpg")` | Names (paths relative to `dir` when recursive), sorted glob matches |
+| `make_dir` `remove_file` `remove_dir(dir[, recursive])` | `remove_dir` refuses a non-empty directory unless told |
+| `temp_dir()` `temp_file([suffix])` | A new private (0600) temporary file |
+| **await** `read_file` `write_file` `append_file` `copy_file(from, to[, overwrite])` `move(from, to)` | `move` works across filesystems |
+| **await** `run(cmd[, args, options])` | `{status, stdout, stderr}`; options `input` (stdin), `cwd`, `env` (a `null` value unsets), `timeout_ms` (default 15 s, up to 120 s) |
+
+`run` takes an argument `List`, never a shell string, so no argument is ever interpreted by a
+shell. There is no path sandboxing: a path built from user input is as dangerous as in Python.
+
+### proc
+
+A process that outlives the request that starts it (a transcode, a long job):
+`start(cmd[, args, options])` returns a handle at once; options `stdout` (`"pipe"` default /
+`"null"` / a path), `stderr` (`"null"` / a path), `stdin` (`"pipe"`), `cwd`, `env`.
+`write(h, text)` feeds stdin without ever blocking (it returns how much went in; `null` closes
+stdin). **await** `read(h, max_bytes, timeout_ms)` (`""` if nothing arrived, `null` at EOF) and
+**await** `wait(h, timeout_ms)` (the exit code, or `null` if still running). `alive(h)`,
+`kill(h[, signal])` (signals only), `close(h)` (never kills).
+
+### rooms
+
+Cross-connection WebSocket broadcast — see [§14](#14-websockets). `join(name)` `leave(name)`
+`leave_all()` (from a `ws` route) · `broadcast(name, msg)` `broadcast_others(name, msg)` (a
+`Dict`/`List` goes out as JSON) · `count(name)`.
+
+### net
+
+`ip_in(ip, "10.0.0.0/8")` (or a `List` of ranges) · `is_private(ip)` (loopback, private,
+link-local, CGNAT, IPv6 unique-local) · `ip_version(ip)` (`4`, `6` or `null`).
+
+```lux
+get endpoint("/admin"):
+    if not net.ip_in(request.ip, ["10.8.0.0/24", "127.0.0.1"]):
+        return status(403)
+```
+
+### zip
+
+**await** `create(dest, files)` writes an archive of the files (paths, or `[path,
+name_in_zip]` pairs) and returns how many went in. Entries are stored, not compressed — fine
+for what usually ends up in one (photos, PDFs, video), and no compression library needed; up
+to 4 GB.
+
+### pdf
+
+`create(w, h)` `add_page(h, w, h)` · `text(h, x, y, s, size)` `text_width(h, s, size)` ·
+`set_font(h, family[, bold, italic])` `set_color(h, r, g, b)` `set_line_width(h, w)` ·
+`rect(h, x, y, w, h[, filled])` `line(h, x1, y1, x2, y2)` `image(h, png, x, y[, w, h])` ·
+`send(h[, filename, download])` (the PDF as this request's response) `save(h, path)`
+`to_base64(h)` · `close(h)`. Sizes in points (A4 is 595 × 842). Needs cairo at build time
+(`libcairo2-dev`).
+
+### http
+
+**await** `get(url[, headers])` `delete(url[, headers])` `post(url, body[, headers])` `put`
+`patch` → `{status, headers, body}`, with `body` parsed when it is JSON. A `Dict` body is sent
+as JSON. HTTPS through libcurl (`libcurl4-openssl-dev` at build time), certificates always
+verified, 15 s timeout, redirects only to http/https. `url_encode(s)` is the same as
+`encoding.url_encode`.
+
+---
+
+Using a module that is not imported, or a function it does not have, is a compile error:
 
 ```
 ./app.lux:2:23: error: missing 'import hash' in order to use 'hash.sha256'
 ```
 
-Full architecture, the reasoning behind the design, and a step-by-step guide to adding a new
-module: [NATIVE-MODULES.md](NATIVE-MODULES.md).
+How modules work inside and how to write one: [NATIVE-MODULES.md](NATIVE-MODULES.md) and
+[src/lux_script/modules/README.md](src/lux_script/modules/README.md).

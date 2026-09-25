@@ -69,6 +69,10 @@ struct BuiltinModuleFn {
                                // the EXACT signature every other builtin already uses
                                // (natives.hpp) -- a module function IS a builtin,
                                // just namespaced under an import instead of always present.
+    bool        is_async;     // runs on the I/O pool; `await` required
+    std::string sig;          // argument types, e.g. "ss|i"; min/max come from it
+
+    Value call(NativeCtx&, std::vector<Value>&, std::string& error) const;  // checks sig, then fn
 };
 
 class BuiltinModule {
@@ -79,6 +83,12 @@ public:
                            std::string& error) { return true; }  // most modules need nothing
 };
 ```
+
+A module is usually just a name and a table, written with `LUX_MODULE(name, {{"fn", "sig",
+fn_ptr}, ...})`; only one that needs `configure()` writes the class. The signature is checked
+once, in `call()`, which both dispatch sites (the VM for a synchronous call, the async driver
+for an awaited one) go through — so a function body never re-checks its argument types, and
+every type error reads the same way.
 
 Reusing `NativeFn`'s calling convention is what lets the compiler's existing checking/emission
 machinery stay almost untouched — a module function is dispatched exactly like `len()` or
@@ -316,8 +326,8 @@ hypothetical one.
    `src/lux_script/modules/README.md`; this walkthrough is adding an official one, so it goes
    in `base_modules/`), following `hash.cpp`'s shape: free functions matching `NativeFn`'s
    signature (`Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string&
-   error)`), a class implementing `BuiltinModule`, and `LUX_REGISTER_MODULE(QrcodeModule)` as
-   the file's last line. `NativeCtx&` can be ignored if the module needs no
+   error)`) and a `LUX_MODULE(qrcode, {...})` table with each function's signature as the
+   file's last lines (see `src/lux_script/modules/README.md` for the signature letters). `NativeCtx&` can be ignored if the module needs no
    request/response/session access, the way `hash`'s and `csv`'s functions do — accept it, do
    not use it. If the module needs to carry state across calls (`csv`'s tables, `pdf`'s
    documents), see §5.2 for the pattern that answers that — it is not a core-mechanism change,

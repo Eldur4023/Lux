@@ -5,9 +5,9 @@ There is no central list to edit anymore — see NATIVE-MODULES.md §5 for the f
 of why, and `include/lux_script/builtin_module.hpp`'s comment on `LUX_REGISTER_MODULE`
 for the mechanism.
 
-- **`base_modules/`** — the officially shipped modules (`hash`, `csv`, `os`, `math`,
-  `time`, `regex`, `pdf`, `http`). Treat it as upstream code: changes here are project
-  changes, not app-specific ones.
+- **`base_modules/`** — the officially shipped modules (`hash`, `encoding`, `text`, `math`,
+  `time`, `regex`, `json`, `csv`, `os`, `proc`, `rooms`, `net`, `zip`, `pdf`, `http`). Treat it
+  as upstream code: changes here are project changes, not app-specific ones.
 - **This folder itself** — drop your own `.cpp` here (a sibling of `base_modules/`, not
   inside it) to add a module of your own. CMake picks up any `.cpp` file placed directly
   in either location and compiles it into the build automatically, the next time you
@@ -26,36 +26,35 @@ namespace lux_script {
 namespace {
 
 Value fn_qrcode_generate(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str()) { error = "qrcode.generate() expects a string"; return Value::null(); }
+    if (args[0].as_str().empty()) { error = "qrcode.generate(): nothing to encode"; return Value::null(); }
     return Value::str(/* ... */);
 }
 
-class QrcodeModule : public BuiltinModule {
-public:
-    const char* name() const override { return "qrcode"; }
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"generate", 1, 1, fn_qrcode_generate},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(QrcodeModule)
+LUX_MODULE(qrcode, {
+    {"generate", "s|i", fn_qrcode_generate},
+})
 
 } // namespace lux_script
 ```
 
-That last line is the entire "registration" step — no edit to `builtin_module.cpp`, no
-`slots_[...]` entry, nothing else in the project needs to change. `name()` is what
-`import` resolves against; there is no second name to keep in sync with it, because
-`LUX_REGISTER_MODULE` reads it back off the class itself at startup.
+`LUX_MODULE` is the whole registration: the name is what `import` resolves against, and
+nothing else in the project changes.
 
-Name the file after the module (`qrcode.cpp`, not `module_qrcode.cpp`) — the folder
-already says "this is a module", so the prefix used to exist elsewhere in the project is
-redundant here.
+The string after the function name is its **signature**, checked before the function runs, so
+the body can use `as_str()`/`as_int()` without checking: `s` string, `i` int, `n` int or
+float, `b` bool, `l` List, `d` Dict, `f` function, `x` anything; an uppercase letter also
+accepts `null`; what follows `|` is optional; a trailing `*` takes any number of further
+arguments. The argument count the compiler checks comes from it too. Set `error` to fail the
+call (a catchable Lux Script error, or `{"error": ...}` for an async function), and pass
+`/*is_async=*/true` as a fourth field for anything that waits on disk, the network, a child
+process or real CPU work, so it runs on the I/O pool and has to be `await`ed.
+
+A module that needs an `app:` block writes its own `BuiltinModule` subclass, overriding
+`configure()`, and registers it with `LUX_REGISTER_MODULE(ClassName)`.
+
+Name the file after the module (`qrcode.cpp`).
 
 ## If the module needs a third-party library
 
