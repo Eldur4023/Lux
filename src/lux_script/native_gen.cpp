@@ -1345,6 +1345,12 @@ public:
                              decl.kind() == Type::Kind::List) ||
                             (s.value->kind == IrExprKind::DictLit && s.value->entries.empty() &&
                              decl.kind() == Type::Kind::Dict);
+                        // `Json x = {}`: any Value-typed local takes it.
+                        if (!vacio_compatible && es_json_dinamico(decl) && es_valor_json(*s.value)) {
+                            en_value_.insert(&s);
+                            registrar(s.slot, decl);
+                            return true;
+                        }
                         if (!vacio_compatible || !tipo_soportado(decl, &clases_))
                             return false;
                         registrar(s.slot, decl);
@@ -3442,6 +3448,40 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
     for (const auto& c : prog.classes)
         for (const auto& f : c.fields)
             if (!escalar(Type::from_declared(f.type))) previa[c.name].dinamica = true;
+    // A class inside a List/Dict or as `Clase?` anywhere is a Dict too:
+    // those are Values in native code, and an instance must be one to go in.
+    std::set<std::string> nombres;
+    for (const auto& c : prog.classes) nombres.insert(c.name);
+    std::function<void(const TypeRef&, bool)> ver = [&](const TypeRef& t, bool dentro) {
+        if ((dentro || t.optional) && nombres.count(t.name)) previa[t.name].dinamica = true;
+        for (const auto& a : t.args) ver(a, true);
+    };
+    std::function<void(const Block&)> ver_bloque = [&](const Block& b) {
+        for (const auto& st : b) {
+            if (!st) continue;
+            if (st->kind == StmtKind::VarDecl || st->kind == StmtKind::For) ver(st->type, false);
+            ver_bloque(st->body);
+            ver_bloque(st->orelse);
+        }
+    };
+    auto ver_fn = [&](const FnDecl& f) {
+        ver(f.return_type, false);
+        for (const auto& p : f.params) ver(p.type, false);
+        ver_bloque(f.body);
+    };
+    for (const auto& f : prog.functions) ver_fn(f);
+    for (const auto& r : prog.routes) {
+        for (const auto& p : r.params) ver(p.type, false);
+        ver_bloque(r.body);
+    }
+    for (const auto& c : prog.classes) {
+        for (const auto& f : c.fields) ver(f.type, false);
+        for (const auto& m : c.methods) ver_fn(m);
+        for (const auto& ct : c.ctors) {
+            for (const auto& p : ct.params) ver(p.type, false);
+            ver_bloque(ct.body);
+        }
+    }
     for (bool mas = true; mas;) {
         mas = false;
         for (const auto& c : prog.classes) {

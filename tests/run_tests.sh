@@ -537,9 +537,11 @@ native_compiles "--native compiles the postgres suite" "$HERE/cases/postgres.lux
 native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"    17
 native_compiles "--native compiles module calls"      "$HERE/cases/modules.lux"  76
 native_compiles "--native survives its edge cases"    "$HERE/cases/native_edges.lux" 5
-native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  8
+native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  13
+native_compiles "--native compiles File/List<File> parameters" "$HERE/cases/params.lux" 8
+native_compiles "--native compiles session and jwt" "$HERE/cases/session.lux" 5
 native_compiles "--native compiles render()"          "$HERE/cases/render.lux"   2
-native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 48
+native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 49
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"
 fails_to_compile "object out of place" "$HERE/cases/bad/sse.lux"      "only exists inside a route sse"
