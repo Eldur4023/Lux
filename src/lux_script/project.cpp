@@ -1994,7 +1994,15 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     // running it inline and stalling this connection's event
                     // loop -- and everyone else queued behind it -- for
                     // however long it takes. See blocking_pool.hpp.
-                    co_await lux::BlockingAwaitable{req.loop, [&] { fn(req, res); }};
+                    // The validation messages an `on error` handler reads are
+                    // thread_local: filled on the pool thread, they are
+                    // carried back to this one.
+                    std::vector<std::string> messages;
+                    co_await lux::BlockingAwaitable{req.loop, [&] {
+                        fn(req, res);
+                        messages = last_validation_messages();
+                    }};
+                    last_validation_messages() = std::move(messages);
                 });
             continue;
         }

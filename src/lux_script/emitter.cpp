@@ -519,6 +519,14 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
 // Only the obvious: a literal, or a variable with a declared type. There's
 // no inference, so when in doubt it returns Type::unknown() and nothing
 // gets checked.
+// A module function's declared return; a List or Dict holds Json (what a
+// module hands back is dynamic inside).
+Type module_return_type(const BuiltinModuleFn& fn) {
+    if (fn.returns == "List") return Type::list_of(Type::json());
+    if (fn.returns == "Dict") return Type::dict_of(Type::json());
+    return fn.returns.empty() ? Type::json() : Type::from_legacy_name(fn.returns);
+}
+
 Type Emitter::type_of(const Expr& e) const {
     switch (e.kind) {
         case ExprKind::StringLit: return Type::primitive(Type::Kind::String);
@@ -559,7 +567,7 @@ Type Emitter::type_of(const Expr& e) const {
                 imports_->count(e.object->object->text) && resolve_local(e.object->object->text) < 0) {
                 const BuiltinModuleFn* fn =
                     BuiltinModuleRegistry::instance().find(e.object->object->text, e.object->text);
-                return fn && !fn->returns.empty() ? Type::from_legacy_name(fn->returns) : Type::unknown();
+                return fn && !fn->returns.empty() ? module_return_type(*fn) : Type::unknown();
             }
             const Type recv = type_of(*e.object->object);
 
@@ -1136,7 +1144,7 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
         // falls back to bytecode like any other unsupported construct.
         // The declared return type when there is one (a signature's '>'),
         // so a chained method is checked like on a variable; Json otherwise.
-        r->type = fn->returns.empty() ? Type::json() : Type::from_legacy_name(fn->returns);
+        r->type = module_return_type(*fn);
         return r;
     }
 

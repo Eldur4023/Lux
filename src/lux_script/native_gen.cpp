@@ -314,8 +314,11 @@ public:
             if (!a.value || !es_valor_json(*a.value)) return false;
         return true;
     }
+    // A List/Dict result stays a dynamic Value (Json) in native code: what
+    // the function returns is a Value, not an LList/LDict.
     static Type tipo_retorno_modulo(const BuiltinModuleFn& fn) {
-        return fn.returns.empty() ? Type::json() : Type::from_legacy_name(fn.returns);
+        if (fn.returns.empty() || fn.returns == "List" || fn.returns == "Dict") return Type::json();
+        return Type::from_legacy_name(fn.returns);
     }
 
     // Fase 5.6: ¿demostro tipo_provable() algun `await <modulo>.begin()` en
@@ -769,9 +772,9 @@ public:
             }
 
             case IrExprKind::Ternary: {
-                // La condicion solo necesita ser demostrable en algun tipo
-                // (Int/Float/Bool convierten a bool en C++ identico a
-                // truthy(); string no convierte -- g++ lo rechaza solo).
+                // La condicion solo necesita ser demostrable en algun tipo:
+                // Generador::cond() la pasa por lux_truthy(), la misma
+                // regla que truthy() del VM para cada tipo.
                 if (!e.object || !tipo_provable(*e.object)) return std::nullopt;
                 if (!e.lhs || !e.rhs) return std::nullopt;
                 auto ts = tipo_provable(*e.lhs);
@@ -1288,6 +1291,12 @@ public:
     // i-esimo, por como los declara check_function antes que nada mas).
     void registrar(int slot, const std::string& nombre) { ranura_a_nombre_[slot] = nombre; }
 
+    // A function/method declared to return Json: its `return` accepts any
+    // JSON-able value (Comprobador::es_valor_json) -- a Dict mixing value
+    // types, say -- so it is built with valor_json(), not expr(), which
+    // needs one proven type.
+    void retorno_json(bool v) { retorno_json_ = v; }
+
     std::string expr(const IrExpr& e) const {
         switch (e.kind) {
             // static_cast, no solo el sufijo LL: en glibc/x86-64, int64_t es
@@ -1367,7 +1376,7 @@ public:
                 return expr(*e.object) + ".campo_" + e.text + "()";
 
             case IrExprKind::Unary:
-                return std::string("(") + (e.text == "not" ? "!" : "-") + expr(*e.lhs) + ")";
+                return e.text == "not" ? "(!" + cond(*e.lhs) + ")" : "(-" + expr(*e.lhs) + ")";
 
             // '/' y '%' con un ayudante que comprueba el divisor antes de
             // dividir (ver error_runtime_prelude): el resto de operadores
@@ -1415,7 +1424,7 @@ public:
             }
 
             case IrExprKind::Ternary:
-                return "(" + expr(*e.object) + " ? " + expr(*e.lhs) + " : " + expr(*e.rhs) + ")";
+                return "(" + cond(*e.object) + " ? " + expr(*e.lhs) + " : " + expr(*e.rhs) + ")";
 
             case IrExprKind::PreStep:
             case IrExprKind::PostStep: {
@@ -1761,13 +1770,18 @@ public:
         return s;
     }
 
+    // A condition, truthy the way the VM tests it: an empty string or List
+    // is false (lux_truthy, string_runtime_prelude).
+    std::string cond(const IrExpr& e) const { return "lux_truthy(" + expr(e) + ")"; }
+
     std::string stmt(const IrStmt& s, int indent) {
         switch (s.kind) {
             case IrStmtKind::Return:
                 if (ruta_ && s.value && comprobador_.es_llamada_respuesta(*s.value))
                     return codigo_llamada_respuesta(*s.value) + "; " + ret_vacio();
                 if (ruta_) return respuesta_de_retorno(s.value.get());
-                return s.value ? ("return " + expr(*s.value) + ";") : "return;";
+                if (!s.value) return "return;";
+                return "return " + (retorno_json_ ? valor_json(*s.value) : expr(*s.value)) + ";";
 
             case IrStmtKind::ExprStmt:
                 return expr(*s.value) + ";";
@@ -1817,7 +1831,7 @@ public:
             }
 
             case IrStmtKind::If: {
-                std::string r = "if (" + expr(*s.value) + ") {\n" + block(s.body, indent + 1) +
+                std::string r = "if (" + cond(*s.value) + ") {\n" + block(s.body, indent + 1) +
                                 pad(indent) + "}";
                 if (!s.orelse.empty())
                     r += " else {\n" + block(s.orelse, indent + 1) + pad(indent) + "}";
@@ -1825,7 +1839,7 @@ public:
             }
 
             case IrStmtKind::While:
-                return "while (" + expr(*s.value) + ") {\n" + block(s.body, indent + 1) +
+                return "while (" + cond(*s.value) + ") {\n" + block(s.body, indent + 1) +
                        pad(indent) + "}";
 
             case IrStmtKind::Break:    return "break;";
@@ -1860,12 +1874,13 @@ public:
                     // "else status(N)"/"else text(...)"/... escribe la
                     // respuesta el mismo (mismo texto que su fn_* en
                     // natives.cpp) -- no hay ningun valor que serializar.
-                    return "if (!(" + expr(*s.value) + ")) { " +
+                    return "if (!" + cond(*s.value) + ") { " +
                            codigo_llamada_respuesta(*s.target) + "; " + ret_vacio() + " }";
                 if (ruta_)
-                    return "if (!(" + expr(*s.value) + ")) { " +
+                    return "if (!" + cond(*s.value) + ") { " +
                            respuesta_de_retorno(s.target.get()) + " }";
-                return "if (!(" + expr(*s.value) + ")) { return " + expr(*s.target) + "; }";
+                return "if (!" + cond(*s.value) + ") { return " +
+                       (retorno_json_ ? valor_json(*s.target) : expr(*s.target)) + "; }";
 
             default:
                 return ""; // inalcanzable: Comprobador ya lo descarto antes de llegar aqui
@@ -1993,6 +2008,7 @@ private:
     const std::vector<std::string>& nombre_por_indice_;
     const Comprobador&               comprobador_;
     bool                             ruta_ = false;
+    bool                             retorno_json_ = false;
     bool                             asincrona_ = false;
     std::map<int, std::string>      ranura_a_nombre_;
 
@@ -2140,9 +2156,10 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // decidir nada, para el tipo C++ de la variable de un `for` y el valor
     // de un DictLit (ver esos casos en Generador::expr/stmt).
     Generador gen(nombre_por_indice, comprobador);
+    gen.retorno_json(retorno_decl.kind() == Type::Kind::Json);
     for (size_t i = 0; i < fn.params.size(); ++i)
         gen.registrar(static_cast<int>(i), fn.params[i].name);
-    out.cuerpo_cpp = "{\n" + gen.block(body, 1) + "}";
+    out.cuerpo_cpp = "{\n    LuxDepth lux_depth_guard;\n" + gen.block(body, 1) + "}";
 
     // El wrapper de ABI fija (ver native_abi.hpp): descomprime args[i] al
     // tipo real de cada parametro, llama a la funcion de arriba, y empaqueta
@@ -2246,12 +2263,13 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     out.firma_cpp = tipo_cpp(retorno_decl) + " l_" + clase + "_" + fn.name + "(" + params + ")";
 
     Generador gen(nombre_por_indice, comprobador);
+    gen.retorno_json(retorno_decl.kind() == Type::Kind::Json);
     // "this" no necesita registrarse por nombre (This tiene su propio caso
     // en Generador::expr, "l_this" fijo); los parametros si, para poder
     // resolver un Assign(Local) por su nombre C++.
     for (size_t i = 0; i < fn.params.size(); ++i)
         gen.registrar(static_cast<int>(i + 1), fn.params[i].name);
-    out.cuerpo_cpp = "{\n" + gen.block(body, 1) + "}";
+    out.cuerpo_cpp = "{\n    LuxDepth lux_depth_guard;\n" + gen.block(body, 1) + "}";
 
     // Nunca cruza la ABI -- el receptor es siempre de tipo clase, y una
     // clase nunca es tipo_abi_soportado() (igual que string/List/Dict).
@@ -2906,6 +2924,14 @@ std::string string_runtime_prelude() {
     // Cada una calca, a proposito, la rama `string` de call_method() en
     // natives.cpp -- misma logica, tipos nativos en vez de Value.
     return
+        "inline bool lux_truthy(bool b) { return b; }\n"
+        "inline bool lux_truthy(int i) { return i != 0; }\n"
+        "inline bool lux_truthy(int64_t i) { return i != 0; }\n"
+        "inline bool lux_truthy(double d) { return d != 0; }\n"
+        "inline bool lux_truthy(const std::string& s) { return !s.empty(); }\n"
+        "inline bool lux_truthy(const lux_script::Value& v) { return v.truthy(); }\n"
+        "template <class T> inline bool lux_truthy(const LList<T>& l) { return l.lux_len() > 0; }\n"
+        "template <class T> inline bool lux_truthy(const LDict<T>& d) { return d.lux_len() > 0; }\n"
         "static bool lux_str_starts_with(const std::string& s, const std::string& n) {\n"
         "    return s.rfind(n, 0) == 0;\n"
         "}\n"
@@ -2958,6 +2984,13 @@ std::string error_runtime_prelude() {
         "    g_lux_native_error = std::move(msg);\n"
         "    throw LuxNativeError{};\n"
         "}\n"
+        // The VM's recursion cap (kMaxFrames), for native functions: without
+        // it, recursion with no base case takes the whole process's stack.
+        "struct LuxDepth {\n"
+        "    static int& n() { static thread_local int d = 0; return d; }\n"
+        "    LuxDepth() { if (++n() > 200) { --n(); lux_native_fail(\"too much recursion: more than 200 nested calls\"); } }\n"
+        "    ~LuxDepth() { --n(); }\n"
+        "};\n"
         "extern \"C\" const char* lux_native_error_message() {\n"
         "    return g_lux_native_error.c_str();\n"
         "}\n"

@@ -88,7 +88,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     for (const auto& [nombre, sig] : sigs)
         if (sig.index < nombre_por_indice.size()) nombre_por_indice[sig.index] = nombre;
 
-    const TablaFirmas firmas = construir_firmas(prog);
+    TablaFirmas firmas = construir_firmas(prog);
 
     TablaClases clases;
     TablaRoles  roles;
@@ -117,6 +117,17 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     std::string prototipos;
     std::string cuerpos;
 
+    // A fixed point: a function or method that does not compile natively
+    // leaves the tables and the whole set is generated again, so a caller
+    // never references one that is missing -- a single dangling reference
+    // is a g++ error that sends the whole module back to bytecode.
+    for (bool changed = true; changed;) {
+    changed = false;
+    generadas.clear();
+    prototipos.clear();
+    cuerpos.clear();
+    auto drop_fn = [&](const std::string& n) { changed |= firmas.erase(n) > 0; };
+
     for (const auto& [nombre, sig] : sigs) {
         const FnDecl* fn = buscar_fn(prog, nombre);
         if (!fn) continue; // no deberia pasar: sigs viene de este mismo prog
@@ -136,10 +147,10 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // absoluto, solo el tipo declarado del parametro.
         Emitter emitter(diags_ir, &sigs, nullptr, &prog.imports);
         IrBlock body;
-        if (!emitter.check_function(*fn, descartable, diags_ir, &body)) continue;
+        if (!emitter.check_function(*fn, descartable, diags_ir, &body)) { drop_fn(nombre); continue; }
 
         auto generada = generar_funcion_nativa(*fn, body, nombre_por_indice, firmas, clases, roles);
-        if (!generada) continue;
+        if (!generada) { drop_fn(nombre); continue; }
 
         prototipos += generada->firma_cpp + ";\n";
         cuerpos += generada->firma_cpp + " " + generada->cuerpo_cpp + "\n\n";
@@ -171,15 +182,17 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
             // llamar a otros metodos.
             Emitter emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
             IrBlock body;
-            if (!emitter.check_method(c.name, m, descartable, diags_ir, &body)) continue;
+            auto drop_method = [&] { changed |= clases.count(c.name) && clases[c.name].metodos.erase(m.name) > 0; };
+            if (!emitter.check_method(c.name, m, descartable, diags_ir, &body)) { drop_method(); continue; }
 
             auto generada = generar_metodo_nativo(c.name, m, body, nombre_por_indice, firmas,
                                                   clases, roles);
-            if (!generada) continue;
+            if (!generada) { drop_method(); continue; }
             prototipos += generada->firma_cpp + ";\n";
             cuerpos += generada->firma_cpp + " " + generada->cuerpo_cpp + "\n\n";
         }
     }
+    }   // fixed point
 
     // Rutas (Fase 4): a diferencia de funciones/metodos, una ruta nunca
     // aporta prototipo (nadie mas la llama en C++ generado) -- su texto

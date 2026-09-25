@@ -1,0 +1,26 @@
+# --native edge cases that once broke the whole generated file (see
+# run_tests.sh, native_compiles).
+import hash
+
+app:
+    port 8000
+
+# A Json function returning a Dict of mixed value types: used to crash
+# the generator (a proven type was dereferenced where there was none).
+fn Json mixed(int n):
+    return { "name": "x", "n": n }
+
+# Cannot be native (a module call needs a route's context)...
+fn string digest(string s):
+    return hash.sha256(s)
+
+# ...so neither can its caller: it must fall back too, not reference a
+# native digest() that does not exist.
+fn string caller(string s):
+    return digest(s) + "!"
+
+get endpoint("/mixed"):
+    return mixed(1)
+
+get endpoint("/chain"):
+    return { "h": caller("a") }
