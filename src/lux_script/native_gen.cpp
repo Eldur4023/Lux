@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -296,6 +297,17 @@ public:
         auto it = firmas_.find(fn);
         return it != firmas_.end() && it->second.asincrona;
     }
+    const FirmaNativa* metodo(const std::string& clase, const std::string& m) const {
+        auto cit = clases_.find(clase);
+        if (cit == clases_.end()) return nullptr;
+        auto mit = cit->second.metodos.find(m);
+        return mit == cit->second.metodos.end() ? nullptr : &mit->second;
+    }
+    const ClaseNativa* clase(const std::string& n) const {
+        auto it = clases_.find(n);
+        return it == clases_.end() ? nullptr : &it->second;
+    }
+    Type nativo(const Type& t) const { return tipo_nativo(t, &clases_); }
     const FirmaNativa* firma(const std::string& fn) const {
         auto it = firmas_.find(fn);
         return it == firmas_.end() ? nullptr : &it->second;
@@ -711,10 +723,12 @@ private:
             // por ranura_tipos_: "this" no es reasignable (no existe
             // "this = x" en la gramatica), asi que su tipo es solido sin
             // necesitar la induccion que protege a un Ident normal.
-            case IrExprKind::This:
-                if (e.type.kind() != Type::Kind::Class || !clases_.count(e.type.class_name()))
-                    return std::nullopt;
-                return e.type;
+            case IrExprKind::This: {
+                if (e.type.kind() != Type::Kind::Class) return std::nullopt;
+                auto cit = clases_.find(e.type.class_name());
+                if (cit == clases_.end()) return std::nullopt;
+                return cit->second.dinamica ? Type::json() : e.type;
+            }
 
             // o.campo (incluido this.campo): demostrable solo si `o` es
             // demostrablemente una instancia de una clase representable
@@ -1021,6 +1035,15 @@ private:
                         return std::nullopt;
                     auto cit = clases_.find(rit->second.clase);
                     if (cit == clases_.end()) return std::nullopt;
+                    // A Dict class: the VM's instance (emit_ctor), built
+                    // by Generador from ctor_params.
+                    if (cit->second.dinamica) {
+                        if (!cit->second.ctor_params.count(e.args.size())) return std::nullopt;
+                        for (const auto& a : e.args)
+                            if (!a.value || !es_valor_json(*a.value)) return std::nullopt;
+                        dinamicas_.insert(&e);
+                        return Type::json();
+                    }
                     const auto& campos = cit->second.campos;
                     if (campos.size() != e.args.size()) return std::nullopt;
                     for (size_t i = 0; i < e.args.size(); ++i) {
@@ -1041,19 +1064,27 @@ private:
                 if (e.call_shape == IrCallShape::ClassMethodCall) {
                     if (!e.object) return std::nullopt;
                     auto trec = tipo_provable(*e.object);
-                    if (!trec || trec->kind() != Type::Kind::Class) return std::nullopt;
+                    if (!trec) return std::nullopt;
                     auto rit = roles_.find(e.call_index);
-                    if (rit == roles_.end() || rit->second.metodo.empty() ||
-                        rit->second.clase != trec->class_name())
-                        return std::nullopt;
+                    if (rit == roles_.end() || rit->second.metodo.empty()) return std::nullopt;
                     auto cit = clases_.find(rit->second.clase);
                     if (cit == clases_.end()) return std::nullopt;
+                    // The receiver: an instance of that class -- for a Dict
+                    // class, the Value the checker already typed as one.
+                    if (cit->second.dinamica ? trec->kind() != Type::Kind::Json
+                                             : (trec->kind() != Type::Kind::Class ||
+                                                rit->second.clase != trec->class_name()))
+                        return std::nullopt;
                     auto mit = cit->second.metodos.find(rit->second.metodo);
                     if (mit == cit->second.metodos.end() ||
                         mit->second.params.size() != e.args.size())
                         return std::nullopt;
                     for (size_t i = 0; i < e.args.size(); ++i) {
                         if (!e.args[i].value) return std::nullopt;
+                        if (es_json_dinamico(mit->second.params[i])) {
+                            if (!es_valor_json(*e.args[i].value)) return std::nullopt;
+                            continue;
+                        }
                         auto ta = tipo_provable(*e.args[i].value);
                         if (!ta || *ta != mit->second.params[i]) return std::nullopt;
                     }
@@ -1273,6 +1304,8 @@ public:
                 return s.value && tipo_provable(*s.value).has_value();
 
             case IrStmtKind::VarDecl: {
+                // As native code holds it: `List<Series>` is a List<Json>.
+                const Type decl = tipo_nativo(s.decl_type, &clases_);
                 if (s.value && promovidas_.count(s.slot)) {
                     if (!es_valor_json(*s.value) || alias_nativo(*s.value)) return false;
                     en_value_.insert(&s);
@@ -1299,16 +1332,16 @@ public:
                         // en el primerisimo statement.
                         bool vacio_compatible =
                             (s.value->kind == IrExprKind::ListLit && s.value->items.empty() &&
-                             s.decl_type.kind() == Type::Kind::List) ||
+                             decl.kind() == Type::Kind::List) ||
                             (s.value->kind == IrExprKind::DictLit && s.value->entries.empty() &&
-                             s.decl_type.kind() == Type::Kind::Dict);
-                        if (!vacio_compatible || !tipo_soportado(s.decl_type, &clases_))
+                             decl.kind() == Type::Kind::Dict);
+                        if (!vacio_compatible || !tipo_soportado(decl, &clases_))
                             return false;
-                        registrar(s.slot, s.decl_type);
+                        registrar(s.slot, decl);
                         return true;
                     }
-                    if (*t == s.decl_type) {
-                        registrar(s.slot, s.decl_type);
+                    if (*t == decl) {
+                        registrar(s.slot, decl);
                         return true;
                     }
                     // Fase 5.5: el valor real es Json (dinamico) aunque el
@@ -1329,15 +1362,15 @@ public:
                     }
                     // Declared as a Value (Json, List<Json>, Dict<string,Json>):
                     // any value that becomes one.
-                    if (es_json_dinamico(s.decl_type) && es_valor_json(*s.value) && !alias_nativo(*s.value)) {
+                    if (es_json_dinamico(decl) && es_valor_json(*s.value) && !alias_nativo(*s.value)) {
                         en_value_.insert(&s);
-                        registrar(s.slot, s.decl_type);
+                        registrar(s.slot, decl);
                         return true;
                     }
                     return false;
                 }
-                if (!tipo_soportado(s.decl_type, &clases_)) return false;
-                registrar(s.slot, s.decl_type);
+                if (!tipo_soportado(decl, &clases_)) return false;
+                registrar(s.slot, decl);
                 return true;
             }
 
@@ -1407,6 +1440,12 @@ public:
                          s.assign_object->kind != IrExprKind::This))
                         return false;
                     auto tobj = tipo_provable(*s.assign_object);
+                    // Op::SetMember on a Value (a Dict class's instance, a row).
+                    if (tobj && es_json_dinamico(*tobj)) {
+                        if (!es_valor_json(*s.value)) return false;
+                        en_value_.insert(&s);
+                        return true;
+                    }
                     if (!tobj || tobj->kind() != Type::Kind::Class) return false;
                     auto cit = clases_.find(tobj->class_name());
                     if (cit == clases_.end()) return false;
@@ -1729,6 +1768,8 @@ public:
 
             case IrExprKind::Call: {
                 if (e.call_shape == IrCallShape::BuiltinModuleCall) return llamada_modulo(e, false);
+                if (e.call_shape == IrCallShape::ConstructorCall && comprobador_.dinamica(e))
+                    return instancia_dinamica(e);
                 if (comprobador_.dinamica(e)) {
                     const std::string ctx = con_ctx() ? "l_ctx" : "lux_ctx()";
                     std::string args = "LuxL{}";
@@ -1776,7 +1817,10 @@ public:
                     const std::string f = "l_" + rol.clase + "_" + rol.metodo;
                     std::string s = con_ctx() ? "lux_call_in(l_ctx, " + f + ", " + expr(*e.object)
                                           : f + "(" + expr(*e.object);
-                    for (const auto& a : e.args) s += ", " + expr(*a.value);
+                    const FirmaNativa* m = comprobador_.metodo(rol.clase, rol.metodo);
+                    for (size_t i = 0; i < e.args.size(); ++i)
+                        s += ", " + (m && i < m->params.size() && es_json_dinamico(m->params[i])
+                                         ? valor_json(*e.args[i].value) : expr(*e.args[i].value));
                     s += ")";
                     return s;
                 }
@@ -2010,6 +2054,24 @@ public:
         return v;
     }
 
+    // A Dict class's instance, as emit_ctor builds it: every field null in
+    // declaration order, then each parameter set by name.
+    std::string instancia_dinamica(const IrExpr& e) const {
+        const auto& rol = comprobador_.roles().at(e.call_index);
+        const ClaseNativa& c = *comprobador_.clase(rol.clase);
+        const auto& params = c.ctor_params.at(e.args.size());
+        std::string s = "LuxD{}";
+        for (const auto& f : c.campos) {
+            auto it = std::find(params.begin(), params.end(), f.nombre);
+            s += ".add(" + literal_string(f.nombre) + ", " +
+                 (it == params.end() ? std::string("Value::null()") : valor_json(*e.args[static_cast<size_t>(it - params.begin())].value)) + ")";
+        }
+        for (size_t i = 0; i < params.size(); ++i)
+            if (std::none_of(c.campos.begin(), c.campos.end(), [&](const CampoNativo& f) { return f.nombre == params[i]; }))
+                s += ".add(" + literal_string(params[i]) + ", " + valor_json(*e.args[i].value) + ")";
+        return s + ".done()";
+    }
+
     // A user function that awaits (FirmaNativa::asincrona), with or without
     // `await` written: its coroutine, over this request's ctx.
     std::string llamada_asincrona(const IrExpr& call) const {
@@ -2155,8 +2217,9 @@ public:
                 if (comprobador_.en_value(s))
                     return "Value " + nombre_cpp(s.name) + " = " + valor_json(*s.value) + ";";
                 auto t_valor    = s.value ? comprobador_.tipo_provable(*s.value) : std::nullopt;
-                Type tipo_real  = t_valor ? *t_valor : s.decl_type;
-                std::string val = (!s.value || !t_valor) ? valor_por_defecto(s.decl_type)
+                const Type decl = comprobador_.nativo(s.decl_type);
+                Type tipo_real  = t_valor ? *t_valor : decl;
+                std::string val = (!s.value || !t_valor) ? valor_por_defecto(decl)
                                                           : expr(*s.value);
                 return tipo_cpp(tipo_real) + " " + nombre_cpp(s.name) + " = " + val + ";";
             }
@@ -2165,6 +2228,9 @@ public:
                 if (s.assign_target == IrAssignTarget::Session)
                     return "lux_dyn_global(l_ctx, " + std::to_string(native_id("__session_set")) + ", LuxL{}.add(Value::str(" +
                            literal_string(s.assign_field) + ")).add(" + valor_json(*s.value) + ").items());";
+                if (comprobador_.en_value(s) && s.assign_target == IrAssignTarget::Member)
+                    return "lux_json_set_member(" + expr(*s.assign_object) + ", " + literal_string(s.assign_field) +
+                           ", " + valor_json(*s.value) + ");";
                 if (comprobador_.en_value(s) && s.assign_target == IrAssignTarget::Index)
                     return "lux_json_set_index(" + expr(*s.assign_object) + ", " + valor_json(*s.assign_index) +
                            ", " + valor_json(*s.value) + ");";
@@ -2497,9 +2563,20 @@ std::vector<std::string> pattern_params(const std::string& pattern) {
 
 } // namespace
 
-Type tipo_nativo(const Type& t) {
-    if (!t.is_optional() || t.kind() == Type::Kind::Class) return t;
-    return Type::json();
+Type tipo_nativo(const Type& t, const TablaClases* clases) {
+    if (t.kind() == Type::Kind::Class) {
+        auto it = clases ? clases->find(t.class_name()) : TablaClases::const_iterator{};
+        if (clases && it != clases->end() && it->second.dinamica) return Type::json();
+        return t;
+    }
+    if (t.is_optional()) return Type::json();
+    if (t.kind() == Type::Kind::List || t.kind() == Type::Kind::Dict) {
+        const Type e = tipo_nativo(t.element(), clases);
+        if (!tipo_elemento_contenedor_soportado(e))
+            return t.kind() == Type::Kind::List ? Type::list_of(Type::json()) : Type::dict_of(Type::json());
+        return t.kind() == Type::Kind::List ? Type::list_of(e) : Type::dict_of(e);
+    }
+    return t;
 }
 
 // Checks `body`, again each time Comprobador asks to hold one more local as
@@ -2670,15 +2747,21 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     auto cit = clases.find(clase);
     if (cit == clases.end()) return std::nullopt; // la propia clase no es representable
 
-    const Type retorno_decl = Type::from_declared(fn.return_type);
+    // Its FirmaNativa (tipo_nativo already applied, see construir_clases);
+    // `this` of a Dict class is a Value.
+    auto mit = cit->second.metodos.find(fn.name);
+    if (mit == cit->second.metodos.end()) return std::nullopt;
+    const FirmaNativa& firma = mit->second;
+    const bool dinamica = cit->second.dinamica;
+    const Type retorno_decl = firma.retorno;
     if (!tipo_soportado(retorno_decl, &clases)) return std::nullopt;
-    for (const auto& p : fn.params)
-        if (!tipo_soportado(Type::from_declared(p.type), &clases)) return std::nullopt;
+    for (const auto& t : firma.params)
+        if (!tipo_soportado(t, &clases)) return std::nullopt;
 
     // check_method declara "this" ANTES que los parametros (ranura 0), al
     // reves que check_function -- ver el comentario de Emitter::check_method.
-    std::vector<Type> tipos_params{Type::class_ref(clase)};
-    for (const auto& p : fn.params) tipos_params.push_back(Type::from_declared(p.type));
+    std::vector<Type> tipos_params{dinamica ? Type::json() : Type::class_ref(clase)};
+    for (const auto& t : firma.params) tipos_params.push_back(t);
     bool ok = false;
     auto cp = comprobar(nombre_por_indice, firmas, clases, roles, tipos_params, body, retorno_decl, ok);
     if (!ok) return std::nullopt;
@@ -2700,10 +2783,9 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     FuncionNativa out;
     out.nombre_lux = fn.name;
 
-    std::string params = "L" + clase + " l_this";
+    std::string params = (dinamica ? "Value" : "L" + clase) + " l_this";
     for (size_t i = 0; i < fn.params.size(); ++i)
-        params += ", " + tipo_cpp(Type::from_declared(fn.params[i].type)) + " " +
-                  nombre_cpp(fn.params[i].name);
+        params += ", " + tipo_cpp(firma.params[i]) + " " + nombre_cpp(fn.params[i].name);
     out.firma_cpp = tipo_cpp(retorno_decl) + " l_" + clase + "_" + fn.name + "(" + params + ")";
 
     Generador gen(nombre_por_indice, comprobador);
@@ -2919,6 +3001,8 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         // fase no llega) -- nunca un handler nativo silenciando un caso
         // que bind_params habria rechazado.
         auto cit = clases.find(p.type.name);
+        if (cit != clases.end() && cit->second.dinamica)
+            return no("parameter " + p.name + ": a class with List or class fields");
         if (cit != clases.end()) {
             if (p.type.optional) return no("parameter " + p.name + ": an optional body"); // fuera de alcance
             bool en_path_cuerpo = std::find(en_patron.begin(), en_patron.end(), p.name) !=
@@ -3261,6 +3345,32 @@ std::string generar_clase_runtime(const std::string& nombre_clase, const ClaseNa
 void construir_clases(const Program& prog, const ClassSigs& clases_sig,
                       const FunctionSigs& fns, const std::set<std::string>* imports,
                       TablaClases& clases, TablaRoles& roles) {
+    // Which classes are a Dict (ClaseNativa::dinamica): one with a field
+    // that is not a scalar, and one such a class holds in a field -- it is
+    // stored in that Dict, so it has to be a Value too.
+    auto escalar = [](const Type& t) {
+        return t.kind() == Type::Kind::Int || t.kind() == Type::Kind::Float ||
+               t.kind() == Type::Kind::Bool || t.kind() == Type::Kind::String;
+    };
+    std::function<void(const Type&, std::set<std::string>&)> clases_en = [&](const Type& t, std::set<std::string>& out) {
+        if (t.kind() == Type::Kind::Class) out.insert(t.class_name());
+        if (t.kind() == Type::Kind::List || t.kind() == Type::Kind::Dict) clases_en(t.element(), out);
+    };
+    TablaClases previa;   // only `dinamica`, for tipo_nativo() below
+    for (const auto& c : prog.classes)
+        for (const auto& f : c.fields)
+            if (!escalar(Type::from_declared(f.type))) previa[c.name].dinamica = true;
+    for (bool mas = true; mas;) {
+        mas = false;
+        for (const auto& c : prog.classes) {
+            if (!previa[c.name].dinamica) continue;
+            std::set<std::string> dentro;
+            for (const auto& f : c.fields) clases_en(Type::from_declared(f.type), dentro);
+            for (const auto& n : dentro)
+                if (!previa[n].dinamica) previa[n].dinamica = mas = true;
+        }
+    }
+
     for (const auto& c : prog.classes) {
         // Solo entra si TODOS los campos son representables -- el lenguaje ya
         // restringe los campos de clase a los cuatro escalares
@@ -3270,10 +3380,18 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
         // Fase 5.7: un campo `?` SI entra -- ver el comentario de
         // CampoNativo sobre por que se almacena como Json.
         ClaseNativa cn;
+        cn.dinamica = previa[c.name].dinamica;
         bool todos_soportados = true;
         for (const auto& f : c.fields) {
             Type t = Type::from_declared(f.type);
             Type::Kind k = t.kind();
+            if (cn.dinamica) {   // a Value per field, whatever it holds
+                CampoNativo cf;
+                cf.nombre = f.name;
+                cf.tipo   = Type::json();
+                cn.campos.push_back(std::move(cf));
+                continue;
+            }
             if (k != Type::Kind::Int && k != Type::Kind::Float &&
                 k != Type::Kind::Bool && k != Type::Kind::String) {
                 todos_soportados = false;
@@ -3301,7 +3419,8 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
         // si alguna algun dia lo intenta, faltara en firmas_vacias/
         // clases_vacias y esta rama la rechazara limpio, no con un fallo a
         // medias.
-        if (!c.rules.empty()) {
+        if (!c.rules.empty() && cn.dinamica) cn.reglas_ok = false;   // not bound natively
+        if (!c.rules.empty() && !cn.dinamica) {
             std::vector<TypedName> field_names;
             for (const auto& f : c.fields) field_names.push_back({f.name, f.type.name});
 
@@ -3345,8 +3464,8 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
             auto fsig_it = sig_it->second.methods.find(m.name);
             if (fsig_it == sig_it->second.methods.end()) continue;
             FirmaNativa firma;
-            firma.retorno = Type::from_declared(m.return_type);
-            for (const auto& p : m.params) firma.params.push_back(Type::from_declared(p.type));
+            firma.retorno = tipo_nativo(Type::from_declared(m.return_type), &previa);
+            for (const auto& p : m.params) firma.params.push_back(tipo_nativo(Type::from_declared(p.type), &previa));
             cn.metodos[m.name] = std::move(firma);
             roles[static_cast<int>(fsig_it->second.index)] = RolFuncion{c.name, m.name, true};
         }
@@ -3355,6 +3474,10 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
             auto idx_it = sig_it->second.ctors.find(ct.params.size());
             if (idx_it == sig_it->second.ctors.end()) continue;
             roles[static_cast<int>(idx_it->second)] = RolFuncion{c.name, "", ct.has_body};
+            if (!ct.has_body) {
+                auto& nombres = cn.ctor_params[ct.params.size()];
+                for (const auto& p : ct.params) nombres.push_back(p.name);
+            }
         }
         // El constructor implicito que build_class_signatures() sintetiza
         // cuando la clase no declara ninguno (project.cpp): "un parametro
@@ -3365,6 +3488,8 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
             auto idx_it = sig_it->second.ctors.find(c.fields.size());
             if (idx_it != sig_it->second.ctors.end())
                 roles[static_cast<int>(idx_it->second)] = RolFuncion{c.name, "", false};
+            auto& nombres = cn.ctor_params[c.fields.size()];
+            for (const auto& f : c.fields) nombres.push_back(f.name);
         }
 
         clases[c.name] = std::move(cn);
@@ -3709,6 +3834,11 @@ std::string route_runtime_prelude() {
         "    if (!o.is_dict()) lux_native_fail(std::string(\"'\") + name + \"' on \" + o.type_name() + \", which has no fields\");\n"
         "    auto it = o.as_dict().find(name);\n"
         "    return it == o.as_dict().end() ? Value::null() : it->second;\n"
+        "}\n"
+        // Op::SetMember.
+        "inline void lux_json_set_member(Value o, const char* name, Value v) {\n"
+        "    if (!o.is_dict()) lux_native_fail(std::string(\"cannot assign '\") + name + \"' on \" + o.type_name());\n"
+        "    o.as_dict()[name] = std::move(v);\n"
         "}\n"
         // Op::IterList: what a `for` walks.
         "inline Value lux_iter(Value v) {\n"

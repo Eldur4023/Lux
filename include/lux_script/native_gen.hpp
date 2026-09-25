@@ -80,10 +80,6 @@ struct FirmaNativa {
 // el mapa (alfabetico) todavia no proceso.
 using TablaFirmas = std::unordered_map<std::string, FirmaNativa>;
 
-// The type native code holds a declared one in: `int?`, `string?`,
-// `List<int>?` may be null, so they are a Value (Json); anything else as
-// declared.
-Type tipo_nativo(const Type& t);
 
 // Un campo de clase ya reducido a su Type -- solo entra a ClaseNativa::campos
 // si es representable (ver tipo_elemento_contenedor_soportado en
@@ -143,9 +139,20 @@ struct ClaseNativa {
     std::unordered_map<std::string, FirmaNativa> metodos;
     std::vector<ReglaNativa>                      reglas;
     bool                                          reglas_ok = true;
+    // A class with a field that is not a scalar (a List, another class, a
+    // `?` class) is held as the VM holds every instance: a Value Dict. Its
+    // constructors without a body, by arity: the parameters they set.
+    bool                                           dinamica = false;
+    std::map<size_t, std::vector<std::string>>     ctor_params;
 };
 // Por nombre de clase Lux.
 using TablaClases = std::unordered_map<std::string, ClaseNativa>;
+
+// The type native code holds a declared one in: `int?`, `string?`,
+// `List<int>?` may be null, and a class held as a Dict (dinamica) is one,
+// so they are a Value (Json); so is a List/Dict whose elements are not one
+// native type. Anything else as declared.
+Type tipo_nativo(const Type& t, const TablaClases* clases = nullptr);
 
 // A que clase (y que papel) pertenece una funcion de la tabla global,
 // indexada igual que FunctionTable/nombre_por_indice: `metodo` vacio

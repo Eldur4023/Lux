@@ -73,12 +73,12 @@ bool es_value(const Type& t) {
 }
 
 TablaFirmas construir_firmas(const Program& prog, const FunctionSigs& sigs,
-                             const FunctionTable* chunks) {
+                             const FunctionTable* chunks, const TablaClases& clases) {
     TablaFirmas firmas;
     for (const auto& f : prog.functions) {
         FirmaNativa firma;
-        firma.retorno = tipo_nativo(Type::from_declared(f.return_type));
-        for (const auto& p : f.params) firma.params.push_back(tipo_nativo(Type::from_declared(p.type)));
+        firma.retorno = tipo_nativo(Type::from_declared(f.return_type), &clases);
+        for (const auto& p : f.params) firma.params.push_back(tipo_nativo(Type::from_declared(p.type), &clases));
         auto it = sigs.find(f.name);
         if (chunks && it != sigs.end() && it->second.index < chunks->size() && (*chunks)[it->second.index])
             firma.asincrona = (*chunks)[it->second.index]->has_await;
@@ -103,11 +103,11 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     for (const auto& [nombre, sig] : sigs)
         if (sig.index < nombre_por_indice.size()) nombre_por_indice[sig.index] = nombre;
 
-    TablaFirmas firmas = construir_firmas(prog, sigs, chunks);
 
     TablaClases clases;
     TablaRoles  roles;
     construir_clases(prog, clases_sig, sigs, &prog.imports, clases, roles);
+    TablaFirmas firmas = construir_firmas(prog, sigs, chunks, clases);
 
     // El texto de cada clase representable va ANTES que ningun prototipo/
     // cuerpo: un LPunto usado como parametro/retorno necesita el tipo
@@ -115,7 +115,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // clases que ordenar -- el lenguaje no admite una clase como campo de
     // otra (project.cpp), asi que el orden entre ellas es indiferente.
     std::string clases_texto;
-    for (const auto& [nombre, cn] : clases) clases_texto += generar_clase_runtime(nombre, cn) + "\n";
+    for (const auto& [nombre, cn] : clases)
+        if (!cn.dinamica) clases_texto += generar_clase_runtime(nombre, cn) + "\n";
 
     struct Generada {
         size_t      indice;
