@@ -50,6 +50,16 @@ check "draw after finish"     GET /draw_after_finish 500 'already saved'
 check "close twice"           GET /close_twice       200 '"first":true,"second":false'
 check "image that is not a PNG" GET /bad_image       500 'as a PNG'
 
+echo "== text_box / table =="
+check "text_box wraps and returns the y below" GET /long_table 200 '"wrapped":true'
+pages=$(pdfinfo /tmp/lux-pdf-table-test.pdf 2>/dev/null | awk '/^Pages:/ {print $2}')
+text=$(pdftotext /tmp/lux-pdf-table-test.pdf - 2>/dev/null)
+heads=$(printf '%s' "$text" | grep -o "Item" | wc -l)
+if [ "${pages:-0}" -ge 3 ] && [ "$heads" -eq "$pages" ] && printf '%s' "$text" | grep -q "Line 90"; then
+    ok "a long table breaks pages and repeats its header ($pages pages)"
+else fail "a long table breaks pages and repeats its header" ">= 3 pages, one header each, Line 90 present" "pages=$pages headers=$heads"; fi
+rm -f /tmp/lux-pdf-table-test.pdf
+
 echo "== send / text_width =="
 check "text_width measures" GET /width 200 '"wider":true,"positive":true'
 send_head=$(curl -sS -D - -o "$TMP/sent.pdf" "http://127.0.0.1:$PORT/send")

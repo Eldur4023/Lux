@@ -6,7 +6,7 @@
 #
 #   tests/run_extras.sh [path-to-binary]
 
-PORT=${LUX_TEST_EXTRAS_PORT:-8830}
+PORT=${LUX_TEST_EXTRAS_PORT:-8835}
 source "$(dirname "$0")/lib.sh"
 
 "$LUX" --check "$HERE/cases/extras.lux" > "$TMP/check" 2>&1 || {

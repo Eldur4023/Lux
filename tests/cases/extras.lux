@@ -9,7 +9,7 @@ import json
 import time
 
 app:
-    port 8830
+    port 8835
 
 get endpoint("/__ping__"):
     return { "ok": true }
