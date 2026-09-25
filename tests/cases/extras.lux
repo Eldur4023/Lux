@@ -3,6 +3,7 @@
 # (run_extras.sh), skipped on a binary built without them.
 import gzip
 import crypto
+import image
 import os
 import json
 import time
@@ -66,3 +67,31 @@ get endpoint("/crypto/attacks"):
     string pub = await os.read_file(pem("rsa.pub"))
     string none_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0."
     return { "none": crypto.jwt_verify(none_token, pub), "hs256_with_public_key": crypto.jwt_verify("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln", pub), "rs_alg_on_ec_key": crypto.verify("RS256", await os.read_file(pem("ec.pub")), "x", "c2ln") }
+
+fn string tmp(string name):
+    return os.path_join(os.getenv("LUX_TEST_TMP", "/tmp"), name)
+
+get endpoint("/image/basic"):
+    Json info = await image.info(tmp("src.png"))
+    Json jpg = await image.resize(tmp("src.png"), tmp("a.jpg"), { "width": 20 })
+    Json jpg_info = await image.info(tmp("a.jpg"))
+    Json cover = await image.resize(tmp("src.png"), tmp("b.webp"), { "width": 10, "height": 10, "fit": "cover" })
+    Json contain = await image.resize(tmp("src.png"), tmp("c.png"), { "width": 10, "height": 10 })
+    Json fill = await image.resize(tmp("src.png"), tmp("d.png"), { "width": 10, "height": 10, "fit": "fill" })
+    Json webp_info = await image.info(tmp("b.webp"))
+    return { "info": info, "jpg": jpg, "jpg_info": jpg_info, "cover": cover, "contain": contain, "fill": fill, "webp_info": webp_info }
+
+get endpoint("/image/exif"):
+    Json info = await image.info(tmp("rotated.jpg"))
+    Json out = await image.resize(tmp("rotated.jpg"), tmp("upright.jpg"))
+    return { "info": info, "out": out }
+
+get endpoint("/image/bomb"):
+    return await image.info(tmp("bomb.png"))
+
+get endpoint("/image/bomb_resize"):
+    return await image.resize(tmp("bomb.png"), tmp("never.png"), { "width": 10 })
+
+get endpoint("/image/not_an_image"):
+    await os.write_file(tmp("fake.jpg"), "hello")
+    return await image.resize(tmp("fake.jpg"), tmp("never.png"))

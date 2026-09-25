@@ -31,6 +31,18 @@ json.dump({"keys": [{"kty": "RSA", "kid": "k1", "alg": "RS256", "n": b64(bytes.f
           open(f"{d}/rsa.jwks", "w"))
 PY
 
+# A 40x20 RGBA PNG and a PNG that claims 100000x100000, from the stdlib alone.
+python3 - "$TMP" <<'PY'
+import struct, sys, zlib
+d = sys.argv[1]
+def png(path, w, h, rows):
+    chunk = lambda t, b: struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b))
+    open(path, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                          + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+png(f"{d}/src.png", 40, 20, b"".join(b"\0" + bytes(sum(([x * 6, y * 12, 128, 255] for x in range(40)), [])) for y in range(20)))
+png(f"{d}/bomb.png", 100000, 100000, b"\0" * 16)
+PY
+
 cd "$HERE/.."
 start_server "$HERE/cases/extras.lux" || exit 1
 ok "starts"
@@ -76,5 +88,27 @@ check "RS256 JWT round trip, aud/iss checked" GET /crypto/jwt/RS256/rsa 200 '"cl
 check "ES256 JWT, wrong aud / expired are null" GET /crypto/jwt/ES256/ec 200 '"wrong_aud":null,"expired":null'
 check "a JWKS picks the key by kid"   GET /crypto/jwk     200 '"claims":{"sub":"jwk"},"unknown_kid":null'
 check "alg none, HS256 confusion, alg/key mismatch" GET /crypto/attacks 200 '"none":null,"hs256_with_public_key":null,"rs_alg_on_ec_key":false'
+
+echo "== image =="
+check "image.info"                 GET /image/basic 200 '"info":{"width":40,"height":20,"format":"png"}'
+check "resize by width keeps aspect, to JPEG" GET /image/basic 200 '"jpg":{"width":20,"height":10},"jpg_info":{"width":20,"height":10,"format":"jpeg"}'
+check "cover / contain / fill"      GET /image/basic 200 '"cover":{"width":10,"height":10},"contain":{"width":10,"height":5},"fill":{"width":10,"height":10}'
+check "WebP out"                    GET /image/basic 200 '"webp_info":{"width":10,"height":10,"format":"webp"}'
+# The 20x10 JPEG with an EXIF orientation 6 (rotate 90) and a GPS-ish tag.
+python3 - "$TMP" <<'PY'
+import struct, sys
+d = sys.argv[1]
+jpg = open(f"{d}/a.jpg", "rb").read()
+ifd = struct.pack("<H", 1) + struct.pack("<HHII", 0x0112, 3, 1, 6) + struct.pack("<I", 0)
+tiff = b"II*\0" + struct.pack("<I", 8) + ifd
+app1 = b"Exif\0\0" + tiff + b"SECRET-GPS"
+open(f"{d}/rotated.jpg", "wb").write(jpg[:2] + b"\xff\xe1" + struct.pack(">H", len(app1) + 2) + app1 + jpg[2:])
+PY
+check "EXIF orientation is applied"  GET /image/exif 200 '"info":{"width":10,"height":20,"format":"jpeg"},"out":{"width":10,"height":20}'
+if grep -q "SECRET-GPS\|Exif" "$TMP/upright.jpg"; then fail "the output carries no metadata" "no EXIF" "EXIF still there"
+else ok "the output carries no metadata"; fi
+check "a huge canvas is refused before decoding" GET /image/bomb_resize 500 'too large'
+check "image.info reads only the header"          GET /image/bomb 200 '"width":100000'
+check "not an image"                 GET /image/not_an_image 500 'is not a JPEG, PNG or WebP image'
 
 summary
