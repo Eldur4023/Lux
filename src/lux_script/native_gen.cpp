@@ -3022,75 +3022,98 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     const auto en_patron = pattern_params(route.pattern);
     std::vector<ParamRuta> params;
     bool cuerpo_visto = false;
-    for (const auto& p : route.params) {
-        // Fase 5.7: un parametro cuyo tipo es una clase representable
-        // (TablaClases) y SIN validate: se enlaza al cuerpo de la
-        // peticion -- misma idea que bind_params() (project.cpp), pero
-        // reproducida a mano aqui por el mismo motivo que el resto de esta
-        // funcion: bind_params todavia no ha corrido cuando
-        // compile_native() llama a esto (ver el comentario grande sobre
-        // el orden en compile(), project.cpp), asi que las reglas
-        // estructurales ("un unico parametro de cuerpo", "GET/DELETE no
-        // llevan cuerpo", "no puede estar en el patron") se repiten aqui.
-        // Si algo no encaja, esta ruta cae a bytecode y bind_params dara
-        // el error real (o la aceptara, si el problema era solo que esta
-        // fase no llega) -- nunca un handler nativo silenciando un caso
-        // que bind_params habria rechazado.
-        auto cit = clases.find(p.type.name);
-        if (cit != clases.end() && cit->second.dinamica)
-            return no("parameter " + p.name + ": a class with List or class fields");
-        if (cit != clases.end()) {
-            if (p.type.optional) return no("parameter " + p.name + ": an optional body"); // fuera de alcance
-            bool en_path_cuerpo = std::find(en_patron.begin(), en_patron.end(), p.name) !=
-                                  en_patron.end();
-            if (en_path_cuerpo) return std::nullopt;
-            if (route.method == "GET" || route.method == "DELETE") return std::nullopt;
-            if (cuerpo_visto) return std::nullopt;
-            if (!cit->second.reglas_ok) return no("parameter " + p.name + ": its class rules"); // ver el comentario de ClaseNativa
-            cuerpo_visto = true;
+    // The parameters this code binds itself (scalars, a class body of
+    // scalars); any other (File, List<File>, `?`, a Dict class body) and
+    // the route calls the bytecode binder (prepare_args, project.cpp)
+    // instead, getting Values -- the same 422/400s, the same File values.
+    auto enlace_nativo = [&]() -> bool {
+        for (const auto& p : route.params) {
+            // Fase 5.7: un parametro cuyo tipo es una clase representable
+            // (TablaClases) y SIN validate: se enlaza al cuerpo de la
+            // peticion -- misma idea que bind_params() (project.cpp), pero
+            // reproducida a mano aqui por el mismo motivo que el resto de esta
+            // funcion: bind_params todavia no ha corrido cuando
+            // compile_native() llama a esto (ver el comentario grande sobre
+            // el orden en compile(), project.cpp), asi que las reglas
+            // estructurales ("un unico parametro de cuerpo", "GET/DELETE no
+            // llevan cuerpo", "no puede estar en el patron") se repiten aqui.
+            // Si algo no encaja, esta ruta cae a bytecode y bind_params dara
+            // el error real (o la aceptara, si el problema era solo que esta
+            // fase no llega) -- nunca un handler nativo silenciando un caso
+            // que bind_params habria rechazado.
+            auto cit = clases.find(p.type.name);
+            if (cit != clases.end() && cit->second.dinamica)
+                return false;
+            if (cit != clases.end()) {
+                if (p.type.optional) return false; // fuera de alcance
+                bool en_path_cuerpo = std::find(en_patron.begin(), en_patron.end(), p.name) !=
+                                      en_patron.end();
+                if (en_path_cuerpo) return false;
+                if (route.method == "GET" || route.method == "DELETE") return false;
+                if (cuerpo_visto) return false;
+                if (!cit->second.reglas_ok) return false; // ver el comentario de ClaseNativa
+                cuerpo_visto = true;
+                ParamRuta pr;
+                pr.nombre    = p.name;
+                pr.tipo      = Type::class_ref(p.type.name);
+                pr.en_path   = false;
+                pr.es_cuerpo = true;
+                pr.clase     = &cit->second;
+                params.push_back(std::move(pr));
+                continue;
+            }
+
+            // Alcance de este primer corte (ver el comentario de RutaNativa en
+            // el header): sin `?`, y solo los cuatro escalares -- un
+            // File/List<File> nunca produce ninguno de esos Type::Kind, asi
+            // que ya queda excluido por la misma comprobacion.
+            if (p.type.optional) return false;
+            Type t = Type::from_declared(p.type);
+            if (t.kind() != Type::Kind::Int && t.kind() != Type::Kind::Float &&
+                t.kind() != Type::Kind::Bool && t.kind() != Type::Kind::String)
+                return false;
+            bool en_path = std::find(en_patron.begin(), en_patron.end(), p.name) != en_patron.end();
+
+            bool        con_defecto = false;
+            std::string texto_defecto;
+            if (p.default_value) {
+                // "un parametro de ruta no puede tener valor por defecto" -- la
+                // misma regla que bind_params() (project.cpp): si esta ruta
+                // llega a compilar de todas formas (no deberia, bind_params la
+                // rechazara en build_routes), mejor que se quede en bytecode a
+                // que un handler nativo silencie el error.
+                if (en_path) return false;
+                // Mismo extractor EXACTO que bind_params(): solo constantes
+                // literales, resueltas aqui, en tiempo de compilacion -- un
+                // valor por defecto que no sea uno de estos tres tipos de
+                // literal ya es un error de compilacion en bind_params, asi
+                // que esta ruta tampoco necesita intentarlo.
+                const Expr& d = *p.default_value;
+                if (d.kind == ExprKind::StringLit) texto_defecto = d.text;
+                else if (d.kind == ExprKind::IntLit) texto_defecto = std::to_string(d.int_value);
+                else if (d.kind == ExprKind::BoolLit) texto_defecto = d.bool_value ? "true" : "false";
+                else return false;
+                con_defecto = true;
+            }
+            params.push_back({p.name, std::move(t), en_path, con_defecto, std::move(texto_defecto)});
+        }
+        return true;
+    };
+    const bool preparar = !enlace_nativo();
+    bool con_archivos = false;
+    if (preparar) {
+        params.clear();
+        for (const auto& p : route.params) {
+            const Type t = Type::from_declared(p.type);
+            const std::string ts = t.to_string();
+            con_archivos |= ts == "File" || ts == "List<File>";
+            const bool escalar = !t.is_optional() && (t.kind() == Type::Kind::Int || t.kind() == Type::Kind::Float ||
+                                                      t.kind() == Type::Kind::Bool || t.kind() == Type::Kind::String);
             ParamRuta pr;
-            pr.nombre    = p.name;
-            pr.tipo      = Type::class_ref(p.type.name);
-            pr.en_path   = false;
-            pr.es_cuerpo = true;
-            pr.clase     = &cit->second;
+            pr.nombre = p.name;
+            pr.tipo   = escalar ? t : Type::json();
             params.push_back(std::move(pr));
-            continue;
         }
-
-        // Alcance de este primer corte (ver el comentario de RutaNativa en
-        // el header): sin `?`, y solo los cuatro escalares -- un
-        // File/List<File> nunca produce ninguno de esos Type::Kind, asi
-        // que ya queda excluido por la misma comprobacion.
-        if (p.type.optional) return no("parameter " + p.name + ": optional (?)");
-        Type t = Type::from_declared(p.type);
-        if (t.kind() != Type::Kind::Int && t.kind() != Type::Kind::Float &&
-            t.kind() != Type::Kind::Bool && t.kind() != Type::Kind::String)
-            return no("parameter " + p.name + ": type " + t.to_string());
-        bool en_path = std::find(en_patron.begin(), en_patron.end(), p.name) != en_patron.end();
-
-        bool        con_defecto = false;
-        std::string texto_defecto;
-        if (p.default_value) {
-            // "un parametro de ruta no puede tener valor por defecto" -- la
-            // misma regla que bind_params() (project.cpp): si esta ruta
-            // llega a compilar de todas formas (no deberia, bind_params la
-            // rechazara en build_routes), mejor que se quede en bytecode a
-            // que un handler nativo silencie el error.
-            if (en_path) return std::nullopt;
-            // Mismo extractor EXACTO que bind_params(): solo constantes
-            // literales, resueltas aqui, en tiempo de compilacion -- un
-            // valor por defecto que no sea uno de estos tres tipos de
-            // literal ya es un error de compilacion en bind_params, asi
-            // que esta ruta tampoco necesita intentarlo.
-            const Expr& d = *p.default_value;
-            if (d.kind == ExprKind::StringLit) texto_defecto = d.text;
-            else if (d.kind == ExprKind::IntLit) texto_defecto = std::to_string(d.int_value);
-            else if (d.kind == ExprKind::BoolLit) texto_defecto = d.bool_value ? "true" : "false";
-            else return no("parameter " + p.name + ": its default");
-            con_defecto = true;
-        }
-        params.push_back({p.name, std::move(t), en_path, con_defecto, std::move(texto_defecto)});
     }
 
     // check_route declara los parametros de la ruta, en orden, antes que
@@ -3199,7 +3222,26 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         cuerpo += "    auto& l_pinned_workers = l_ctx.pinned_workers;\n"
                   "    auto& l_last_exec_workers = l_ctx.last_exec_workers;\n"
                   "    auto& l_poisoned_db = l_ctx.poisoned_db;\n";
+    if (preparar) {
+        if (con_archivos)
+            cuerpo += "    std::vector<lux::MultipartPart> l__parts;\n"
+                      "    if (auto p = lux::parse_multipart(req)) { l__parts = std::move(*p); l_ctx.parts = &l__parts; l_ctx.uploads = true; }\n";
+        cuerpo += "    std::vector<Value> l__args;\n"
+                  "    if (!lux_script::prepare_native_args(g_lux_binds, " + std::to_string(indice) +
+                  ", req, res, l_ctx, l__args)) { " + gen.ret_vacio() + " }\n";
+        for (size_t i = 0; i < params.size(); ++i) {
+            const Type& t = params[i].tipo;
+            const std::string v = "l__args[" + std::to_string(i) + "]";
+            const std::string val = t.kind() == Type::Kind::Int    ? v + ".as_int()"
+                                  : t.kind() == Type::Kind::Float  ? v + ".as_float()"
+                                  : t.kind() == Type::Kind::Bool   ? v + ".as_bool()"
+                                  : t.kind() == Type::Kind::String ? v + ".as_str()"
+                                                                   : v;
+            cuerpo += "    " + tipo_cpp(t) + " " + nombre_cpp(params[i].nombre) + " = " + val + ";\n";
+        }
+    }
     for (const auto& p : params) {
+        if (preparar) break;
         if (p.es_cuerpo) {
             cuerpo += codigo_bind_cuerpo(p.nombre, p.tipo.class_name(), *p.clase, gen);
             continue;
@@ -3788,7 +3830,9 @@ std::string route_runtime_prelude() {
         "static decltype(lux_script::NativeCtx::templates) g_lux_templates = nullptr;\n"
         "static const lux_script::AuthConfig* g_lux_auth = nullptr;\n"
         "static const std::map<std::string, size_t>* g_lux_template_keys = nullptr;\n"
-        "extern \"C\" void lux_native_bind(const void* f, const void* t, const void* a, const void* k) {\n"
+        "static const void* g_lux_binds = nullptr;\n"
+        "extern \"C\" void lux_native_bind(const void* f, const void* t, const void* a, const void* k, const void* b) {\n"
+        "    g_lux_binds = b;\n"
         "    g_lux_functions = static_cast<decltype(g_lux_functions)>(f);\n"
         "    g_lux_templates = static_cast<decltype(g_lux_templates)>(t);\n"
         "    g_lux_auth = static_cast<const lux_script::AuthConfig*>(a);\n"

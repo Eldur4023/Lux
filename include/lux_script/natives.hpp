@@ -207,6 +207,13 @@ std::vector<std::string>& last_validation_messages();
 // inside it gets the same NativeCtx bytecode would give it.
 NativeCtx*& current_native_ctx();
 
+// A --native route whose parameters its own code does not bind (File, `?`,
+// a Dict class body) binds them with bytecode's prepare_args(): `binds` is
+// what NativeModule::bind handed it (Module::native_binds), `route` its
+// index. False when it already answered (a 422/400).
+bool prepare_native_args(const void* binds, size_t route, lux::Request& req, lux::Response& res,
+                         NativeCtx& ctx, std::vector<Value>& out);
+
 // The real message of the last runtime error (division by zero, index out
 // of range, ...) on this thread -- same idea and same one-request lifetime
 // as last_validation_messages() above, filled right before the route's own

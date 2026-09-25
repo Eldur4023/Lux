@@ -1954,6 +1954,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         // never fail here if it already passed there.
         std::vector<ParamBind> binds;
         if (!bind_params(r, classes, binds, diags)) continue;
+        if (mod.native_binds)
+            (*static_cast<std::vector<std::vector<ParamBind>>*>(mod.native_binds.get()))[ridx] = binds;
 
         // Nivel 1.5: ruta compilada nativamente (Fase 4/5, --native). Mismo
         // criterio de "todo o nada" que una funcion: generate_native_route()
@@ -2133,6 +2135,12 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
 } // namespace
 
+bool prepare_native_args(const void* binds, size_t route, lux::Request& req, lux::Response& res,
+                         NativeCtx& ctx, std::vector<Value>& out) {
+    const auto& all = *static_cast<const std::vector<std::vector<ParamBind>>*>(binds);
+    return prepare_args(all.at(route), ctx.functions, req, res, ctx, out);
+}
+
 // ─── Compilation ─────────────────────────────────────────────────────────────
 
 std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
@@ -2287,8 +2295,10 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.session_secure  = mod->program.app.session_secure;
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
+        if (mod->native) mod->native_binds = std::make_shared<std::vector<std::vector<ParamBind>>>(mod->program.routes.size());
         if (mod->native && mod->native->bind)
-            mod->native->bind(&mod->functions, &mod->templates, &mod->auth, &mod->template_keys);
+            mod->native->bind(&mod->functions, &mod->templates, &mod->auth, &mod->template_keys,
+                              mod->native_binds.get());
 
         if (diags.empty()) build_routes(*mod, classes, auth, fns, sigs, enums, diags);
         if (diags.empty()) build_error_handlers(*mod, fns, sigs, enums, diags);
