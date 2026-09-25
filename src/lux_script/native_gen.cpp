@@ -2180,9 +2180,21 @@ public:
                 ++i;
                 continue;
             }
-            s += p + stmt(*b[i], indent) + "\n";
+            s += p + donde(*b[i]) + stmt(*b[i], indent) + "\n";
         }
         return s;
+    }
+
+    // A route notes where each statement is, for its 500's "at" and the log
+    // (bytecode gives the failing instruction's file:line:col). A local, not
+    // a thread_local: in a dlopen'ed .so every access to one is a call.
+    std::string donde(const IrStmt& s) const {
+        if (!ruta_ || s.kind == IrStmtKind::Break || s.kind == IrStmtKind::Continue) return "";
+        const IrExpr* v = s.value.get();
+        if (v && v->kind == IrExprKind::Await && v->lhs) v = v->lhs.get();
+        const SourceLoc& l = v ? v->loc : s.loc;
+        if (!l.file) return "";
+        return "l__at = " + literal_string(*l.file + ":" + std::to_string(l.line) + ":" + std::to_string(l.col)) + "; ";
     }
 
     // A condition, truthy the way the VM tests it: an empty string or List
@@ -3142,7 +3154,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // usar gen.ret_vacio() en el 400 de un parametro invalido -- registrar()
     // (que si depende de `params`) se llama despues, mas abajo.
     Generador gen(nombre_por_indice, comprobador, /*ruta=*/true, asincrona);
-    std::string cuerpo = "{\n    try {\n";
+    std::string cuerpo = "{\n    const char* l__at = " + donde + ";\n    try {\n";
     // Igual que prepare_args() (project.cpp) al principio de CUALQUIER
     // ruta bytecode, no solo una con parametro de cuerpo: si esta peticion
     // termina en un codigo con `on error <code>:` declarado, ese manejador
@@ -3300,11 +3312,12 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // main.cpp regardless of this branch even running -- --native's
     // runtime errors never reached it at all.
     cuerpo += "        lux_script::last_internal_error() = lux_native_error_message();\n";
+    cuerpo += "        lux::log().error(std::string(l__at) + \": \" + lux_native_error_message());\n";
     cuerpo += "        if (lux_script::is_production_mode()) {\n";
     cuerpo += "            __e[\"error\"] = Value::str(\"Internal Server Error\");\n";
     cuerpo += "        } else {\n";
     cuerpo += "            __e[\"error\"] = Value::str(lux_native_error_message());\n";
-    cuerpo += "            __e[\"at\"] = Value::str(" + donde + ");\n";
+    cuerpo += "            __e[\"at\"] = Value::str(l__at);\n";
     cuerpo += "        }\n";
     cuerpo += "        res.status(500).header(\"Content-Type\", \"application/json; charset=utf-8\")"
               ".send(Value::dict(std::move(__e)).to_json_text());\n";
