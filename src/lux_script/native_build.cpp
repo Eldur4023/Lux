@@ -271,7 +271,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // datos.
     if (con_rutas)
         codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
-                  "#include <lux/task.hpp>\n#include <lux_script/db.hpp>\n\n" +
+                  "#include <lux/task.hpp>\n#include <lux/blocking_pool.hpp>\n"
+                  "#include <lux_script/db.hpp>\n#include <lux_script/builtin_module.hpp>\n\n" +
                   route_runtime_prelude() + "\n";
     codigo += clases_texto + "\n" + prototipos + "\n" + cuerpos;
     if (con_rutas) codigo += rutas_cuerpos;

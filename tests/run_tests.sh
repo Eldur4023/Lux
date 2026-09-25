@@ -485,6 +485,7 @@ compiles    "example/ app compiles"     "$HERE/../example"
 native_compiles "--native compiles the sqlite suite"   "$HERE/cases/sqlite.lux"   23
 native_compiles "--native compiles the postgres suite" "$HERE/cases/postgres.lux" 21
 native_compiles "--native compiles the mysql suite"    "$HERE/cases/mysql.lux"    16
+native_compiles "--native compiles module calls"      "$HERE/cases/modules.lux"  58
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"
 fails_to_compile "object out of place" "$HERE/cases/bad/sse.lux"      "only exists inside a route sse"

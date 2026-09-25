@@ -1,5 +1,6 @@
 #include <lux_script/native_gen.hpp>
 #include <lux_script/natives.hpp>
+#include <lux_script/builtin_module.hpp>
 
 #include <algorithm>
 #include <cstdio>
@@ -301,6 +302,21 @@ public:
     // lo usa para generar una corrutina de verdad en vez de una funcion
     // plana.
     bool usa_await() const { return usa_await_; }
+    // A native module call needs the route's req/res (a module function
+    // takes a NativeCtx): only a route can host one, so a function or
+    // method that makes one stays in bytecode.
+    bool usa_modulo() const { return usa_modulo_; }
+
+    // A module call is representable when every argument is a value that
+    // becomes a Value; it is typed by its signature's return.
+    bool argumentos_modulo(const IrExpr& call) const {
+        for (const auto& a : call.args)
+            if (!a.value || !es_valor_json(*a.value)) return false;
+        return true;
+    }
+    static Type tipo_retorno_modulo(const BuiltinModuleFn& fn) {
+        return fn.returns.empty() ? Type::json() : Type::from_legacy_name(fn.returns);
+    }
 
     // Fase 5.6: ¿demostro tipo_provable() algun `await <modulo>.begin()` en
     // lo que llevamos comprobado? Igual que usa_await_: puesto a verdad,
@@ -483,6 +499,13 @@ public:
                     if (!t || t->kind() != Type::Kind::Int) return std::nullopt;
                     usa_await_ = true;
                     return Type::void_();
+                }
+
+                if (call.call_shape == IrCallShape::BuiltinModuleCall) {
+                    const BuiltinModuleFn& fn = builtin_module_function_at(call.call_index);
+                    if (!fn.is_async || !argumentos_modulo(call)) return std::nullopt;
+                    usa_await_ = usa_modulo_ = true;
+                    return tipo_retorno_modulo(fn);
                 }
 
                 if (call.call_shape == IrCallShape::DbModuleCall) {
@@ -992,6 +1015,12 @@ public:
                             return Type::primitive(Type::Kind::Int);
                     }
                 }
+                if (e.call_shape == IrCallShape::BuiltinModuleCall) {
+                    const BuiltinModuleFn& fn = builtin_module_function_at(e.call_index);
+                    if (fn.is_async || !argumentos_modulo(e)) return std::nullopt;
+                    usa_modulo_ = true;
+                    return tipo_retorno_modulo(fn);
+                }
                 return std::nullopt;
             }
         }
@@ -1203,6 +1232,7 @@ private:
     std::map<int, Type>              ranura_tipos_;
     mutable bool                     usa_await_ = false;
     mutable bool                     usa_transaccion_ = false;
+    mutable bool                     usa_modulo_ = false;
 };
 
 // ── Generacion ────────────────────────────────────────────────────────────
@@ -1395,6 +1425,7 @@ public:
             }
 
             case IrExprKind::Call: {
+                if (e.call_shape == IrCallShape::BuiltinModuleCall) return llamada_modulo(e, false);
                 // ClassName(args...): el UNICO constructor de la clase C++
                 // generada (generar_clase_runtime) es, a proposito, el
                 // automapeo -- un valor por campo, en orden -- asi que
@@ -1621,11 +1652,31 @@ public:
                 // Parenthesized: co_await binds looser than `.`, so `return
                 // await db.query(...)` became `co_await X.to_json_text()` --
                 // a g++ error that sent the WHOLE module back to bytecode.
+                if (e.lhs->call_shape == IrCallShape::BuiltinModuleCall) return llamada_modulo(*e.lhs, true);
                 return "lux_db_ok(co_await " + llamada_db(*e.lhs) + ")";
 
             default:
                 return ""; // inalcanzable: Comprobador ya lo descarto antes de llegar aqui
         }
+    }
+
+    // `hash.sha256(s)` / `await http.get(url)`: the module function itself,
+    // through the same BuiltinModuleFn::call() bytecode uses (signature
+    // check included), with a NativeCtx over this route's req/res. Its
+    // result is converted to the C++ type its signature declares.
+    std::string llamada_modulo(const IrExpr& call, bool awaited) const {
+        std::string params = "lux_db_params(";
+        for (size_t i = 0; i < call.args.size(); ++i) params += (i ? ", " : "") + valor_json(*call.args[i].value);
+        params += ")";
+        const std::string id = std::to_string(call.call_index);
+        const std::string v = awaited ? "(co_await lux_module_await(req, res, " + id + ", " + params + "))"
+                                      : "lux_module_call(req, res, " + id + ", " + params + ")";
+        const std::string& r = builtin_module_function_at(call.call_index).returns;
+        if (r == "string") return "lux_module_str(" + v + ")";
+        if (r == "int")    return "lux_module_int(" + v + ")";
+        if (r == "bool")   return "lux_module_bool(" + v + ")";
+        if (r == "float")  return "lux_module_float(" + v + ")";
+        return v;
     }
 
     // The await_db(...) call for `await <module>.query/exec/...(...)`, without
@@ -1825,9 +1876,11 @@ public:
     // JSON y escribe la respuesta, igual que la cola de build_routes
     // (project.cpp) hace con el `Value` que devuelve el VM -- `nullptr`
     // (un `return` sin valor) es el 204 vacio de esa misma cola.
+    // Like bytecode's ctx.response_written: when something in the body
+    // already wrote the response (pdf.send()), the return value is dropped.
     std::string respuesta_de_retorno(const IrExpr* e) const {
-        if (!e) return "res.status(204).send(\"\"); " + ret_vacio();
-        return "res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
+        if (!e) return "if (!res.is_committed()) res.status(204).send(\"\"); " + ret_vacio();
+        return "if (!res.is_committed()) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
                valor_json(*e) + ".to_json_text()); " + ret_vacio();
     }
 
@@ -2063,7 +2116,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // funcion nativa, nunca con `co_await`, asi que suspenderse a mitad no
     // tiene a quien avisar). Rechazar aqui dejala en bytecode entera, igual
     // que cualquier otra pieza fuera de alcance.
-    if (comprobador.usa_await()) return std::nullopt;
+    if (comprobador.usa_await() || comprobador.usa_modulo()) return std::nullopt;
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
@@ -2175,7 +2228,7 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     // funcion nativa, nunca con `co_await`, asi que suspenderse a mitad no
     // tiene a quien avisar). Rechazar aqui dejala en bytecode entera, igual
     // que cualquier otra pieza fuera de alcance.
-    if (comprobador.usa_await()) return std::nullopt;
+    if (comprobador.usa_await() || comprobador.usa_modulo()) return std::nullopt;
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
@@ -2645,7 +2698,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // mismo cierre de transaccion que cualquier otra salida.
     if (asincrona && comprobador.usa_transaccion())
         cuerpo += "    co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop);\n";
-    cuerpo += "    res.status(204).send(\"\");\n";
+    cuerpo += "    if (!res.is_committed()) res.status(204).send(\"\");\n";
     cuerpo += "    } catch (const LuxNativeError&) {\n";
     cuerpo += "        Value::Dict __e;\n";
     // is_production_mode() (natives.hpp) -- same function bytecode's own
@@ -3070,6 +3123,29 @@ std::string route_runtime_prelude() {
     // tenga pinta de numero decimal, para que --native nunca acepte (o
     // rechace) un valor que bytecode habria tratado distinto.
     return
+        // Module calls (Generador::llamada_modulo): the function, a
+        // NativeCtx over the route's req/res, a failure raised.
+        "inline Value lux_module_call(lux::Request& req, lux::Response& res, int id, std::vector<Value> args) {\n"
+        "    lux_script::NativeCtx ctx{req, res};\n"
+        "    std::string e;\n"
+        "    Value v = lux_script::builtin_module_function_at(id).call(ctx, args, e);\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    return v;\n"
+        "}\n"
+        "inline lux::Task<Value> lux_module_await(lux::Request& req, lux::Response& res, int id, std::vector<Value> args) {\n"
+        "    lux_script::NativeCtx ctx{req, res};\n"
+        "    std::string e;\n"
+        "    Value v;\n"
+        "    co_await lux::BlockingAwaitable{req.loop, [&] {\n"
+        "        v = lux_script::builtin_module_function_at(id).call(ctx, args, e);\n"
+        "    }, &lux::io_blocking_pool()};\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    co_return v;\n"
+        "}\n"
+        "inline std::string lux_module_str(const Value& v) { return v.is_str() ? v.as_str() : v.to_string(); }\n"
+        "inline int64_t lux_module_int(const Value& v) { return v.is_int() ? v.as_int() : v.is_float() ? static_cast<int64_t>(v.as_float()) : 0; }\n"
+        "inline bool lux_module_bool(const Value& v) { return v.truthy(); }\n"
+        "inline double lux_module_float(const Value& v) { return v.is_num() ? v.as_float() : 0.0; }\n"
         // A failed database call raises, as in bytecode (db_failed, db.hpp).
         "inline lux_script::Value lux_db_ok(lux_script::Value v) {\n"
         "    std::string m;\n"
