@@ -30,54 +30,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+#include <lux/mime.hpp>
+
 namespace lux {
 
 namespace {
 
-
-// Without the right Content-Type a <track> subtitle (.vtt) is silently
-// ignored and an HLS player refuses the manifest/segments (.m3u8/.ts).
-static const char* mime_for_ext(const std::string& ext) {
-    static constexpr std::pair<std::string_view, const char*> kMime[] = {
-        {".html",  "text/html; charset=utf-8"},
-        {".htm",   "text/html; charset=utf-8"},
-        {".css",   "text/css; charset=utf-8"},
-        {".js",    "application/javascript; charset=utf-8"},
-        {".json",  "application/json; charset=utf-8"},
-        {".svg",   "image/svg+xml"},
-        {".png",   "image/png"},
-        {".jpg",   "image/jpeg"},
-        {".jpeg",  "image/jpeg"},
-        {".gif",   "image/gif"},
-        {".webp",  "image/webp"},
-        {".ico",   "image/x-icon"},
-        {".woff",  "font/woff"},
-        {".woff2", "font/woff2"},
-        {".ttf",   "font/ttf"},
-        {".pdf",   "application/pdf"},
-        {".xml",   "application/xml"},
-        {".txt",   "text/plain; charset=utf-8"},
-        {".wasm",  "application/wasm"},
-        {".mjs",   "application/javascript; charset=utf-8"},
-        {".map",   "application/json; charset=utf-8"},
-        {".mp4",   "video/mp4"},
-        {".webm",  "video/webm"},
-        {".mp3",   "audio/mpeg"},
-        {".ogg",   "audio/ogg"},
-        {".avif",  "image/avif"},
-        {".vtt",   "text/vtt; charset=utf-8"},
-        {".m3u8",  "application/vnd.apple.mpegurl"},
-        {".ts",    "video/mp2t"},
-        {".mkv",   "video/x-matroska"},
-        {".flac",  "audio/flac"},
-        {".wav",   "audio/wav"},
-        {".m4a",   "audio/mp4"},
-        {".csv",   "text/csv; charset=utf-8"},
-    };
-    for (auto& [e, mime] : kMime)
-        if (ext == e) return mime;
-    return "application/octet-stream";
-}
 
 // Weak ETag from mtime + size: "mtime-size" hex-encoded.
 static std::string make_etag(const std::filesystem::file_time_type& mtime,
@@ -252,7 +210,7 @@ static bool try_serve_static(
                 ? "public, max-age=31536000, immutable"
                 : "public, max-age=3600, must-revalidate";
 
-        const char* mime = mime_for_ext(ext);
+        const char* mime = mime_for_ext(ext);  // lux/mime.hpp
         res.header("ETag",          etag);
         res.header("Cache-Control", cache_ctrl);
         res.header("Content-Type",  mime);

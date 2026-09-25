@@ -2,6 +2,7 @@
 #include <string>
 #include <unordered_map>
 #include <string_view>
+#include <lux/mime.hpp>
 #include <fstream>
 #include <filesystem>
 #include <memory>
@@ -189,6 +190,10 @@ public:
     // Advertises Range support up front, on the FIRST (non-ranged) response
     // too -- a client has to see this before it knows it may ask for a range.
     Response& send_file(const std::filesystem::path& path, std::uintmax_t known_size) {
+        // Without a Content-Type, `nosniff` (sent by default) leaves the
+        // browser nothing to go on: an image downloads instead of showing.
+        if (!has_header_ci(state_->headers, "Content-Type"))
+            header("Content-Type", mime_for_ext(path.extension().string()));
         state_->sendfile_path = path.string();
         state_->sendfile_size = known_size;
         state_->body_committed = true;

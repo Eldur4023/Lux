@@ -1,34 +1,13 @@
-// Live-handle subprocess module (NATIVE-MODULES.md): start a subprocess and
-// keep talking to it across multiple calls -- unlike os.run() (os.cpp),
-// which spawns, drains both pipes to completion, and waits, all inside one
-// blocking call. That shape covers a command that runs to completion in
-// under os.run()'s own 15s ceiling and hands its whole output back at
-// once; it has no way to express "start this now, keep it running for the
-// next two hours, and let a LATER, DIFFERENT request read from it, check
-// on it, or kill it" -- exactly the shape a transcoding session (ffmpeg
-// writing HLS segments while a viewer's browser polls playback, a seek
-// killing and restarting it, a background re-encode a status page polls
-// for hours) actually needs. `start()` returns an opaque `int` handle
-// immediately, without waiting for the child to write anything or exit;
-// `read()`/`alive()`/`wait()`/`kill()`/`close()` operate on that handle
-// from whatever later request needs to.
-//
-// This is the exact same cross-request-lifetime problem `rooms` (rooms.cpp)
-// solves for WebSocket connections, solved the same way: a mutex-protected
-// registry keyed by an opaque int handle (ProcRegistry here, the same
-// pattern `csv`/`pdf`'s HandleTable already uses for their own handles).
-// It needs LESS care than rooms.cpp's weak_ptr/lifetime tracking, though:
-// a WSConnection can vanish out from under a room's member list on its
-// own (the browser tab closes) with nothing else involved, so rooms.cpp
-// has to hold only a WEAK reference and cope with it going stale at any
-// moment. A pid_t + fd have no such owner -- they stay valid until THIS
-// module explicitly closes them, never because something else decided to
-// let go, so a plain shared_ptr the registry hands out under its own lock
-// (kept alive for the duration of one call, exactly the csv.cpp/pdf.cpp
-// HandleTable::get() pattern) is enough.
+// A process that outlives the request that started it -- a transcode, a
+// long job a status page polls. start() returns an int handle at once;
+// read()/write()/alive()/wait()/kill()/close() work on it from any later
+// request. (os.run() is the run-to-completion form.) Entries live in a
+// mutex-protected registry and are handed out as shared_ptr, so a close()
+// racing a read() never frees what the read is using.
 #include <lux_script/builtin_module.hpp>
 
-#include <spawn.h>
+#include "spawn.hpp"
+
 #include <sys/wait.h>
 #include <poll.h>
 #include <unistd.h>
@@ -42,7 +21,6 @@
 #include <unordered_map>
 #include <vector>
 
-extern char** environ;
 
 namespace lux_script {
 
@@ -81,6 +59,7 @@ struct ProcEntry {
     std::mutex mutex;
     pid_t      pid        = -1;
     int        stdout_fd  = -1;    // -1 unless started with stdout: "pipe"
+    int        stdin_fd   = -1;    // -1 unless started with stdin: "pipe"
     bool       reaped     = false;
     int        exit_code  = -1;    // valid only once `reaped` is true
 };
@@ -92,10 +71,11 @@ public:
         return r;
     }
 
-    int put(pid_t pid, int stdout_fd) {
+    int put(pid_t pid, int stdout_fd, int stdin_fd) {
         auto e = std::make_shared<ProcEntry>();
         e->pid       = pid;
         e->stdout_fd = stdout_fd;
+        e->stdin_fd  = stdin_fd;
         std::lock_guard<std::mutex> lock(mutex_);
         int id = next_id_++;
         procs_.emplace(id, std::move(e));
@@ -122,6 +102,7 @@ public:
         }
         std::lock_guard<std::mutex> elock(e->mutex);
         if (e->stdout_fd >= 0) { ::close(e->stdout_fd); e->stdout_fd = -1; }
+        if (e->stdin_fd >= 0)  { ::close(e->stdin_fd);  e->stdin_fd  = -1; }
         if (e->reaped) return;
         int status = 0;
         pid_t r = ::waitpid(e->pid, &status, WNOHANG);
@@ -171,127 +152,58 @@ private:
 
 // ─── start() ─────────────────────────────────────────────────────────────────
 
-// posix_spawn(), not fork()+exec() -- same reason os.cpp's run() gives:
-// fork() in an already-multithreaded process only allows async-signal-safe
-// calls in the child before exec(). Never goes through a shell (argv is
-// built directly from the caller's List, exactly like os.run()) -- same
-// deliberate anti-injection property, not an oversight.
+// start(cmd, args, {"stdout": "pipe" | "null" | path, "stderr": "null" |
+// path, "stdin": "pipe" | "null", "cwd", "env"}). stdout defaults to a pipe
+// (read() drains it), stderr to /dev/null. A stderr pipe is refused:
+// nothing reads it, and a full pipe blocks the child forever.
 Value fn_proc_start(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str()) { error = "proc.start() expects a command"; return Value::null(); }
-    const std::string command = args[0].as_str();
-
-    std::vector<std::string> argv_storage;
-    argv_storage.push_back(command);
-    if (args.size() > 1) {
-        if (!args[1].is_list()) {
-            error = "proc.start(): second argument must be a List of strings";
-            return Value::null();
-        }
-        for (const auto& a : args[1].as_list()) {
-            if (!a.is_str()) {
-                error = "proc.start(): every element of the argument list must be a string";
-                return Value::null();
-            }
-            argv_storage.push_back(a.as_str());
-        }
-    }
-
-    std::string stdout_mode = "pipe";
-    std::string stderr_mode = "null";
+    spawn::Options o;
+    o.out.kind = spawn::Stream::Pipe;
     if (args.size() > 2) {
-        if (!args[2].is_dict()) {
-            error = "proc.start(): third argument must be a Dict";
-            return Value::null();
-        }
         const auto& opts = args[2].as_dict();
-        if (auto it = opts.find("stdout"); it != opts.end()) {
-            if (!it->second.is_str()) { error = "proc.start(): options.stdout must be a string"; return Value::null(); }
-            stdout_mode = it->second.as_str();
-        }
-        if (auto it = opts.find("stderr"); it != opts.end()) {
-            if (!it->second.is_str()) { error = "proc.start(): options.stderr must be a string"; return Value::null(); }
-            stderr_mode = it->second.as_str();
-        }
+        if (!spawn::read_common(opts, o, "proc.start", error)) return Value::null();
+        auto stream = [&](const char* key, spawn::Stream& s, bool pipe_ok) {
+            auto it = opts.find(key);
+            if (it == opts.end()) return true;
+            const std::string m = it->second.to_string();
+            if (m == "pipe" && !pipe_ok) {
+                error = std::string("proc.start(): options.") + key + " does not support \"pipe\" -- nothing in this module reads it; use a file path or \"null\"";
+                return false;
+            }
+            s.kind = m == "pipe" ? spawn::Stream::Pipe : m == "null" ? spawn::Stream::Null : spawn::Stream::File;
+            s.path = m;
+            return true;
+        };
+        if (!stream("stdout", o.out, true) || !stream("stderr", o.err, false) || !stream("stdin", o.in, true))
+            return Value::null();
     }
-    // Only stdout can ever be read back (proc.read() has no "which stream"
-    // argument): a stderr pipe nobody drains fills its kernel buffer and
-    // then blocks the CHILD's writes to it forever, a silent hang with no
-    // native-side symptom to point at. Rejecting it here is a compile-time-
-    // shaped error at the one place that can still catch it -- runtime,
-    // since `options` is a plain Dict, not something the type checker sees.
-    if (stderr_mode == "pipe") {
-        error = "proc.start(): options.stderr does not support \"pipe\" -- nothing in "
-                "this module reads it; use a file path or \"null\"";
-        return Value::null();
-    }
-
     ProcRegistry::instance().reap_orphans();
 
-    std::vector<char*> argv;
-    argv.reserve(argv_storage.size() + 1);
-    for (auto& s : argv_storage) argv.push_back(s.data());
-    argv.push_back(nullptr);
+    spawn::Child c;
+    if (!spawn::start(spawn::argv_of(args), o, c, error)) { error = "proc.start(): " + error; return Value::null(); }
+    // Our ends non-blocking: read() never waits past its own poll(), and
+    // write() hands over only what fits instead of blocking a thread.
+    for (int fd : {c.out, c.in}) if (fd >= 0) fcntl(fd, F_SETFL, O_NONBLOCK);
+    return Value::integer(ProcRegistry::instance().put(c.pid, c.out, c.in));
+}
 
-    int stdout_read_fd = -1, stdout_write_fd = -1;
-    if (stdout_mode == "pipe") {
-        // O_CLOEXEC here (not just the addclose() file actions below, which
-        // only apply to THIS child): without it, another proc.start()/
-        // os.run() call racing on a different thread can fork (via ITS OWN
-        // posix_spawn()) in the window before this one's posix_spawn() runs
-        // below, inheriting these fds into an unrelated child that then
-        // holds this pipe's write end open indefinitely -- same failure
-        // mode as os.run()'s identical fix, see its comment (os.cpp).
-        int fds[2];
-        if (pipe2(fds, O_CLOEXEC) != 0) { error = "proc.start(): could not create a pipe"; return Value::null(); }
-        // Non-blocking on OUR (read) end only -- pipe(2) gives each end its
-        // own open file description, so this has no effect on the CHILD's
-        // write end (dup2'd from fds[1] below), which stays perfectly
-        // normal/blocking from the child's point of view. Without this,
-        // read() (see fn_proc_read) could block past its own poll() call
-        // in the window between poll() saying "readable" and read()
-        // actually running -- see that function's comment.
-        if (fcntl(fds[0], F_SETFL, O_NONBLOCK) != 0) {
-            close(fds[0]); close(fds[1]);
-            error = "proc.start(): could not set the pipe non-blocking";
-            return Value::null();
-        }
-        stdout_read_fd  = fds[0];
-        stdout_write_fd = fds[1];
-    }
+// ─── write() ─────────────────────────────────────────────────────────────────
 
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-
-    if (stdout_mode == "pipe") {
-        posix_spawn_file_actions_adddup2(&actions, stdout_write_fd, STDOUT_FILENO);
-        posix_spawn_file_actions_addclose(&actions, stdout_read_fd);
-        posix_spawn_file_actions_addclose(&actions, stdout_write_fd);
-    } else if (stdout_mode == "null") {
-        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
-    } else {
-        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, stdout_mode.c_str(),
-                                         O_WRONLY | O_CREAT | O_APPEND, 0644);
-    }
-
-    if (stderr_mode == "null") {
-        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
-    } else {
-        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, stderr_mode.c_str(),
-                                         O_WRONLY | O_CREAT | O_APPEND, 0644);
-    }
-
-    pid_t pid = -1;
-    int   rc  = posix_spawnp(&pid, command.c_str(), &actions, nullptr, argv.data(), environ);
-    posix_spawn_file_actions_destroy(&actions);
-    if (stdout_write_fd >= 0) close(stdout_write_fd); // only the child needs the write end
-
-    if (rc != 0) {
-        if (stdout_read_fd >= 0) close(stdout_read_fd);
-        error = "proc.start(): could not start '" + command + "': " + std::strerror(rc);
-        return Value::null();
-    }
-
-    return Value::integer(ProcRegistry::instance().put(pid, stdout_read_fd));
+// Bytes handed to the child's stdin (it needs stdin: "pipe"). Never blocks:
+// with the pipe full it writes what fits, maybe 0, and the caller tries the
+// rest later. write(h, null) closes stdin -- the EOF a filter waits for.
+Value fn_proc_write(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
+    if (!e) { error = "proc: unknown handle"; return Value::null(); }
+    std::lock_guard<std::mutex> lock(e->mutex);
+    if (e->stdin_fd < 0) { error = "proc.write(): this process has no stdin: \"pipe\" (or it was closed)"; return Value::null(); }
+    if (args[1].is_null()) { ::close(e->stdin_fd); e->stdin_fd = -1; return Value::integer(0); }
+    const std::string& data = args[1].as_str();
+    const ssize_t n = ::write(e->stdin_fd, data.data(), data.size());
+    if (n >= 0) return Value::integer(n);
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return Value::integer(0);
+    error = std::string("proc.write(): ") + std::strerror(errno);
+    return Value::null();
 }
 
 // ─── alive() ─────────────────────────────────────────────────────────────────
@@ -303,7 +215,6 @@ Value fn_proc_start(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // because a reaped pid can be recycled by the kernel for an unrelated
 // process the moment it is reaped.
 Value fn_proc_alive(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) { error = "proc.alive() expects a handle"; return Value::null(); }
     ProcRegistry::instance().reap_orphans();
 
     auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
@@ -335,9 +246,6 @@ Value fn_proc_alive(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // that runs to EOF internally: the caller here IS the loop, across
 // however many separate proc.read() calls it takes.
 Value fn_proc_read(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) { error = "proc.read() expects a handle"; return Value::null(); }
-    if (!args[1].is_int()) { error = "proc.read() expects max_bytes"; return Value::null(); }
-    if (!args[2].is_int()) { error = "proc.read() expects a timeout in milliseconds"; return Value::null(); }
     const long long max_bytes  = args[1].as_int();
     const long long timeout_ms = args[2].as_int();
     if (max_bytes <= 0) { error = "proc.read(): max_bytes must be positive"; return Value::null(); }
@@ -380,8 +288,6 @@ Value fn_proc_read(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // polls with WNOHANG in a short-sleep loop instead, exactly like os.cpp's
 // run() polls its pipes rather than doing two sequential blocking reads.
 Value fn_proc_wait(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) { error = "proc.wait() expects a handle"; return Value::null(); }
-    if (!args[1].is_int()) { error = "proc.wait() expects a timeout in milliseconds"; return Value::null(); }
     const long long timeout_ms = args[1].as_int();
     if (timeout_ms < 0 || timeout_ms > kMaxTimeoutMs) {
         error = "proc.wait(): timeout must be between 0 and " + std::to_string(kMaxTimeoutMs) + "ms";
@@ -427,12 +333,7 @@ Value fn_proc_wait(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // nicely -- SIGTERM, then its own retry policy -- should not be forced
 // into this module's idea of how long is long enough).
 Value fn_proc_kill(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) { error = "proc.kill() expects a handle"; return Value::null(); }
-    int sig = SIGTERM;
-    if (args.size() > 1) {
-        if (!args[1].is_int()) { error = "proc.kill(): signal must be an int"; return Value::null(); }
-        sig = static_cast<int>(args[1].as_int());
-    }
+    const int sig = args.size() > 1 ? static_cast<int>(args[1].as_int()) : SIGTERM;
 
     auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
@@ -444,8 +345,7 @@ Value fn_proc_kill(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
 // ─── close() ─────────────────────────────────────────────────────────────────
 
-Value fn_proc_close(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) { error = "proc.close() expects a handle"; return Value::null(); }
+Value fn_proc_close(NativeCtx&, std::vector<Value>& args, std::string&) {
     ProcRegistry::instance().close(static_cast<int>(args[0].as_int()));
     return Value::null();
 }
@@ -453,14 +353,14 @@ Value fn_proc_close(NativeCtx&, std::vector<Value>& args, std::string& error) {
 } // namespace
 
 LUX_MODULE(proc, {
-    {"start", 1, 3, fn_proc_start},
-    {"alive", 1, 1, fn_proc_alive},
-    // is_async: both block the calling worker for up to
-    // `timeout_ms` -- see kMaxTimeoutMs's comment.
-    {"read",  3, 3, fn_proc_read,  /*is_async=*/true},
-    {"wait",  2, 2, fn_proc_wait,  /*is_async=*/true},
-    {"kill",  1, 2, fn_proc_kill},
-    {"close", 1, 1, fn_proc_close},
+    {"start", "s|ld", fn_proc_start},
+    {"alive", "i",    fn_proc_alive},
+    {"write", "iS",   fn_proc_write},
+    // Both block their worker for up to timeout_ms (kMaxTimeoutMs).
+    {"read",  "iii",  fn_proc_read,  /*is_async=*/true},
+    {"wait",  "ii",   fn_proc_wait,  /*is_async=*/true},
+    {"kill",  "i|i",  fn_proc_kill},
+    {"close", "i",    fn_proc_close},
 })
 
 } // namespace lux_script

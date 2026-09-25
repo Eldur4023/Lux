@@ -112,6 +112,36 @@ ws endpoint("/room/:id", string id) origins("http://localhost"):
             rooms.broadcast_others("room-" + id, { "from": msg })
     rooms.leave_all()
 
+get endpoint("/os/run_options"):
+    Json piped = await os.run("cat", [], { "input": "fed through stdin" })
+    Json where = await os.run("pwd", [], { "cwd": "/tmp" })
+    Json env = await os.run("sh", ["-c", "echo $LUX_T"], { "env": { "LUX_T": "set" } })
+    Json slow = await os.run("sleep", ["5"], { "timeout_ms": 100 })
+    return { "stdin": piped["stdout"], "cwd": where["stdout"], "env": env["stdout"], "timeout": slow }
+
+get endpoint("/os/files_more"):
+    string dir = os.path_join(os.temp_dir(), "lux-files-more")
+    os.remove_dir(dir, true)
+    os.make_dir(os.path_join(dir, "sub"))
+    await os.write_file(os.path_join(dir, "a.txt"), "one")
+    await os.append_file(os.path_join(dir, "a.txt"), "+two")
+    await os.write_file(os.path_join(dir, "b.JPG"), "")
+    await os.write_file(os.path_join(dir, "sub", "c.txt"), "")
+    string tmp = os.temp_file(".pdf")
+    Json r = { "appended": await os.read_file(os.path_join(dir, "a.txt")), "glob": os.glob(os.path_join(dir, "*.txt")), "tree": os.list_dir(dir, true).sort(), "mime": os.mime("b.JPG"), "mime_unknown": os.mime("x.nope"), "ext": os.path_ext("a/b.tar.gz"), "tmp_ok": os.is_file(tmp) and tmp.ends_with(".pdf") }
+    os.remove_file(tmp)
+    os.remove_dir(dir, true)
+    return r
+
+get endpoint("/proc/stdin"):
+    int h = proc.start("cat", [], { "stdin": "pipe" })
+    int n = proc.write(h, "ping")
+    proc.write(h, null)
+    string got = await proc.read(h, 100, 2000)
+    int code = await proc.wait(h, 2000)
+    proc.close(h)
+    return { "written": n, "echo": got, "code": code }
+
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
     int h = csv.parse(data)
