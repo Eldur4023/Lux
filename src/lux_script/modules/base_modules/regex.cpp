@@ -5,6 +5,7 @@
 #include <lux_script/tiny_regex.hpp>
 
 #include <string_view>
+#include <list>
 #include <unordered_map>
 
 namespace lux_script {
@@ -15,22 +16,31 @@ using tiny_regex::Regex;
 
 constexpr size_t kMaxSubjectLength = 4096;
 
-// The compiled pattern for this call, or nullptr with `error` set. Patterns
-// are source literals in practice, so each thread keeps what it compiled.
-// ponytail: dropped wholesale at 128 patterns; an LRU if an app ever
-// builds patterns at run time in a hot loop.
+// The compiled pattern for this call, or nullptr with `error` set. Each
+// thread keeps the 128 it used last (least recently used goes first).
 const Regex* prepare(const std::vector<Value>& a, std::string& error) {
     if (a[1].as_str().size() > kMaxSubjectLength) {
         error = "regex: the subject is " + std::to_string(a[1].as_str().size()) + " bytes, over the " +
                 std::to_string(kMaxSubjectLength) + "-byte limit";
         return nullptr;
     }
-    thread_local std::unordered_map<std::string, Regex> cache;
-    if (auto it = cache.find(a[0].as_str()); it != cache.end()) return &it->second;
+    using Lru = std::list<std::pair<std::string, Regex>>;
+    thread_local Lru order;
+    thread_local std::unordered_map<std::string_view, Lru::iterator> index;
+    const std::string& pattern = a[0].as_str();
+    if (auto it = index.find(pattern); it != index.end()) {
+        order.splice(order.begin(), order, it->second);
+        return &it->second->second;
+    }
     Regex re;
-    if (!re.compile(a[0].as_str(), error)) return nullptr;
-    if (cache.size() >= 128) cache.clear();
-    return &cache.emplace(a[0].as_str(), std::move(re)).first->second;
+    if (!re.compile(pattern, error)) return nullptr;
+    if (order.size() >= 128) {
+        index.erase(order.back().first);
+        order.pop_back();
+    }
+    order.emplace_front(pattern, std::move(re));
+    index.emplace(order.front().first, order.begin());
+    return &order.front().second;
 }
 
 std::string group(const std::string& text, const Regex::Match& m, size_t g) {

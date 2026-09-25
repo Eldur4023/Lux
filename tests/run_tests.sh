@@ -412,6 +412,7 @@ check "regex.replace"          GET /regex/replace 200 '"r":"a# b# c#"'
 check "regex.replace backreferences" GET /regex/replace_backref 200 '"r":"host@user"'
 check "regex.split"            GET /regex/split 200 '"r":["a","b","c","d"]'
 check "regex.escape matches only itself" GET /regex/escape 200 '"self":true,"other":false,"cached":true'
+check "regex cache evicts and stays right" GET /regex/many 200 '"hits":300,"first_again":true'
 check "regex rejects an invalid pattern" GET /regex/bad_pattern 500 'invalid regex pattern'
 
 check "rooms.count on an unknown room is 0, not an error" GET /rooms/count_empty     200 '"n":0'

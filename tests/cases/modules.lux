@@ -176,6 +176,13 @@ get endpoint("/handles"):
     csv.close(b)
     return { "not_small": a > 1000000 and b > 1000000, "not_sequential": b - a != 1 }
 
+get endpoint("/regex/many"):
+    int hits = 0
+    for int i in range(300):
+        if regex.test("^x" + str(i) + "$", "x" + str(i)):
+            hits = hits + 1
+    return { "hits": hits, "first_again": regex.test("^x0$", "x0") }
+
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
     int h = csv.parse(data)
