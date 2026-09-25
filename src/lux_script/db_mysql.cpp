@@ -258,6 +258,11 @@ public:
         return true;
     }
 
+    bool in_transaction(size_t worker) const override {
+        MYSQL* c = worker < conns_.size() ? conns_[worker].db : nullptr;
+        return c && (c->server_status & SERVER_STATUS_IN_TRANS);
+    }
+
     bool last_insert_id(size_t worker, long long& id, std::string& error) override {
         if (worker >= conns_.size() || !conns_[worker].db) {
             error = "mysql: no connection";

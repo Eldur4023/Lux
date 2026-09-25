@@ -3214,7 +3214,7 @@ std::string route_runtime_prelude() {
         "                              \" (size \" + std::to_string(l.size()) + \")\");\n"
         "        return l[(size_t)idx];\n"
         "    }\n"
-        "    if (obj.is_dict()) lux_native_fail(\"a Dict key must be a string\");\n"
+        "    if (obj.is_dict()) lux_native_fail(dict_int_index_error(obj));\n"
         "    lux_native_fail(std::string(\"cannot index \") + obj.type_name());\n"
         "}\n"
         "inline Value lux_json_index_str(const Value& obj, const std::string& key) {\n"

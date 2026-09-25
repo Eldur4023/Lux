@@ -11,6 +11,9 @@
 #include <unordered_set>
 #include <cctype>
 #include <cstring>
+#include <strings.h>
+#include <chrono>
+#include <unistd.h>
 
 namespace lux_script {
 
@@ -38,10 +41,6 @@ namespace {
 bool expand_list_params(const std::string& sql, const std::vector<Value>& args,
                         std::string& out_sql, std::vector<Value>& out_args,
                         std::string& error) {
-    bool any_list = false;
-    for (const auto& a : args) if (a.is_list()) { any_list = true; break; }
-    if (!any_list) { out_sql = sql; out_args = args; return true; }
-
     out_sql.clear();
     out_sql.reserve(sql.size());
     out_args.clear();
@@ -209,7 +208,11 @@ public:
         // Waits instead of failing when another connection holds the file --
         // except on an inline slot: the event loop never sleeps.
         const bool inline_slot = worker >= pool_size();
-        sqlite3_busy_timeout(db, inline_slot ? 0 : busy_timeout_);
+        if (inline_slot) sqlite3_busy_timeout(db, 0);
+        else {
+            sqlite3_busy_handler(db, &busy_wait, &busy_timeout_);
+            sqlite3_wal_hook(db, &wal_hook, &busy_timeout_);
+        }
         if (inline_slot)
             sqlite3_progress_handler(db, 1000, &past_deadline,
                                      &deadline_[worker - pool_size()]);
@@ -221,11 +224,18 @@ public:
     bool query(size_t worker, const std::string& sql, const std::vector<Value>& args,
                Value& out, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        bool          cached = false;
-        if (!prepare(worker, sql, args, &stmt, &cached, error)) return false;
+        Cached*       entry = nullptr;
+        if (!prepare(worker, sql, args, &stmt, &entry, error)) return false;
+        const bool cached = entry != nullptr;
 
         Value::List rows;
-        int cols = sqlite3_column_count(stmt);
+        int cols = -1;
+        // Names and BOOL-ness are per column, not per cell: kept with the
+        // cached statement, rebuilt when SQLite re-prepares it (a schema
+        // change can change what `select *` returns). Read after the first
+        // step: that step is where a re-prepare happens.
+        std::vector<Col>  local;
+        std::vector<Col>& meta = entry ? entry->meta : local;
 
         for (;;) {
             int rc = sqlite3_step(stmt);
@@ -234,20 +244,25 @@ public:
                 error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
                 rc_[worker] = rc;
                 release(stmt, cached);
-                return false;
+                    return false;
+            }
+            if (cols < 0) {
+                cols = sqlite3_column_count(stmt);
+                const int rp = sqlite3_stmt_status(stmt, SQLITE_STMTSTATUS_REPREPARE, 0);
+                if (!entry || entry->reprepares != rp || meta.size() != static_cast<size_t>(cols)) {
+                    meta.assign(static_cast<size_t>(cols), {});
+                    for (int i = 0; i < cols; ++i) {
+                        const char* col = sqlite3_column_name(stmt, i);
+                        meta[i] = { col ? std::string(col) : std::to_string(i), decltype_is_bool(stmt, i) };
+                    }
+                    if (entry) entry->reprepares = rp;
+                }
             }
             Value::Dict row;
             // The column count is known: without this the dictionary grew in
             // steps and it was five reallocations per row.
             row.reserve(static_cast<size_t>(cols));
-            for (int i = 0; i < cols; ++i) {
-                const char* col = sqlite3_column_name(stmt, i);
-                // No ternary: mixing it with std::to_string forced building a
-                // temporary std::string on EVERY column of EVERY row just to
-                // read it back as a string_view.
-                if (col) row[std::string_view(col)]  = column_value(stmt, i);
-                else     row[std::to_string(i)]      = column_value(stmt, i);
-            }
+            for (int i = 0; i < cols; ++i) row[meta[i].name] = column_value(stmt, i, meta[i].is_bool);
             rows.push_back(Value::dict(std::move(row)));
         }
 
@@ -259,8 +274,9 @@ public:
     bool exec(size_t worker, const std::string& sql, const std::vector<Value>& args,
               long long& affected, std::string& error) override {
         sqlite3_stmt* stmt = nullptr;
-        bool          cached = false;
-        if (!prepare(worker, sql, args, &stmt, &cached, error)) return false;
+        Cached*       entry = nullptr;
+        if (!prepare(worker, sql, args, &stmt, &entry, error)) return false;
+        const bool cached = entry != nullptr;
 
         int rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
@@ -271,6 +287,10 @@ public:
         release(stmt, cached);
         affected = sqlite3_changes(conns_[worker]);
         return true;
+    }
+
+    bool in_transaction(size_t worker) const override {
+        return worker < conns_.size() && conns_[worker] && !sqlite3_get_autocommit(conns_[worker]);
     }
 
     bool last_insert_id(size_t worker, long long& id, std::string& error) override {
@@ -285,7 +305,7 @@ public:
     ~SqliteDriver() override {
         // The statements first: sqlite3_close fails if any are still alive.
         for (auto& table : cache_)
-            for (auto& [_, stmt] : table) sqlite3_finalize(stmt);
+            for (auto& [_, c] : table) sqlite3_finalize(c.stmt);
         for (auto* db : conns_) if (db) sqlite3_close(db);
     }
 
@@ -313,7 +333,9 @@ private:
     std::string           file_;
     int                   busy_timeout_ = 5000;
     std::vector<sqlite3*> conns_;
-    std::vector<std::unordered_map<std::string, sqlite3_stmt*>> cache_;
+    struct Col    { std::string name; bool is_bool = false; };
+    struct Cached { sqlite3_stmt* stmt; std::vector<Col> meta; int reprepares = -1; };
+    std::vector<std::unordered_map<std::string, Cached>> cache_;
     std::vector<int>      rc_;   // result code of each slot's last failure
 
     // ponytail: 64 inline slots, one per event-loop thread; a 65th loop
@@ -335,6 +357,34 @@ private:
         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
         return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
     }
+    // sqlite3_busy_timeout() sleeps 1, 2, 5, 10... ms between retries, while
+    // a write transaction here holds the lock for tens of microseconds: the
+    // waiters overslept by 30x. Same budget, backoff from 20us capped at 1ms.
+    static int busy_wait(void* timeout_ms, int count) {
+        thread_local std::chrono::steady_clock::time_point start;
+        const auto now = std::chrono::steady_clock::now();
+        if (count == 0) start = now;
+        if (now - start >= std::chrono::milliseconds(*static_cast<int*>(timeout_ms))) return 0;
+        usleep(static_cast<useconds_t>(std::min(20 << std::min(count, 6), 1000)));
+        return 1;
+    }
+
+    // SQLite's own auto-checkpoint is PASSIVE: it never waits for readers,
+    // and with reads arriving back to back some reader always holds an old
+    // snapshot, so the WAL is never reset -- measured: 750MB of WAL in 12s
+    // of load on a 3MB database, every read slower as it grows. RESTART
+    // waits for the readers in flight (microseconds each) and then starts
+    // the WAL over; a budget of a few ms keeps a slow report query from
+    // stalling this writer, and a commit that runs out of it still
+    // backfilled, the next one retries.
+    static int wal_hook(void* timeout_ms, sqlite3* db, const char*, int pages) {
+        if (pages < 4000) return SQLITE_OK;
+        static int kBudgetMs = 5;
+        sqlite3_busy_handler(db, &busy_wait, &kBudgetMs);
+        sqlite3_wal_checkpoint_v2(db, nullptr, SQLITE_CHECKPOINT_RESTART, nullptr, nullptr);
+        sqlite3_busy_handler(db, &busy_wait, timeout_ms);
+        return SQLITE_OK;
+    }
     static int past_deadline(void* d) {
         return thread_cpu_ns() > static_cast<Deadline*>(d)->at_ns;
     }
@@ -354,25 +404,33 @@ private:
     // Parameters ALWAYS go through bind, never concatenated: that is what makes
     // SQL injection impossible from Lux Script.
     bool prepare(size_t worker, const std::string& sql, const std::vector<Value>& args,
-                 sqlite3_stmt** out, bool* cached, std::string& error) {
+                 sqlite3_stmt** out, Cached** entry, std::string& error) {
         sqlite3* db = conns_[worker];
         auto&    table = cache_[worker];
 
         // A List argument expands the SQL text itself (one `?` becomes N),
         // so the cache below is keyed on the EXPANDED text -- two calls
         // with lists of different lengths are, correctly, different
-        // prepared statements. Everything after this point works on
-        // eff_sql/eff_args exactly as it always worked on sql/args.
-        std::string eff_sql;
-        std::vector<Value> eff_args;
-        if (!expand_list_params(sql, args, eff_sql, eff_args, error)) {
-            rc_[worker] = SQLITE_MISUSE;
-            return false;
+        // prepared statements. Without a List both stay the caller's.
+        std::string              expanded_sql;
+        std::vector<Value>       expanded_args;
+        const std::string*        q = &sql;
+        const std::vector<Value>* a = &args;
+        if (std::any_of(args.begin(), args.end(), [](const Value& v) { return v.is_list(); })) {
+            if (!expand_list_params(sql, args, expanded_sql, expanded_args, error)) {
+                rc_[worker] = SQLITE_MISUSE;
+                return false;
+            }
+            q = &expanded_sql;
+            a = &expanded_args;
         }
+        const std::string&        eff_sql  = *q;
+        const std::vector<Value>& eff_args = *a;
 
+        *entry = nullptr;
         if (auto it = table.find(eff_sql); it != table.end()) {
-            *out      = it->second;
-            *cached = true;
+            *entry = &it->second;
+            *out   = it->second.stmt;
             sqlite3_reset(*out);
             sqlite3_clear_bindings(*out);
         } else {
@@ -381,16 +439,17 @@ private:
                 rc_[worker] = rc;
                 return false;
             }
-            *cached = table.size() < kMaxCachedStatements;
-            if (*cached) table.emplace(eff_sql, *out);
+            if (table.size() < kMaxCachedStatements)
+                *entry = &table.emplace(eff_sql, Cached{*out, {}, -1}).first->second;
         }
+        const bool cached = *entry != nullptr;
 
         int expected = sqlite3_bind_parameter_count(*out);
         if (expected != static_cast<int>(eff_args.size())) {
             error = "sqlite: the query has " + std::to_string(expected) +
                     " parameter(s) but " + std::to_string(eff_args.size()) + " were passed";
             rc_[worker] = SQLITE_MISUSE;
-            release(*out, *cached);
+            release(*out, cached);
             *out = nullptr;
             return false;
         }
@@ -403,7 +462,13 @@ private:
             else if (v.is_bool())  rc = sqlite3_bind_int(*out, idx, v.as_bool() ? 1 : 0);
             else if (v.is_int())   rc = sqlite3_bind_int64(*out, idx, v.as_int());
             else if (v.is_float()) rc = sqlite3_bind_double(*out, idx, v.as_float());
-            else {
+            else if (v.is_str()) {
+                // STATIC: the caller's args outlive every step of this
+                // statement (an expanded copy shares their string boxes),
+                // and release() clears the bindings before they go.
+                const std::string& s = v.as_str();
+                rc = sqlite3_bind_text(*out, idx, s.data(), static_cast<int>(s.size()), SQLITE_STATIC);
+            } else {
                 std::string s = v.to_string();
                 rc = sqlite3_bind_text(*out, idx, s.c_str(),
                                        static_cast<int>(s.size()), SQLITE_TRANSIENT);
@@ -412,7 +477,7 @@ private:
                 error = std::string("sqlite: while binding parameter ") +
                         std::to_string(idx) + ": " + sqlite3_errmsg(db);
                 rc_[worker] = rc;
-                release(*out, *cached);
+                release(*out, cached);
                 *out = nullptr;
                 return false;
             }
@@ -443,18 +508,17 @@ private:
     // under the hood.
     static bool decltype_is_bool(sqlite3_stmt* stmt, int i) {
         const char* decl = sqlite3_column_decltype(stmt, i);
-        if (!decl) return false;
-        std::string d(decl);
-        std::transform(d.begin(), d.end(), d.begin(), ::toupper);
-        return d.find("BOOL") != std::string::npos;
+        for (; decl && decl[0]; ++decl)
+            if (strncasecmp(decl, "BOOL", 4) == 0) return true;
+        return false;
     }
 
-    static Value column_value(sqlite3_stmt* stmt, int i) {
+    static Value column_value(sqlite3_stmt* stmt, int i, bool is_bool) {
         switch (sqlite3_column_type(stmt, i)) {
             case SQLITE_NULL:    return Value::null();
             case SQLITE_INTEGER: {
                 long long v = sqlite3_column_int64(stmt, i);
-                if (decltype_is_bool(stmt, i) && (v == 0 || v == 1))
+                if (is_bool && (v == 0 || v == 1))
                     return Value::boolean(v != 0);
                 return Value::integer(v);
             }

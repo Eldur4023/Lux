@@ -190,3 +190,28 @@ get endpoint("/pair/:id", int id):
     List<Json> one = await sqlite.query("select title from articles where id = ?", id)
     List<Json> all = await sqlite.query("select count(*) as n from articles")
     return { "title": one[0]["title"], "count": all[0]["n"] }
+
+# ── Isolation: a worker holding an open transaction serves no one else ──────
+# Without it, an autocommit insert could land on that connection, run inside
+# the other request's transaction and vanish with its rollback.
+get endpoint("/iso_setup"):
+    await sqlite.exec("create table if not exists iso (v integer)")
+    await sqlite.exec("delete from iso")
+    return { "ok": true }
+
+get endpoint("/iso_rollback"):
+    await sqlite.begin()
+    await sleep(400)
+    await sqlite.rollback()
+    return { "ok": true }
+
+get endpoint("/iso_insert"):
+    return { "n": await sqlite.exec("insert into iso values (1)") }
+
+get endpoint("/iso_count"):
+    return await sqlite.query("select count(*) as n from iso")
+
+# A failed query read as rows: the error has to name the real cause.
+get endpoint("/bad_index"):
+    List<Json> rows = await sqlite.query("select * from no_such_table")
+    return rows[0]

@@ -111,6 +111,18 @@ done
 if [ "$conc_failures" -eq 0 ]; then ok "40 concurrent, each with its own result"
 else fail "40 concurrent, each with its own result" "40 correct" "$conc_failures wrong"; fi
 
+# 32 autocommit inserts while another request holds a transaction open and
+# then rolls it back: every insert has to survive.
+curl -s "http://127.0.0.1:$PORT/iso_setup" > /dev/null
+curl -s "http://127.0.0.1:$PORT/iso_rollback" > /dev/null & tx=$!
+sleep 0.1
+pids=""
+for i in $(seq 1 32); do curl -s "http://127.0.0.1:$PORT/iso_insert" > /dev/null & pids="$pids $!"; done
+for p in $pids $tx; do wait "$p" 2>/dev/null; done
+check "a rollback does not take other requests' inserts with it" GET /iso_count 200 '"n":32'
+
+check "rows[0] of a failed query reports the query's error" GET /bad_index 500 'no such table'
+
 kill -0 "$SRV" 2>/dev/null && ok "the server is still alive" \
                            || fail "the server is still alive" "alive" "dead"
 

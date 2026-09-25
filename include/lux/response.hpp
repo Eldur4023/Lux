@@ -1,7 +1,7 @@
 #pragma once
 #include <string>
 #include <unordered_map>
-#include <sstream>
+#include <string_view>
 #include <fstream>
 #include <filesystem>
 #include <memory>
@@ -261,38 +261,33 @@ public:
 
     // Headers-only build for SSE: no Content-Length (streaming, length unknown).
     std::string build_sse_headers() const {
-        std::ostringstream os;
-        os << "HTTP/1.1 " << state_->status_code
-           << ' ' << reason_phrase(state_->status_code) << "\r\n";
-        emit_headers(os);
-        for (const auto& c : state_->cookies)
-            os << "Set-Cookie: " << c << "\r\n";
-        os << "\r\n";
-        return os.str();
+        std::string out = status_line();
+        emit_headers(out);
+        out += "\r\n";
+        return out;
     }
 
     std::string build() const {
-        std::ostringstream os;
-        os << "HTTP/1.1 " << state_->status_code
-           << ' ' << reason_phrase(state_->status_code) << "\r\n";
         // Content-Length: use file size when sendfile is in play, or the
         // range's length instead when partial_content() set one -- a 206
         // sends fewer bytes than the file's own size, and Content-Length
         // has to say so, not the full file size.
-        auto clen = state_->sendfile_path.empty()
+        const bool inline_body = state_->sendfile_path.empty();
+        auto clen = inline_body
                     ? state_->body.size()
                     : static_cast<std::size_t>(state_->sendfile_range_length
                                                 ? state_->sendfile_range_length
                                                 : state_->sendfile_size);
-        os << "Content-Length: " << clen << "\r\n";
-        emit_headers(os);
-        for (const auto& c : state_->cookies)
-            os << "Set-Cookie: " << c << "\r\n";
-        os << "\r\n";
+        std::string out = status_line();
+        out.reserve(256 + (inline_body ? state_->body.size() : 0));
+        out += "Content-Length: ";
+        out += std::to_string(clen);
+        out += "\r\n";
+        emit_headers(out);
+        out += "\r\n";
         // Body only for normal (non-sendfile) responses
-        if (state_->sendfile_path.empty())
-            os << state_->body;
-        return os.str();
+        if (inline_body) out += state_->body;
+        return out;
     }
 
 private:
@@ -348,17 +343,29 @@ private:
     // is deliberately NOT defaulted: it is inline-script/style dependent per
     // app, and a wrong default would silently break pages rather than
     // protect them.
-    void emit_headers(std::ostringstream& os) const {
+    std::string status_line() const {
+        std::string out = "HTTP/1.1 ";
+        out += std::to_string(state_->status_code);
+        out += ' ';
+        out += reason_phrase(state_->status_code);
+        out += "\r\n";
+        return out;
+    }
+
+    // Headers plus Set-Cookie lines.
+    void emit_headers(std::string& out) const {
         static constexpr std::pair<const char*, const char*> kDefaults[] = {
             {"X-Content-Type-Options", "nosniff"},
             {"X-Frame-Options",        "DENY"},
             {"Referrer-Policy",        "strict-origin-when-cross-origin"},
         };
-        for (const auto& [k, v] : state_->headers)
-            os << k << ": " << v << "\r\n";
+        auto line = [&out](std::string_view k, std::string_view v) {
+            out += k; out += ": "; out += v; out += "\r\n";
+        };
+        for (const auto& [k, v] : state_->headers) line(k, v);
         for (const auto& [k, v] : kDefaults)
-            if (!has_header_ci(state_->headers, k))
-                os << k << ": " << v << "\r\n";
+            if (!has_header_ci(state_->headers, k)) line(k, v);
+        for (const auto& c : state_->cookies) line("Set-Cookie", c);
     }
 
     static const char* reason_phrase(int code) noexcept {

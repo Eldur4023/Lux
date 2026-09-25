@@ -33,7 +33,10 @@ EpollLoop::~EpollLoop() {
 }
 
 void EpollLoop::add(int fd, uint32_t events, Callback cb) {
-    callbacks_[fd] = std::move(cb);
+    // An existing entry may be the callback running right now: parked.
+    if (auto it = callbacks_.find(fd); it != callbacks_.end())
+        graveyard_.push_back(callbacks_.extract(it));
+    callbacks_.emplace(fd, std::move(cb));
 
     epoll_event ev{};
     ev.events  = events;
@@ -53,14 +56,23 @@ void EpollLoop::modify(int fd, uint32_t events) {
 
 void EpollLoop::remove(int fd) {
     epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
-    callbacks_.erase(fd);
+    // The node is parked, not destroyed: remove() is usually called from
+    // inside this very callback (a connection closing itself).
+    if (auto it = callbacks_.find(fd); it != callbacks_.end())
+        graveyard_.push_back(callbacks_.extract(it));
 }
 
 void EpollLoop::post(std::function<void()> cb) {
+    bool wake;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        // A non-empty queue already has its wakeup pending: whoever pushed
+        // the first task wrote the eventfd, and the loop takes the whole
+        // queue at once.
+        wake = task_queue_.empty();
         task_queue_.push_back(std::move(cb));
     }
+    if (!wake) return;
     uint64_t val = 1;
     (void)write(wakeup_fd_, &val, sizeof(val));
 }
@@ -105,11 +117,11 @@ void EpollLoop::run() {
             auto it = callbacks_.find(fd);
             if (it == callbacks_.end()) continue;
 
-            // Make a local copy so the callback isn't destroyed if it
-            // calls remove() on itself (e.g. connection close).
-            Callback cb = it->second;
-            cb(events[i].events);
+            // Called in place: a remove() or add() on this fd from inside
+            // parks the callback in graveyard_ instead of destroying it.
+            it->second(events[i].events);
         }
+        graveyard_.clear();
         run_timers();
     }
 }

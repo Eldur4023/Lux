@@ -454,7 +454,8 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                     push(l[static_cast<size_t>(i)]);
                 } else if (obj.is_dict()) {
                     if (!idx.is_str())
-                        return fail("a Dict key must be a string", in.loc);
+                        return fail(idx.is_int() ? dict_int_index_error(obj)
+                                                 : "a Dict key must be a string", in.loc);
                     auto& d  = obj.as_dict();
                     auto  it = d.find(idx.as_str());
                     push(it == d.end() ? Value::null() : it->second);

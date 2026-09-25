@@ -281,6 +281,13 @@ public:
         return true;
     }
 
+    bool in_transaction(size_t worker) const override {
+        PGconn* c = worker < conns_.size() ? conns_[worker].db : nullptr;
+        if (!c) return false;
+        const auto st = PQtransactionStatus(c);
+        return st == PQTRANS_INTRANS || st == PQTRANS_INERROR;
+    }
+
     ~PostgresDriver() override {
         for (size_t w = 0; w < conns_.size(); ++w) drop(w);
     }

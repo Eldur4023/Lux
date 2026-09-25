@@ -268,7 +268,7 @@ public:
     std::string to_string() const;          // representation for text()/concatenation
     // Serialization: writes the JSON straight into the buffer, in one pass.
     void        write_json(std::string& out) const;
-    std::string to_json_text() const { std::string s; write_json(s); return s; }
+    std::string to_json_text() const { std::string s; s.reserve(256); write_json(s); return s; }
 
     // Parses JSON into a Value, with no intermediate tree.  Returns false for
     // anything that is not valid and complete JSON, trailing garbage included.
@@ -384,6 +384,17 @@ inline Value& Value::Dict::operator[](std::string_view k) {
     if (!idx_.empty())            idx_.emplace(v_.back().first, v_.size() - 1);
     else if (v_.size() > kIndexThreshold) build_index();
     return v_.back().second;
+}
+
+// A Dict read by position. Almost always a failed call -- a query() that
+// returned its {"error": ...} Dict where the code expected rows -- so the
+// message carries that error instead of a lesson on key types. Shared by
+// the VM and the --native runtime.
+inline std::string dict_int_index_error(const Value& obj) {
+    auto it = obj.as_dict().find("error");
+    if (it != obj.as_dict().end() && it->second.is_str())
+        return "indexed by position, but this is an error result, not a List: " + it->second.as_str();
+    return "a Dict key must be a string, not int";
 }
 
 // Trims ASCII whitespace (space/tab/CR/LF) off both ends -- the exact same

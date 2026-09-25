@@ -54,6 +54,7 @@ private:
     int next_timer_id_ = 0;
 
     std::unordered_map<int, Callback> callbacks_;
+    std::vector<decltype(callbacks_)::node_type> graveyard_;   // removed mid-dispatch, freed after it
     std::vector<std::function<void()>> task_queue_;
     std::mutex queue_mutex_;
 };

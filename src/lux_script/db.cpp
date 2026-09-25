@@ -10,37 +10,44 @@ namespace lux_script {
 
 DbPool::~DbPool() { stop(); }
 
-void DbPool::start(size_t workers) {
+void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction) {
     if (!threads_.empty()) return;
     workers_.assign(workers, 0);
     pinned_.resize(workers);
+    held_.assign(workers, 0);
 
     for (size_t i = 0; i < workers; ++i) {
-        threads_.emplace_back([this, i] {
+        threads_.emplace_back([this, i, in_transaction] {
+            bool held = false;
             for (;;) {
                 std::function<void(size_t)> job;
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
-                    cv_.wait(lock, [this, i] {
-                        return stopping_ || !jobs_.empty() || !pinned_[i].empty();
-                    });
-                    if (stopping_ && jobs_.empty() && pinned_[i].empty()) return;
+                    held_[i] = held;
+                    // A worker whose connection has a transaction open takes
+                    // only what is pinned to it: a shared job would run INSIDE
+                    // someone else's transaction -- rolled back with it, or,
+                    // on MySQL, a BEGIN there silently commits it.
+                    auto ready = [&] {
+                        return !pinned_[i].empty() || (!held_[i] && !jobs_.empty());
+                    };
+                    cv_.wait(lock, [&] { return stopping_ || ready(); });
+                    if (!ready()) return;   // stopping, nothing left for this worker
 
                     // What is pinned to this worker goes first: it is the
                     // continuation of a transaction whose connection is open.
                     if (!pinned_[i].empty()) {
                         job = std::move(pinned_[i].front());
                         pinned_[i].pop();
-                    } else if (!jobs_.empty()) {
+                    } else {
                         job = std::move(jobs_.front());
                         jobs_.pop();
-                    } else {
-                        continue;
                     }
                 }
                 // A job that throws cannot take the worker down with it: with
                 // no live connection, the module would stop answering everyone.
                 try { job(i); } catch (...) {}
+                held = in_transaction(i);
             }
         });
     }
@@ -52,7 +59,9 @@ void DbPool::submit(std::function<void(size_t)> job) {
         if (stopping_) return;
         jobs_.push(std::move(job));
     }
-    cv_.notify_one();
+    // notify_all: the one notify_one wakes may be holding a transaction and
+    // unable to take it.
+    cv_.notify_all();
 }
 
 void DbPool::submit_to(size_t worker, std::function<void(size_t)> job) {
@@ -132,7 +141,8 @@ bool DbRegistry::activate(const std::string& name,
     if (!slot.driver->configure(options, error)) return false;
 
     slot.pool = std::make_unique<DbPool>();
-    slot.pool->start(slot.driver->pool_size());
+    DbDriver* d = slot.driver.get();
+    slot.pool->start(d->pool_size(), [d](size_t w) { return d->in_transaction(w); });
     slot.activated = true;
     return true;
 }
@@ -230,37 +240,39 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
     const bool aborting_commit = (op == DbOp::Commit) && in_tx && poisoned.count(module);
     const DbOp stmt_op         = aborting_commit ? DbOp::Rollback : op;
 
-    auto result = std::make_shared<Value>(Value::null());
-    auto errmsg = std::make_shared<std::string>();
-    auto used   = std::make_shared<int>(-1);
+    // Frame locals, written by the pool thread: the frame stays suspended
+    // (and alive) until the job posts the resume, so references are enough.
+    Value       result;
+    std::string errmsg;
+    int         used = -1;
 
     co_await DbAwaitable{pool, loop,
-        [driver, sql, params, op = stmt_op, result, errmsg, used](size_t worker) {
-            *used = static_cast<int>(worker);
+        [&, driver, op = stmt_op](size_t worker) {
+            used = static_cast<int>(worker);
             std::string err;
-            if (!driver->open(worker, err)) { *errmsg = err; return; }
+            if (!driver->open(worker, err)) { errmsg = err; return; }
 
             long long n = 0;
             if (op == DbOp::Query) {
                 Value rows;
-                if (!driver->query(worker, sql, params, rows, err)) { *errmsg = err; return; }
-                *result = std::move(rows);
+                if (!driver->query(worker, sql, params, rows, err)) { errmsg = err; return; }
+                result = std::move(rows);
             } else if (op == DbOp::Exec) {
-                if (!driver->exec(worker, sql, params, n, err)) { *errmsg = err; return; }
-                *result = Value::integer(n);
+                if (!driver->exec(worker, sql, params, n, err)) { errmsg = err; return; }
+                result = Value::integer(n);
             } else if (op == DbOp::LastId) {
-                if (!driver->last_insert_id(worker, n, err)) { *errmsg = err; return; }
-                *result = Value::integer(n);
+                if (!driver->last_insert_id(worker, n, err)) { errmsg = err; return; }
+                result = Value::integer(n);
             } else {
                 const char* stmt = (op == DbOp::Begin)  ? "BEGIN"
                                   : (op == DbOp::Commit) ? "COMMIT" : "ROLLBACK";
-                if (!driver->exec(worker, stmt, {}, n, err)) { *errmsg = err; return; }
-                *result = Value::boolean(true);
+                if (!driver->exec(worker, stmt, {}, n, err)) { errmsg = err; return; }
+                result = Value::boolean(true);
             }
         },
         pin};
 
-    if (!errmsg->empty()) {
+    if (!errmsg.empty()) {
         // A driver failure INSIDE a transaction poisons it for everything
         // that comes after -- see the `poisoned` comment in db.hpp.
         // begin()/commit()/rollback() failing (uncommon, but possible: the
@@ -268,15 +280,15 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         // to poison.
         if (in_tx && op != DbOp::Begin && op != DbOp::Commit && op != DbOp::Rollback)
             poisoned.insert(module);
-        co_return db_error(*errmsg);
+        co_return db_error(errmsg);
     }
 
-    if (op == DbOp::Exec) last_exec_workers[module] = *used;
+    if (op == DbOp::Exec) last_exec_workers[module] = used;
 
     // A transaction pins its connection when it opens and releases it when
     // it closes.
     if (op == DbOp::Begin) {
-        pinned_workers[module] = *used;
+        pinned_workers[module] = used;
         poisoned.erase(module);   // new transaction, clean
     } else if (op == DbOp::Commit || op == DbOp::Rollback) {
         pinned_workers.erase(module);
@@ -287,7 +299,7 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         co_return db_error("transaction aborted by an earlier failed statement: "
                            "rolled back instead of committing");
 
-    co_return std::move(*result);
+    co_return result;
 }
 
 lux::Task<void> rollback_pending_db(std::map<std::string, int>& pinned_workers,
