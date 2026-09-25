@@ -9,16 +9,21 @@
 //             from     "My App <noreply@example.com>"
 //             tls      "starttls"           # "starttls" | "tls" | "none"
 //
-//     await mail.send({ "to": "ana@example.com", "subject": "Hi", "text": "...", "html": "..." })
+//     await mail.send({ "to": "ana@example.com", "subject": "Hi", "text": "...", "html": "...",
+//                       "attachments": ["invoice.pdf", { "name": "data.csv", "content": csv_text }] })
 //
 // Every header value has CR/LF stripped: a contact form's subject or name
 // can never smuggle in a Bcc: line.
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/crypto.hpp>
+#include <lux/mime.hpp>
+#include <lux/percent_encoding.hpp>
 
 #include <curl/curl.h>
 
 #include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <cstring>
 #include <ctime>
 
@@ -54,12 +59,50 @@ std::string header_text(const std::string& s) {
     return s;
 }
 
-// Base64 body wrapped at 76 columns (RFC 2045).
-std::string body_part(const std::string& type, const std::string& text) {
-    const std::string b = crypto::base64_encode(text);
-    std::string out = "Content-Type: " + type + "; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n";
+std::string field(const Value::Dict& m, const char* key) {
+    auto it = m.find(key);
+    return it == m.end() || it->second.is_null() ? "" : it->second.to_string();
+}
+
+std::string wrapped_base64(const std::string& data) {
+    const std::string b = crypto::base64_encode(data);
+    std::string out;
     for (size_t i = 0; i < b.size(); i += 76) out += b.substr(i, 76) + "\r\n";
     return out;
+}
+
+// Base64 body wrapped at 76 columns (RFC 2045).
+std::string body_part(const std::string& type, const std::string& text) {
+    return "Content-Type: " + type + "; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" + wrapped_base64(text);
+}
+
+constexpr size_t kMaxAttachmentBytes = 25u << 20;   // what common mail servers accept
+
+// A path, or {"name", "content"} for something made on the spot (a CSV).
+// A name outside ASCII goes as RFC 2231 (filename*=UTF-8''...).
+bool attachment_part(const Value& a, std::string& part, size_t& total, std::string& error) {
+    std::string name, content;
+    if (a.is_dict()) {
+        name = field(a.as_dict(), "name");
+        content = field(a.as_dict(), "content");
+        if (name.empty()) { error = "mail.send(): an attachment Dict needs a name"; return false; }
+    } else {
+        const std::string path = a.to_string();
+        std::ifstream f(path, std::ios::binary);
+        if (!f) { error = "mail.send(): cannot read the attachment '" + path + "'"; return false; }
+        content.assign(std::istreambuf_iterator<char>(f), {});
+        name = path.substr(path.find_last_of('/') + 1);
+    }
+    total += content.size();
+    if (total > kMaxAttachmentBytes) { error = "mail.send(): the attachments are over 25 MB"; return false; }
+    name = one_line(name);
+    std::erase_if(name, [](char c) { return c == '"' || c == '\\'; });
+    const std::string dot = name.substr(std::min(name.size(), name.rfind('.')));
+    const bool ascii = std::all_of(name.begin(), name.end(), [](unsigned char c) { return c >= 0x20 && c < 0x7F; });
+    const std::string disp = ascii ? "filename=\"" + name + "\"" : "filename*=UTF-8''" + lux::percent_encode(name);
+    part = "Content-Type: " + std::string(lux::mime_for_ext(dot)) + "\r\nContent-Transfer-Encoding: base64\r\n"
+           "Content-Disposition: attachment; " + disp + "\r\n\r\n" + wrapped_base64(content);
+    return true;
 }
 
 // A string or a List of them.
@@ -76,11 +119,6 @@ std::string joined(const std::vector<std::string>& v) {
     std::string s;
     for (const auto& x : v) s += (s.empty() ? "" : ", ") + x;
     return s;
-}
-
-std::string field(const Value::Dict& m, const char* key) {
-    auto it = m.find(key);
-    return it == m.end() || it->second.is_null() ? "" : it->second.to_string();
 }
 
 struct Upload { std::string data; size_t pos = 0; };
@@ -119,13 +157,28 @@ Value fn_send(NativeCtx&, std::vector<Value>& a, std::string& error) {
     msg += "Subject: " + header_text(one_line(field(m, "subject"))) + "\r\n";
     msg += "Message-ID: <" + crypto::hex_encode(crypto::random_bytes(12)) + "@" + domain + ">\r\n";
     msg += "MIME-Version: 1.0\r\n";
+    auto boundary = [] { return "lux-" + crypto::hex_encode(crypto::random_bytes(12)); };
+    std::string body;   // its own headers, then content
     if (!text.empty() && !html.empty()) {
-        const std::string b = "lux-" + crypto::hex_encode(crypto::random_bytes(12));
-        msg += "Content-Type: multipart/alternative; boundary=\"" + b + "\"\r\n\r\n";
-        msg += "--" + b + "\r\n" + body_part("text/plain", text) + "--" + b + "\r\n" +
-               body_part("text/html", html) + "--" + b + "--\r\n";
+        const std::string b = boundary();
+        body = "Content-Type: multipart/alternative; boundary=\"" + b + "\"\r\n\r\n--" + b + "\r\n" +
+               body_part("text/plain", text) + "--" + b + "\r\n" + body_part("text/html", html) + "--" + b + "--\r\n";
     } else {
-        msg += html.empty() ? body_part("text/plain", text) : body_part("text/html", html);
+        body = html.empty() ? body_part("text/plain", text) : body_part("text/html", html);
+    }
+    auto att = m.find("attachments");
+    if (att != m.end() && att->second.is_list() && !att->second.as_list().empty()) {
+        const std::string b = boundary();
+        msg += "Content-Type: multipart/mixed; boundary=\"" + b + "\"\r\n\r\n--" + b + "\r\n" + body;
+        size_t total = 0;
+        for (const Value& x : att->second.as_list()) {
+            std::string part;
+            if (!attachment_part(x, part, total, error)) return Value::null();
+            msg += "--" + b + "\r\n" + part;
+        }
+        msg += "--" + b + "--\r\n";
+    } else {
+        msg += body;
     }
 
     CURL* curl = curl_easy_init();

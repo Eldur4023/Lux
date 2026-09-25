@@ -91,6 +91,10 @@ get endpoint("/mail_send"):
     Json r = await mail.send({ "to": ["Ana <ana@example.com>", "bob@example.com"], "bcc": "hidden@example.com", "subject": "Café\r\nBcc: evil@example.com", "text": "plain body", "html": "<b>html body</b>", "reply_to": "help@example.com" })
     return { "r": r }
 
+get endpoint("/mail_attach"):
+    Json r = await mail.send({ "to": "ana@example.com", "subject": "files", "text": "see attached", "html": "<p>see attached</p>", "attachments": ["tests/http_echo_server.py", { "name": "datos ñ.csv", "content": "a,b\n1,2\n" }] })
+    return { "r": r }
+
 get endpoint("/mail_no_rcpt"):
     Json r = await mail.send({ "subject": "x", "text": "y" })
     return r

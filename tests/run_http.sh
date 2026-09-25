@@ -77,6 +77,21 @@ assert msg['Reply-To'] == 'help@example.com'
 print('ok')" "$TMP/mail.json" 2>&1 | tail -1)
 if [ "$mail_check" = "ok" ]; then ok "the message is well formed, bcc hidden, no header injection"
 else fail "the message is well formed, bcc hidden, no header injection" "ok" "$mail_check"; fi
+check "mail.send with attachments" GET /mail_attach 200 '"r":true'
+att_check=$(python3 -c "
+import json, email, sys
+m = email.message_from_string(json.load(open(sys.argv[1]))['data'])
+assert m.get_content_type() == 'multipart/mixed', m.get_content_type()
+body, *files = m.get_payload()
+assert body.get_content_type() == 'multipart/alternative'
+names = [f.get_filename() for f in files]
+assert names == ['http_echo_server.py', 'datos ñ.csv'], names
+assert files[1].get_payload(decode=True) == b'a,b\n1,2\n'
+assert files[0].get_payload(decode=True) == open('tests/http_echo_server.py', 'rb').read()
+assert files[1].get_content_type() == 'text/csv'
+print('ok')" "$TMP/mail.json" 2>&1 | tail -1)
+if [ "$att_check" = "ok" ]; then ok "attachments: multipart/mixed, names (RFC 2231), bytes intact"
+else fail "attachments: multipart/mixed, names (RFC 2231), bytes intact" "ok" "$att_check"; fi
 check "mail.send without a recipient" GET /mail_no_rcpt 500 '"error":"mail.send(): no recipient'
 
 echo "== url_encode (RFC 3986, no network) =="
