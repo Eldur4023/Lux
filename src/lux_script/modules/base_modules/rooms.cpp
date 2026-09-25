@@ -40,6 +40,9 @@ namespace {
 // A quiet room can hold a few stale entries until the next join/broadcast
 // touches it -- each is a weak_ptr, not the connection itself, so the cost
 // is a few dozen bytes, not a leaked connection.
+using Member  = std::weak_ptr<lux::detail::WSState>;
+using Members = std::vector<Member>;
+
 class RoomRegistry {
 public:
     static RoomRegistry& instance() {
@@ -47,75 +50,41 @@ public:
         return r;
     }
 
-    void join(const std::string& room, std::weak_ptr<lux::detail::WSState> conn) {
+    void join(const std::string& room, Member conn) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto& members = rooms_[room];
-        prune_locked(members);
-        for (auto& m : members)
-            if (same(m, conn)) return; // already a member
+        remove_locked(members, conn.lock().get());   // joining twice is still one membership
         members.push_back(std::move(conn));
     }
 
-    bool leave(const std::string& room, const lux::detail::WSState* identity) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = rooms_.find(room);
-        if (it == rooms_.end()) return false;
-        auto& members = it->second;
-        bool removed = false;
-        for (size_t i = 0; i < members.size();) {
-            auto sp = members[i].lock();
-            if (!sp) { members.erase(members.begin() + static_cast<long>(i)); continue; }
-            if (sp.get() == identity) {
-                members.erase(members.begin() + static_cast<long>(i));
-                removed = true;
-                continue;
-            }
-            ++i;
-        }
-        if (members.empty()) rooms_.erase(it);
-        return removed;
-    }
-
-    int leave_all(const lux::detail::WSState* identity) {
+    // How many rooms `identity` left: one (or zero) for a named room, every
+    // room it was in for leave_all (room == nullptr).
+    int leave(const std::string* room, const lux::detail::WSState* identity) {
         std::lock_guard<std::mutex> lock(mutex_);
         int removed = 0;
         for (auto it = rooms_.begin(); it != rooms_.end();) {
-            auto& members = it->second;
-            for (size_t i = 0; i < members.size();) {
-                auto sp = members[i].lock();
-                if (!sp) { members.erase(members.begin() + static_cast<long>(i)); continue; }
-                if (sp.get() == identity) {
-                    members.erase(members.begin() + static_cast<long>(i));
-                    ++removed;
-                    continue;
-                }
-                ++i;
-            }
-            if (members.empty()) it = rooms_.erase(it); else ++it;
+            if (!room || it->first == *room) removed += remove_locked(it->second, identity) > 0;
+            it = it->second.empty() ? rooms_.erase(it) : std::next(it);
         }
         return removed;
     }
 
-    // Returns how many live members were actually reached (excluding
-    // `exclude`, if non-null). "Reached" means the send was successfully
-    // posted onto that member's own loop, not that it was delivered --
-    // ws_send_threadsafe() never blocks waiting for that.
+    // Members reached, `exclude` left out. "Reached" is "posted onto that
+    // member's own loop", never a blocking wait for delivery.
     int broadcast(const std::string& room, const std::string& message,
-                 const lux::detail::WSState* exclude) {
-        std::vector<std::weak_ptr<lux::detail::WSState>> targets;
+                  const lux::detail::WSState* exclude) {
+        Members targets;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = rooms_.find(room);
             if (it == rooms_.end()) return 0;
-            prune_locked(it->second);
-            if (it->second.empty()) { rooms_.erase(it); return 0; }
-            targets = it->second; // copy out: never hold the lock while posting
+            remove_locked(it->second, nullptr);
+            targets = it->second;   // copied out: never post while holding the lock
         }
         int reached = 0;
         for (auto& t : targets) {
             auto sp = t.lock();
-            if (!sp || (exclude && sp.get() == exclude)) continue;
-            if (lux::ws_send_threadsafe(t, message)) ++reached;
+            if (sp && sp.get() != exclude && lux::ws_send_threadsafe(t, message)) ++reached;
         }
         return reached;
     }
@@ -124,88 +93,79 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = rooms_.find(room);
         if (it == rooms_.end()) return 0;
-        prune_locked(it->second);
+        remove_locked(it->second, nullptr);
         return static_cast<int>(it->second.size());
     }
 
 private:
-    static bool same(const std::weak_ptr<lux::detail::WSState>& a,
-                     const std::weak_ptr<lux::detail::WSState>& b) {
-        auto sa = a.lock(), sb = b.lock();
-        return sa && sb && sa.get() == sb.get();
+    // Drops `identity` and every dead connection; returns how many entries
+    // were `identity`.
+    static int remove_locked(Members& members, const lux::detail::WSState* identity) {
+        int hits = 0;
+        std::erase_if(members, [&](const Member& m) {
+            auto sp = m.lock();
+            if (sp && identity && sp.get() == identity) { ++hits; return true; }
+            return !sp;
+        });
+        return hits;
     }
 
-    static void prune_locked(std::vector<std::weak_ptr<lux::detail::WSState>>& members) {
-        members.erase(
-            std::remove_if(members.begin(), members.end(),
-                           [](const std::weak_ptr<lux::detail::WSState>& w) { return w.expired(); }),
-            members.end());
-    }
-
-    std::mutex mutex_;
-    std::unordered_map<std::string, std::vector<std::weak_ptr<lux::detail::WSState>>> rooms_;
+    std::mutex                               mutex_;
+    std::unordered_map<std::string, Members> rooms_;
 };
 
+// The calling connection, or an error outside a ws route.
+std::shared_ptr<lux::detail::WSState> self(NativeCtx& ctx, const char* fn, std::string& error) {
+    if (!ctx.ws) { error = std::string("rooms.") + fn + "() can only be called from a ws route"; return nullptr; }
+    return ctx.ws->weak_handle().lock();
+}
+
+// A Dict or List goes out as JSON; a string as is.
+std::string message(const Value& v) { return v.is_str() ? v.as_str() : v.to_json_text(); }
+
 Value fn_rooms_join(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str()) { error = "rooms.join() expects a room name"; return Value::null(); }
-    if (!ctx.ws) { error = "rooms.join() can only be called from a ws route"; return Value::null(); }
+    self(ctx, "join", error);
+    if (!error.empty()) return Value::null();
     RoomRegistry::instance().join(args[0].as_str(), ctx.ws->weak_handle());
     return Value::boolean(true);
 }
 
 Value fn_rooms_leave(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str()) { error = "rooms.leave() expects a room name"; return Value::null(); }
-    if (!ctx.ws) { error = "rooms.leave() can only be called from a ws route"; return Value::null(); }
-    auto self = ctx.ws->weak_handle().lock();
-    return Value::boolean(self && RoomRegistry::instance().leave(args[0].as_str(), self.get()));
+    auto me = self(ctx, "leave", error);
+    return error.empty() ? Value::boolean(me && RoomRegistry::instance().leave(&args[0].as_str(), me.get()))
+                         : Value::null();
 }
 
 Value fn_rooms_leave_all(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
-    if (!ctx.ws) { error = "rooms.leave_all() can only be called from a ws route"; return Value::null(); }
-    auto self = ctx.ws->weak_handle().lock();
-    if (!self) return Value::integer(0);
-    return Value::integer(RoomRegistry::instance().leave_all(self.get()));
+    auto me = self(ctx, "leave_all", error);
+    return error.empty() ? Value::integer(me ? RoomRegistry::instance().leave(nullptr, me.get()) : 0)
+                         : Value::null();
 }
 
-Value fn_rooms_broadcast(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str() || !args[1].is_str()) {
-        error = "rooms.broadcast() expects a room name and a message";
-        return Value::null();
-    }
-    return Value::integer(
-        RoomRegistry::instance().broadcast(args[0].as_str(), args[1].as_str(), nullptr));
+Value fn_rooms_broadcast(NativeCtx&, std::vector<Value>& args, std::string&) {
+    return Value::integer(RoomRegistry::instance().broadcast(args[0].as_str(), message(args[1]), nullptr));
 }
 
-// Same as broadcast(), minus the CALLING connection if it is a member --
-// the common "echo to everyone else in the room" shape (the sender already
-// knows what it sent; it does not need it echoed back). A no-op exclusion,
-// not an error, when called outside a ws route: there is no "self" to
-// leave out, so it behaves exactly like broadcast().
-Value fn_rooms_broadcast_others(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str() || !args[1].is_str()) {
-        error = "rooms.broadcast_others() expects a room name and a message";
-        return Value::null();
-    }
-    std::shared_ptr<lux::detail::WSState> self;
-    if (ctx.ws) self = ctx.ws->weak_handle().lock();
-    return Value::integer(
-        RoomRegistry::instance().broadcast(args[0].as_str(), args[1].as_str(), self.get()));
+// broadcast() minus the calling connection -- "everyone else in the room".
+// Outside a ws route there is no one to leave out, so it is broadcast().
+Value fn_rooms_broadcast_others(NativeCtx& ctx, std::vector<Value>& args, std::string&) {
+    std::shared_ptr<lux::detail::WSState> me = ctx.ws ? ctx.ws->weak_handle().lock() : nullptr;
+    return Value::integer(RoomRegistry::instance().broadcast(args[0].as_str(), message(args[1]), me.get()));
 }
 
-Value fn_rooms_count(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_str()) { error = "rooms.count() expects a room name"; return Value::null(); }
+Value fn_rooms_count(NativeCtx&, std::vector<Value>& args, std::string&) {
     return Value::integer(RoomRegistry::instance().count(args[0].as_str()));
 }
 
 } // namespace
 
 LUX_MODULE(rooms, {
-    {"join",             1, 1, fn_rooms_join},
-    {"leave",            1, 1, fn_rooms_leave},
-    {"leave_all",        0, 0, fn_rooms_leave_all},
-    {"broadcast",        2, 2, fn_rooms_broadcast},
-    {"broadcast_others", 2, 2, fn_rooms_broadcast_others},
-    {"count",            1, 1, fn_rooms_count},
+    {"join",             "s",  fn_rooms_join},
+    {"leave",            "s",  fn_rooms_leave},
+    {"leave_all",        "",   fn_rooms_leave_all},
+    {"broadcast",        "sx", fn_rooms_broadcast},
+    {"broadcast_others", "sx", fn_rooms_broadcast_others},
+    {"count",            "s",  fn_rooms_count},
 })
 
 } // namespace lux_script

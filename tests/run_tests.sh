@@ -295,9 +295,12 @@ check "state.set with a TTL expires"   GET /state/ttl   200 '"before":"abc","exp
 check "state set/get/incr/decr/remove" GET /state/plain 200 '"k":{"x":1},"n":-2,"removed":true,"gone":null'
 check "csv.parse/columns/rows"     GET /csv/basic                 200 '"name":"ana","age":30,"city":"madrid"'
 check "csv row_count"              GET /csv/basic                 200 '"row_count":3'
-check "csv.filter_eq"              GET /csv/filter_and_aggregate  200 '"name":"cleo","age":35,"city":"madrid"'
-check "csv.sum/mean"               GET /csv/filter_and_aggregate  200 '"total_age":90.0,"avg_age":30.0'
-check "csv.group_sum"              GET /csv/filter_and_aggregate  200 '"group":"paris","sum":25.0'
+check "csv.read + List.filter"     GET /csv/read_and_aggregate 200 '"madrid":[{"name":"ana","age":30,"city":"madrid"},{"name":"cleo","age":35,"city":"madrid"}]'
+check "csv.read + List.reduce"     GET /csv/read_and_aggregate 200 '"total_age":90'
+check "csv.read drops the BOM, takes ';'" GET /csv/excel 200 '"rows":[{"nombre":"Pérez; J.","precio":"1,5"}]'
+check "csv.write quotes the delimiter"    GET /csv/excel 200 '"out":"nombre;precio\r\n\"Pérez; J.\";1,5\r\n"'
+check "csv.write from Dicts, formulas defused" GET /csv/write 200 "\"dicts\":\"a,b\\r\\n1,\\\"x,y\\\"\\r\\n'=cmd,\\r\\n\""
+check "csv.write from Lists with columns"      GET /csv/write 200 '"lists":"p,q\r\n1,2\r\n3,4\r\n"'
 check "csv quoted fields (RFC4180)" GET /csv/quoted               200 '"name":"Smith, John","note":"He said \"hi\""'
 check "csv.to_csv roundtrip"       GET /csv/roundtrip             200 'a,b\r\n1,2\r\n3,4\r\n'
 check "csv closed handle errors"   GET /csv/closed_handle         500 'unknown handle'
@@ -344,6 +347,13 @@ check "time.format_iso/format epoch0" GET /time/basic 200 '"iso_epoch0":"1970-01
 check "time.parse_iso roundtrip"   GET /time/parse  200 '"parsed_epoch0":0'
 check "time.parse_iso invalid is null" GET /time/parse 200 '"bad_is_null":true'
 
+check "time.parts"                 GET /time/calendar 200 '"parts":{"year":2024,"month":1,"day":31,"hour":15,"minute":30,"second":0,"weekday":3,"yearday":31}'
+check "time.add_months clamps the day" GET /time/calendar 200 '"feb":"2024-02-29T15:30:00Z","feb_2023":"2023-02-28T00:00:00Z","back":"2022-12-31T15:30:00Z"'
+check "time.start_of"              GET /time/calendar 200 '"day":"2024-01-31T00:00:00Z","week":"2024-01-29T00:00:00Z","month":"2024-01-01T00:00:00Z","year":"2024-01-01T00:00:00Z"'
+check "time.start_of in an offset" GET /time/calendar 200 '"day_cet":"2024-01-31T23:00:00Z"'
+check "time.ago in English"        GET /time/ago 200 '"just":"just now","min":"3 minutes ago","hour":"1 hour ago","future":"in 2 hours"'
+check "time.ago in Spanish"        GET /time/ago 200 '"es":"hace 3 días","es_month":"hace 2 meses","es_future":"dentro de 1 minuto"'
+check "time.parse_iso ms + offset" GET /time/ago 200 '"ms":1717236000500'
 check "regex.test"             GET /regex/test  200 '"yes":true,"no":false'
 check "regex.find"             GET /regex/find  200 '"found":"123","missing":null'
 check "regex.find_all"         GET /regex/find_all 200 '"all":["1","22","333"]'
@@ -351,12 +361,16 @@ check "regex.groups"           GET /regex/groups 200 '"g":["bob@example.com","bo
 check "regex.replace"          GET /regex/replace 200 '"r":"a# b# c#"'
 check "regex.replace backreferences" GET /regex/replace_backref 200 '"r":"host@user"'
 check "regex.split"            GET /regex/split 200 '"r":["a","b","c","d"]'
+check "regex.escape matches only itself" GET /regex/escape 200 '"self":true,"other":false,"cached":true'
 check "regex rejects an invalid pattern" GET /regex/bad_pattern 500 'invalid regex pattern'
 
 check "rooms.count on an unknown room is 0, not an error" GET /rooms/count_empty     200 '"n":0'
 check "rooms.broadcast to an unknown room reaches nobody" GET /rooms/broadcast_empty 200 '"reached":0'
 check "rooms.join outside a ws route is rejected"         GET /rooms/join_outside_ws 500 'can only be called from a ws route'
 
+rooms_out=$(python3 "$HERE/ws_rooms_check.py" "$PORT" 2>&1 | tail -1)
+if [ "$rooms_out" = "ok" ]; then ok "rooms: join, broadcast_others (JSON), count, leave on close"
+else fail "rooms: join, broadcast_others (JSON), count, leave on close" "ok" "$rooms_out"; fi
 check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
 check "proc.start with a bad command is a hard error"  GET /proc/missing_command  500 'proc.start(): could not start'
 check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'

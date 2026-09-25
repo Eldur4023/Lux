@@ -86,6 +86,32 @@ get endpoint("/state/plain"):
     state.decr("n", 3)
     return { "k": state.get("k"), "n": state.get("n"), "removed": state.remove("k"), "gone": state.get("k") }
 
+get endpoint("/time/calendar"):
+    int ts = time.parse_iso("2024-01-31T15:30:00Z")
+    return { "parts": time.parts(ts), "feb": time.format_iso(time.add_months(ts, 1)), "feb_2023": time.format_iso(time.add_months(time.parse_iso("2023-01-31T00:00:00Z"), 1)), "back": time.format_iso(time.add_months(ts, -13)), "day": time.format_iso(time.start_of(ts, "day")), "week": time.format_iso(time.start_of(ts, "week")), "month": time.format_iso(time.start_of(ts, "month")), "year": time.format_iso(time.start_of(ts, "year")), "day_cet": time.format_iso(time.start_of(time.parse_iso("2024-01-31T23:30:00Z"), "day", 60)) }
+
+get endpoint("/time/ago"):
+    int now = time.parse_iso("2024-06-01T12:00:00Z")
+    return { "just": time.ago(now - 5000, now), "min": time.ago(now - 180000, now), "hour": time.ago(now - 3600000, now), "future": time.ago(now + 7200000, now), "es": time.ago(now - 3 * 86400000, now, "es"), "es_month": time.ago(now - 65 * 86400000, now, "es"), "es_future": time.ago(now + 60000, now, "es"), "ms": time.parse_iso("2024-06-01T12:00:00.5+02:00") }
+
+get endpoint("/regex/escape"):
+    string raw = "a.b-c/d(e)[f]{2}*+?^$|\\"
+    string p = regex.escape(raw)
+    return { "self": regex.test("^" + p + "$", raw), "other": regex.test("^" + p + "$", "aXb-c/d(e)[f]{2}*+?^$|\\"), "cached": regex.test("^" + p + "$", raw) }
+
+ws endpoint("/room/:id", string id) origins("http://localhost"):
+    rooms.join("room-" + id)
+    ws.send("joined")
+    while ws.open:
+        string msg = await ws.recv()
+        if msg == null:
+            break
+        if msg == "count":
+            ws.send(str(rooms.count("room-" + id)))
+        else:
+            rooms.broadcast_others("room-" + id, { "from": msg })
+    rooms.leave_all()
+
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
     int h = csv.parse(data)
@@ -95,17 +121,24 @@ get endpoint("/csv/basic"):
     csv.close(h)
     return { "columns": cols, "rows": rows, "row_count": n }
 
-get endpoint("/csv/filter_and_aggregate"):
-    string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
-    int h = csv.parse(data)
-    int madrid = csv.filter_eq(h, "city", "madrid")
-    List<Json> rows = csv.rows(madrid)
-    double total = csv.sum(h, "age")
-    double avg = csv.mean(h, "age")
-    List<Json> grouped = csv.group_sum(h, "city", "age")
-    csv.close(h)
-    csv.close(madrid)
-    return { "madrid_rows": rows, "total_age": total, "avg_age": avg, "grouped": grouped }
+fn bool in_madrid(Json r):
+    return r["city"] == "madrid"
+
+fn int add_age(int acc, Json r):
+    return acc + r["age"]
+
+get endpoint("/csv/read_and_aggregate"):
+    List<Json> rows = csv.read("name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n")
+    List<Json> madrid = rows.filter(in_madrid)
+    return { "madrid": madrid, "total_age": rows.reduce(add_age, 0), "first": rows[0] }
+
+get endpoint("/csv/excel"):
+    List<Json> rows = csv.read("﻿nombre;precio\n\"Pérez; J.\";1,5\n", true, ";")
+    return { "rows": rows, "out": csv.write(rows, null, ";") }
+
+get endpoint("/csv/write"):
+    List<Json> rows = [{ "a": 1, "b": "x,y" }, { "a": "=cmd", "b": null }]
+    return { "dicts": csv.write(rows), "lists": csv.write([[1, 2], [3, 4]], ["p", "q"]) }
 
 get endpoint("/csv/quoted"):
     string data = "name,note\n\"Smith, John\",\"He said \"\"hi\"\"\"\nplain,ok\n"
