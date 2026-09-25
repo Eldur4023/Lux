@@ -202,6 +202,11 @@ bool             is_db_module(const std::string& name);
 // there is no suspension between the two moments, so requests cannot cross.
 std::vector<std::string>& last_validation_messages();
 
+// The request a --native function is running for, on this thread: set by the
+// VM (and by a native route) right before calling one, so that a module call
+// inside it gets the same NativeCtx bytecode would give it.
+NativeCtx*& current_native_ctx();
+
 // The real message of the last runtime error (division by zero, index out
 // of range, ...) on this thread -- same idea and same one-request lifetime
 // as last_validation_messages() above, filled right before the route's own

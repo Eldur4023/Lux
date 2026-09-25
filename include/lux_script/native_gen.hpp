@@ -303,7 +303,8 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
                                               const std::vector<std::string>& nombre_por_indice,
                                               const TablaFirmas& firmas,
                                               const TablaClases& clases,
-                                              const TablaRoles& roles);
+                                              const TablaRoles& roles,
+                                              std::string* motivo = nullptr);
 
 // Funciones libres que necesita el binding de parametros que genera
 // generate_native_route() -- mismo criterio, mismo formato de error, que

@@ -621,8 +621,11 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                     (*native_->funcs)[index]) {
                     std::vector<NativeValue> nargs(args.size());
                     for (size_t i = 0; i < args.size(); ++i) nargs[i] = a_nativevalue(args[i]);
+                    NativeCtx* outer = current_native_ctx();
+                    current_native_ctx() = &ctx;
                     NativeValue r = (*native_->funcs)[index](nargs.data(),
                                                              static_cast<int32_t>(nargs.size()));
+                    current_native_ctx() = outer;
                     if (r.tag == NativeValue::Tag::Error) {
                         std::string msg = native_->error_message ? native_->error_message()
                                                                   : "native error";

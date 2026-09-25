@@ -67,6 +67,11 @@ public:
     using RouteFnAsync = lux::Task<void> (*)(lux::Request&, lux::Response&);
     std::vector<RouteFnAsync> rutas_async_por_indice;
 
+    // Hands the module's function and template tables to the generated
+    // code, for the NativeCtx its routes build (map(f), render(...)).
+    using BindFn = void (*)(const void* functions, const void* templates);
+    BindFn bind = nullptr;
+
     size_t compiled() const;
     size_t routes_compiled() const;
 
@@ -78,7 +83,7 @@ private:
     friend std::unique_ptr<NativeModule> compile_native(const Program&, const FunctionSigs&,
                                                           const ClassSigs&,
                                                           const std::filesystem::path&,
-                                                          std::string&);
+                                                          std::string&, std::vector<std::string>*);
     void* handle_ = nullptr;
 };
 
@@ -99,6 +104,7 @@ private:
 std::unique_ptr<NativeModule> compile_native(const Program& prog, const FunctionSigs& sigs,
                                               const ClassSigs& clases,
                                               const std::filesystem::path& cache_dir,
-                                              std::string& aviso);
+                                              std::string& aviso,
+                                              std::vector<std::string>* motivos_ruta = nullptr);
 
 } // namespace lux_script

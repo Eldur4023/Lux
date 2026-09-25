@@ -515,6 +515,11 @@ std::vector<std::string>& last_validation_messages() {
     return msgs;
 }
 
+NativeCtx*& current_native_ctx() {
+    thread_local NativeCtx* ctx = nullptr;
+    return ctx;
+}
+
 std::string& last_internal_error() {
     thread_local std::string msg;
     return msg;

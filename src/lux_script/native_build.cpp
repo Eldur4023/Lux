@@ -18,7 +18,7 @@ NativeModule::~NativeModule() {
 NativeModule::NativeModule(NativeModule&& o) noexcept
     : por_indice(std::move(o.por_indice)), error_message(o.error_message),
       rutas_por_indice(std::move(o.rutas_por_indice)),
-      rutas_async_por_indice(std::move(o.rutas_async_por_indice)), handle_(o.handle_) {
+      rutas_async_por_indice(std::move(o.rutas_async_por_indice)), bind(o.bind), handle_(o.handle_) {
     o.handle_ = nullptr;
 }
 
@@ -29,6 +29,7 @@ NativeModule& NativeModule::operator=(NativeModule&& o) noexcept {
         error_message          = o.error_message;
         rutas_por_indice       = std::move(o.rutas_por_indice);
         rutas_async_por_indice = std::move(o.rutas_async_por_indice);
+        bind                   = o.bind;
         handle_                = o.handle_;
         o.handle_              = nullptr;
     }
@@ -81,8 +82,10 @@ TablaFirmas construir_firmas(const Program& prog) {
 std::unique_ptr<NativeModule> compile_native(const Program& prog, const FunctionSigs& sigs,
                                               const ClassSigs& clases_sig,
                                               const std::filesystem::path& cache_dir,
-                                              std::string& aviso) {
+                                              std::string& aviso,
+                                              std::vector<std::string>* motivos_ruta) {
     aviso.clear();
+    if (motivos_ruta) motivos_ruta->assign(prog.routes.size(), "");
 
     std::vector<std::string> nombre_por_indice(sigs.size());
     for (const auto& [nombre, sig] : sigs)
@@ -217,10 +220,14 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         // casos -- ver el comentario de RutaNativa).
         Emitter  emitter(diags_ir, &sigs, &clases_sig, &prog.imports);
         IrBlock  body;
-        if (!emitter.check_route(r, descartable, diags_ir, &body)) continue;
+        if (!emitter.check_route(r, descartable, diags_ir, &body)) {
+            if (motivos_ruta) (*motivos_ruta)[i] = "not representable yet";
+            continue;
+        }
 
         auto generada = generate_native_route(r, body, static_cast<int>(i), nombre_por_indice,
-                                            firmas, clases, roles);
+                                            firmas, clases, roles,
+                                            motivos_ruta ? &(*motivos_ruta)[i] : nullptr);
         if (!generada) continue;
 
         rutas_cuerpos += generada->cuerpo_cpp + "\n\n";
@@ -282,8 +289,9 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // <modulo>.query/exec/last_id(...)` -- mismo criterio que Task/sleep:
     // siempre que haya rutas, no solo las que de verdad usan una base de
     // datos.
-    if (con_rutas)
-        codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
+    // Always, not only with routes: a function can call a module too (see
+    // lux_fn_module_call), through the request its caller is serving.
+    codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
                   "#include <lux/task.hpp>\n#include <lux/blocking_pool.hpp>\n"
                   "#include <lux_script/db.hpp>\n#include <lux_script/builtin_module.hpp>\n\n" +
                   route_runtime_prelude() + "\n";
@@ -429,6 +437,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     out->error_message =
         reinterpret_cast<ErrorMessageFn>(dlsym(handle, "lux_native_error_message"));
 
+    out->bind = reinterpret_cast<NativeModule::BindFn>(dlsym(handle, "lux_native_bind"));
+
     std::string simbolos_sin_resolver;
     for (const auto& g : generadas) {
         void* sym = dlsym(handle, g.simbolo_abi.c_str());
@@ -446,6 +456,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         out->rutas_async_por_indice[g.indice] = reinterpret_cast<NativeModule::RouteFnAsync>(sym);
     }
     if (!out->error_message) simbolos_sin_resolver += " lux_native_error_message";
+    if (!out->bind) simbolos_sin_resolver += " lux_native_bind";
     if (!simbolos_sin_resolver.empty())
         aviso = "--native: unresolved symbol(s) after compiling (served with bytecode):" +
                 simbolos_sin_resolver;

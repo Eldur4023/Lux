@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace lux_script {
@@ -302,10 +303,6 @@ public:
     // lo usa para generar una corrutina de verdad en vez de una funcion
     // plana.
     bool usa_await() const { return usa_await_; }
-    // A native module call needs the route's req/res (a module function
-    // takes a NativeCtx): only a route can host one, so a function or
-    // method that makes one stays in bytecode.
-    bool usa_modulo() const { return usa_modulo_; }
 
     // A module call is representable when every argument is a value that
     // becomes a Value; it is typed by its signature's return.
@@ -456,26 +453,59 @@ public:
 
     // Nullopt si no se puede demostrar; si no, el Type exacto que el VM
     // SIEMPRE produciria para esta expresion, con los mismos valores.
+    // Does this Binary run on Values (lux_json_*), not on native types?
+    bool binaria_json(const IrExpr& e) const { return binarias_json_.count(&e) > 0; }
+
+    // A Binary whose type C++ knows up front, from two native operand types.
+    static std::optional<Type> binaria_nativa(const std::string& op, const Type& tl, const Type& tr) {
+        // and/or (vm.cpp: JumpIfFalsePeek/JumpIfTruePeek) give the winning
+        // operand, Python-style: && / || only match that between two bools.
+        if (op == "and" || op == "or")
+            return (tl.kind() == Type::Kind::Bool && tr.kind() == Type::Kind::Bool)
+                       ? std::optional<Type>(Type::primitive(Type::Kind::Bool))
+                       : std::nullopt;
+        if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=") {
+            bool numericos = es_numerico(tl.kind()) && es_numerico(tr.kind());
+            bool strings   = tl.kind() == Type::Kind::String && tr.kind() == Type::Kind::String;
+            return (numericos || strings) ? std::optional<Type>(Type::primitive(Type::Kind::Bool))
+                                          : std::nullopt;
+        }
+        if (op == "+" && tl.kind() == Type::Kind::String && tr.kind() == Type::Kind::String)
+            return Type::primitive(Type::Kind::String);
+        if (!es_numerico(tl.kind()) || !es_numerico(tr.kind())) return std::nullopt;
+        const bool ints = tl.kind() == Type::Kind::Int && tr.kind() == Type::Kind::Int;
+        if (op == "%") return ints ? std::optional<Type>(Type::primitive(Type::Kind::Int)) : std::nullopt;
+        // int / int is an Int when exact and a Float when not: only the
+        // values decide, so it goes through Values.
+        if (op == "/") return ints ? std::nullopt : std::optional<Type>(Type::primitive(Type::Kind::Float));
+        return Type::primitive(ints ? Type::Kind::Int : Type::Kind::Float);
+    }
+
     std::optional<Type> tipo_provable(const IrExpr& e) const {
+        auto t = tipo_provable_(e);
+        if (!t && !fallo_) fallo_ = &e;   // the innermost one: children return first
+        return t;
+    }
+
+    // Why the last block_compilable() said no, for `--native --check`
+    // ("line 12: try"). Empty while everything compiled.
+    const std::string& motivo() const { return motivo_; }
+    void motivo(std::string m) { if (motivo_.empty()) motivo_ = std::move(m); }
+
+private:
+    std::optional<Type> tipo_provable_(const IrExpr& e) const {
         switch (e.kind) {
             case IrExprKind::IntLit:    return Type::primitive(Type::Kind::Int);
             case IrExprKind::FloatLit:  return Type::primitive(Type::Kind::Float);
             case IrExprKind::BoolLit:   return Type::primitive(Type::Kind::Bool);
             case IrExprKind::StringLit: return Type::primitive(Type::Kind::String);
 
-            // Sin representacion en esta fase, o sin sentido fuera de una
-            // ruta.
+            // A dynamic Value, like everything else only the VM's rules
+            // decide: null, and a function passed to map/filter/... (the
+            // callback runs on the bytecode of NativeCtx::functions).
             case IrExprKind::NullLit:
-                return std::nullopt;
-
-            // Un Value::Type::Func no tiene representacion nativa (no hay
-            // NativeValue::Tag para "indice de funcion") -- igual que
-            // NativeModuleCall (NATIVE-MODULES.md §3.4), cae aqui sin caso
-            // dedicado y el fallback de mas abajo (std::nullopt) basta: la
-            // ruta que use list.map/filter/reduce/for_each con un FuncRef
-            // simplemente se queda en bytecode, no es un error.
             case IrExprKind::FuncRef:
-                return std::nullopt;
+                return Type::json();
 
             // Fase 5/5.5/5.6: los awaits que esta fase sabe representar --
             // `await sleep(ms)` (traducido a `co_await lux::sleep(...)`
@@ -507,7 +537,7 @@ public:
                 if (call.call_shape == IrCallShape::BuiltinModuleCall) {
                     const BuiltinModuleFn& fn = builtin_module_function_at(call.call_index);
                     if (!fn.is_async || !argumentos_modulo(call)) return std::nullopt;
-                    usa_await_ = usa_modulo_ = true;
+                    usa_await_ = true;
                     return tipo_retorno_modulo(fn);
                 }
 
@@ -681,94 +711,39 @@ public:
                 // esta rama entera.
                 bool lhs_null = e.lhs->kind == IrExprKind::NullLit;
                 bool rhs_null = e.rhs->kind == IrExprKind::NullLit;
-                if (lhs_null || rhs_null) {
-                    if (e.text != "==" && e.text != "!=") return std::nullopt;
-                    const IrExpr& otro = lhs_null ? *e.rhs : *e.lhs;
-                    auto to = tipo_provable(otro);
-                    if (!to || !es_json_dinamico(*to)) return std::nullopt;
-                    return Type::primitive(Type::Kind::Bool);
+                if ((lhs_null || rhs_null) && (e.text == "==" || e.text == "!=")) {
+                    auto to = tipo_provable(lhs_null ? *e.rhs : *e.lhs);
+                    if (to && es_json_dinamico(*to)) return Type::primitive(Type::Kind::Bool);
                 }
 
                 auto tl = tipo_provable(*e.lhs);
                 auto tr = tipo_provable(*e.rhs);
                 if (!tl || !tr) return std::nullopt;
+                if (!es_json_dinamico(*tl) && !es_json_dinamico(*tr))
+                    if (auto t = binaria_nativa(e.text, *tl, *tr)) return t;
 
-                // Json (Fase 5.5) en cualquiera de los dos lados: se
-                // resuelve en tiempo de ejecucion con la MISMA logica que
-                // vm.cpp -- numeric_pair()/compare()/Op::Add/Sub/Mul/Div/
-                // Mod/Eq/Ne, ver los lux_json_* de route_runtime_prelude.
-                // and/or quedan fuera: la semantica "el operando que gana"
-                // (ver el comentario de mas abajo) tampoco se generaba para
-                // dos operandos YA tipados que no fueran bool, y un Json es
-                // menos demostrable que eso todavia.
-                if (es_json_dinamico(*tl) || es_json_dinamico(*tr)) {
-                    // El lado que NO es dinamico tiene que ser algo que
-                    // Generador::valor_json() sepa convertir a Value -- si
-                    // fuera, por ejemplo, una instancia de clase, no habria
-                    // ninguna llamada de C++ que generar (valor_json() no
-                    // la cubre) y esto quedaria en un cuerpo roto en vez de
-                    // caer a bytecode a tiempo.
-                    auto compatible = [](const Type& t) {
-                        return es_escalar_json(t.kind()) || t.kind() == Type::Kind::List ||
-                               t.kind() == Type::Kind::Dict || t.kind() == Type::Kind::Json;
-                    };
-                    if (!compatible(*tl) || !compatible(*tr)) return std::nullopt;
-                    if (e.text == "and" || e.text == "or") return std::nullopt;
-                    if (e.text == "==" || e.text == "!=" || e.text == "<" || e.text == "<=" ||
-                        e.text == ">" || e.text == ">=")
-                        return Type::primitive(Type::Kind::Bool);
-                    if (e.text == "+" || e.text == "-" || e.text == "*" || e.text == "/" ||
-                        e.text == "%")
-                        return Type::json();
-                    return std::nullopt;
+                // Anything else is decided at run time, by the same rules as
+                // vm.cpp (numeric_pair()/compare()/Op::Add... -- the
+                // lux_json_* of route_runtime_prelude): an int / int that may
+                // not be exact, 1 + "one", 5 and 10. Both sides have to
+                // become a Value (valor_json()); a class instance cannot.
+                auto compatible = [](const Type& t) {
+                    return es_escalar_json(t.kind()) || t.kind() == Type::Kind::List ||
+                           t.kind() == Type::Kind::Dict || t.kind() == Type::Kind::Json;
+                };
+                if (!compatible(*tl) || !compatible(*tr)) return std::nullopt;
+                if (e.text == "and" || e.text == "or") {
+                    // Generated as a lambda (the winning operand, evaluated
+                    // once), and a lambda cannot co_await.
+                    if (contiene_await(*e.lhs) || contiene_await(*e.rhs)) return std::nullopt;
+                    binarias_json_.insert(&e);
+                    return Type::json();
                 }
-
-                // and/or (vm.cpp: JumpIfFalsePeek/JumpIfTruePeek) devuelven
-                // el VALOR del operando que gana, al estilo Python -- NO un
-                // booleano forzado. Traducirlo a &&/|| (lo que hace
-                // Generador::expr) solo coincide, observablemente, cuando
-                // los dos lados YA son bool: alli "el operando que gana" y
-                // "el resultado de &&/||" son el mismo valor. Para
-                // cualquier otro tipo (`5 and 10` -> 10, no `true`) no
-                // coinciden, y esta fase no genera la logica de verdad
-                // (evaluar una vez, devolver el operando) -- se queda sin
-                // compilar.
-                if (e.text == "and" || e.text == "or")
-                    return (tl->kind() == Type::Kind::Bool && tr->kind() == Type::Kind::Bool)
-                               ? std::optional<Type>(Type::primitive(Type::Kind::Bool))
-                               : std::nullopt;
-
+                binarias_json_.insert(&e);
                 if (e.text == "==" || e.text == "!=" || e.text == "<" || e.text == "<=" ||
-                    e.text == ">" || e.text == ">=") {
-                    bool numericos = es_numerico(tl->kind()) && es_numerico(tr->kind());
-                    bool strings   = tl->kind() == Type::Kind::String &&
-                                    tr->kind() == Type::Kind::String;
-                    return (numericos || strings) ? std::optional<Type>(Type::primitive(Type::Kind::Bool))
-                                                  : std::nullopt;
-                }
-
-                if (e.text == "+" && tl->kind() == Type::Kind::String &&
-                    tr->kind() == Type::Kind::String)
-                    return Type::primitive(Type::Kind::String);
-
-                if (!es_numerico(tl->kind()) || !es_numerico(tr->kind())) return std::nullopt;
-
-                if (e.text == "%") // vm.cpp: '%' exige enteros a los dos lados
-                    return (tl->kind() == Type::Kind::Int && tr->kind() == Type::Kind::Int)
-                               ? std::optional<Type>(Type::primitive(Type::Kind::Int)) : std::nullopt;
-
-                if (e.text == "/")
-                    // vm.cpp: entre dos int, Int si la division es EXACTA y
-                    // Float si no -- una rama que solo el valor en tiempo de
-                    // ejecucion decide. No demostrable estaticamente.
-                    return (tl->kind() == Type::Kind::Int && tr->kind() == Type::Kind::Int)
-                               ? std::nullopt : std::optional<Type>(Type::primitive(Type::Kind::Float));
-
-                // +, -, *: Int si los dos son Int, Float en cualquier otra
-                // combinacion numerica (vm.cpp: `ints ? integer : real`).
-                return (tl->kind() == Type::Kind::Int && tr->kind() == Type::Kind::Int)
-                           ? std::optional<Type>(Type::primitive(Type::Kind::Int))
-                           : std::optional<Type>(Type::primitive(Type::Kind::Float));
+                    e.text == ">" || e.text == ">=")
+                    return Type::primitive(Type::Kind::Bool);
+                return Type::json();
             }
 
             case IrExprKind::Ternary: {
@@ -780,6 +755,11 @@ public:
                 auto ts = tipo_provable(*e.lhs);
                 auto tn = tipo_provable(*e.rhs);
                 if (ts && tn && *ts == *tn) return ts;
+                // Two different types: the result is a Value either way.
+                if (es_valor_json(*e.lhs) && es_valor_json(*e.rhs)) {
+                    binarias_json_.insert(&e);
+                    return Type::json();
+                }
                 return std::nullopt;
             }
 
@@ -1021,7 +1001,6 @@ public:
                 if (e.call_shape == IrCallShape::BuiltinModuleCall) {
                     const BuiltinModuleFn& fn = builtin_module_function_at(e.call_index);
                     if (fn.is_async || !argumentos_modulo(e)) return std::nullopt;
-                    usa_modulo_ = true;
                     return tipo_retorno_modulo(fn);
                 }
                 return std::nullopt;
@@ -1030,9 +1009,63 @@ public:
         return std::nullopt;
     }
 
+    static const char* nombre_expr(IrExprKind k) {
+        switch (k) {
+            case IrExprKind::NullLit: return "null";
+            case IrExprKind::Ident: return "a variable";
+            case IrExprKind::This: return "this";
+            case IrExprKind::Member: return "a member";
+            case IrExprKind::Index: return "an index";
+            case IrExprKind::Unary: return "a unary operator";
+            case IrExprKind::Binary: return "an operator";
+            case IrExprKind::Ternary: return "a conditional";
+            case IrExprKind::Await: return "await";
+            case IrExprKind::PreStep: case IrExprKind::PostStep: return "++/--";
+            case IrExprKind::ListLit: return "a List literal";
+            case IrExprKind::DictLit: return "a Dict literal";
+            case IrExprKind::FuncRef: return "a function reference";
+            default: return "an expression";
+        }
+    }
+    static const char* nombre_stmt(IrStmtKind k) {
+        switch (k) {
+            case IrStmtKind::Return: return "return";
+            case IrStmtKind::VarDecl: return "a declaration";
+            case IrStmtKind::Assign: return "an assignment";
+            case IrStmtKind::If: return "if";
+            case IrStmtKind::While: return "while";
+            case IrStmtKind::For: return "for";
+            case IrStmtKind::Require: return "require";
+            case IrStmtKind::Try: return "try";
+            default: return "a statement";
+        }
+    }
+    std::string describir(const IrStmt& s) const {
+        const IrExpr* e = fallo_;
+        std::string que;
+        if (s.kind == IrStmtKind::Try) que = "try";
+        else if (s.kind == IrStmtKind::Assign && s.assign_target == IrAssignTarget::Session) que = "session." + s.assign_field + " =";
+        else if (!e) que = nombre_stmt(s.kind);
+        else if (e->kind == IrExprKind::Call) {
+            std::string n = e->call_name;
+            if (e->call_shape == IrCallShape::BuiltinModuleCall) n = builtin_module_function_at(e->call_index).full_name;
+            else if (e->call_shape == IrCallShape::UserFunctionCall && e->call_index >= 0 &&
+                     static_cast<size_t>(e->call_index) < nombre_por_indice_.size())
+                n = nombre_por_indice_[e->call_index];
+            que = n.empty() ? std::string("a call") : n + "()";
+        }
+        else if (e->kind == IrExprKind::Member && !e->call_name.empty()) que = e->call_name + "." + e->text;
+        else que = nombre_expr(e->kind);
+        return "line " + std::to_string((e ? e->loc : s.loc).line) + ": " + que;
+    }
+
+public:
     bool block_compilable(const IrBlock& b, const Type& retorno_fn) {
-        for (const auto& s : b)
-            if (!s || !stmt_compilable(*s, retorno_fn)) return false;
+        for (const auto& s : b) {
+            fallo_ = nullptr;
+            if (!s) return false;
+            if (!stmt_compilable(*s, retorno_fn)) { motivo(describir(*s)); return false; }
+        }
         return true;
     }
 
@@ -1235,7 +1268,9 @@ private:
     std::map<int, Type>              ranura_tipos_;
     mutable bool                     usa_await_ = false;
     mutable bool                     usa_transaccion_ = false;
-    mutable bool                     usa_modulo_ = false;
+    mutable const IrExpr*            fallo_ = nullptr;
+    mutable std::set<const IrExpr*>  binarias_json_;
+    std::string                      motivo_;
 };
 
 // ── Generacion ────────────────────────────────────────────────────────────
@@ -1311,6 +1346,8 @@ public:
             case IrExprKind::BoolLit:   return e.bool_value ? "true" : "false";
             case IrExprKind::StringLit: return "std::string(" + literal_string(e.text) + ")";
             case IrExprKind::Ident:     return nombre_cpp(e.text);
+            case IrExprKind::NullLit:   return "Value::null()";
+            case IrExprKind::FuncRef:   return "Value::func(" + std::to_string(e.call_index) + ")";
 
             // CTAD (una guia de deduccion en list_runtime_prelude) deduce T
             // solo con los elementos, sin que Generador tenga que saber el
@@ -1388,14 +1425,13 @@ public:
                 // de Comprobador::tipo_provable, mismo caso. `Value` ya
                 // sabe responder si es null; no hace falta pasar por
                 // valor_json() (el lado null no tiene NADA que convertir).
-                if (e.lhs->kind == IrExprKind::NullLit || e.rhs->kind == IrExprKind::NullLit) {
+                if (!comprobador_.binaria_json(e) &&
+                    (e.lhs->kind == IrExprKind::NullLit || e.rhs->kind == IrExprKind::NullLit)) {
                     const IrExpr& otro = e.lhs->kind == IrExprKind::NullLit ? *e.rhs : *e.lhs;
                     std::string chequeo = expr(otro) + ".is_null()";
                     return e.text == "==" ? chequeo : ("!" + chequeo);
                 }
-                auto tl = comprobador_.tipo_provable(*e.lhs);
-                auto tr = comprobador_.tipo_provable(*e.rhs);
-                if (es_json_dinamico(*tl) || es_json_dinamico(*tr)) {
+                if (comprobador_.binaria_json(e)) {
                     // Cada lado se lleva a Value con valor_json() -- si YA
                     // es Json, es la identidad; si es un escalar/List/Dict
                     // nativo, lo envuelve (Value::integer/real/boolean/str
@@ -1403,6 +1439,8 @@ public:
                     // el valor de retorno de una ruta.
                     std::string a = valor_json(*e.lhs);
                     std::string b = valor_json(*e.rhs);
+                    if (e.text == "and") return "([&]() -> Value { Value __a = " + a + "; return __a.truthy() ? " + b + " : __a; }())";
+                    if (e.text == "or")  return "([&]() -> Value { Value __a = " + a + "; return __a.truthy() ? __a : " + b + "; }())";
                     if (e.text == "+")  return "lux_json_add("  + a + ", " + b + ")";
                     if (e.text == "-")  return "lux_json_arit(" + a + ", " + b + ", '-')";
                     if (e.text == "*")  return "lux_json_arit(" + a + ", " + b + ", '*')";
@@ -1424,6 +1462,8 @@ public:
             }
 
             case IrExprKind::Ternary:
+                if (comprobador_.binaria_json(e))
+                    return "(" + cond(*e.object) + " ? " + valor_json(*e.lhs) + " : " + valor_json(*e.rhs) + ")";
                 return "(" + cond(*e.object) + " ? " + expr(*e.lhs) + " : " + expr(*e.rhs) + ")";
 
             case IrExprKind::PreStep:
@@ -1459,7 +1499,9 @@ public:
                 // Emitter::emit_call, IrCallShape::ClassMethodCall).
                 if (e.call_shape == IrCallShape::ClassMethodCall) {
                     const auto& rol = comprobador_.roles().at(e.call_index);
-                    std::string s = "l_" + rol.clase + "_" + rol.metodo + "(" + expr(*e.object);
+                    const std::string f = "l_" + rol.clase + "_" + rol.metodo;
+                    std::string s = ruta_ ? "lux_call_in(l_ctx, " + f + ", " + expr(*e.object)
+                                          : f + "(" + expr(*e.object);
                     for (const auto& a : e.args) s += ", " + expr(*a.value);
                     s += ")";
                     return s;
@@ -1606,13 +1648,14 @@ public:
                 // argumentos -- mismo orden que call_method(recv, args) en
                 // natives.cpp, solo que en tiempo de compilacion en vez de
                 // por nombre en tiempo de ejecucion.
-                std::string s = e.call_shape == IrCallShape::BuiltinMethodCall
-                                   ? "lux_str_" + e.call_name
-                                   : nombre_cpp(nombre_por_indice_.at(static_cast<size_t>(e.call_index)));
-                s += "(";
-                if (e.call_shape == IrCallShape::BuiltinMethodCall) s += expr(*e.object);
+                const bool metodo = e.call_shape == IrCallShape::BuiltinMethodCall;
+                std::string s = metodo ? "lux_str_" + e.call_name
+                                       : nombre_cpp(nombre_por_indice_.at(static_cast<size_t>(e.call_index)));
+                const bool en_ctx = !metodo && ruta_;
+                s = en_ctx ? "lux_call_in(l_ctx, " + s : s + "(";
+                if (metodo) s += expr(*e.object);
                 for (size_t i = 0; i < e.args.size(); ++i) {
-                    if (i || e.call_shape == IrCallShape::BuiltinMethodCall) s += ", ";
+                    if (i || metodo || en_ctx) s += ", ";
                     s += expr(*e.args[i].value);
                 }
                 s += ")";
@@ -1679,7 +1722,8 @@ public:
         params += ")";
         const std::string id = std::to_string(call.call_index);
         const std::string v = awaited ? "(co_await lux_module_await(req, res, " + id + ", " + params + "))"
-                                      : "lux_module_call(req, res, " + id + ", " + params + ")";
+                            : ruta_ ? "lux_module_call(req, res, " + id + ", " + params + ")"
+                                    : "lux_fn_module_call(" + id + ", " + params + ")";
         const std::string& r = builtin_module_function_at(call.call_index).returns;
         if (r == "string") return "lux_module_str(" + v + ")";
         if (r == "int")    return "lux_module_int(" + v + ")";
@@ -1895,6 +1939,12 @@ public:
     // already wrote the response (pdf.send()), the return value is dropped.
     std::string respuesta_de_retorno(const IrExpr* e) const {
         if (!e) return "if (!res.is_committed()) res.status(204).send(\"\"); " + ret_vacio();
+        // A dynamic value may turn out null at run time: a 204, as in bytecode.
+        auto t = comprobador_.tipo_provable(*e);
+        if (t && es_json_dinamico(*t))
+            return "{ Value __r = " + valor_json(*e) + "; if (!res.is_committed()) { if (__r.is_null()) "
+                   "res.status(204).send(\"\"); else res.header(\"Content-Type\", \"application/json; "
+                   "charset=utf-8\").send(__r.to_json_text()); } } " + ret_vacio();
         return "if (!res.is_committed()) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
                valor_json(*e) + ".to_json_text()); " + ret_vacio();
     }
@@ -2132,7 +2182,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // funcion nativa, nunca con `co_await`, asi que suspenderse a mitad no
     // tiene a quien avisar). Rechazar aqui dejala en bytecode entera, igual
     // que cualquier otra pieza fuera de alcance.
-    if (comprobador.usa_await() || comprobador.usa_modulo()) return std::nullopt;
+    if (comprobador.usa_await()) return std::nullopt;
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
@@ -2245,7 +2295,7 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
     // funcion nativa, nunca con `co_await`, asi que suspenderse a mitad no
     // tiene a quien avisar). Rechazar aqui dejala en bytecode entera, igual
     // que cualquier otra pieza fuera de alcance.
-    if (comprobador.usa_await() || comprobador.usa_modulo()) return std::nullopt;
+    if (comprobador.usa_await()) return std::nullopt;
     // Ver el comentario de bloque_siempre_retorna(): sin esto, un cuerpo
     // que "cae al final" en algun camino (el VM da null con naturalidad)
     // generaria una funcion C++ no-void que puede llegar al final sin
@@ -2437,7 +2487,12 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
                                               const std::vector<std::string>& nombre_por_indice,
                                               const TablaFirmas& firmas,
                                               const TablaClases& clases,
-                                              const TablaRoles& roles) {
+                                              const TablaRoles& roles,
+                                              std::string* motivo) {
+    auto no = [&](std::string m) -> std::optional<RutaNativa> {
+        if (motivo) *motivo = std::move(m);
+        return std::nullopt;
+    };
     // ws/sse no producen un IrBlock comparable (su bucle vive fuera del
     // cuerpo, en build_routes) -- ni falta que hace: nunca llegan aqui con
     // logica que valga la pena compilar de esta forma.
@@ -2471,13 +2526,13 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         // que bind_params habria rechazado.
         auto cit = clases.find(p.type.name);
         if (cit != clases.end()) {
-            if (p.type.optional) return std::nullopt; // "Clase?" como cuerpo: fuera de alcance
+            if (p.type.optional) return no("parameter " + p.name + ": an optional body"); // fuera de alcance
             bool en_path_cuerpo = std::find(en_patron.begin(), en_patron.end(), p.name) !=
                                   en_patron.end();
             if (en_path_cuerpo) return std::nullopt;
             if (route.method == "GET" || route.method == "DELETE") return std::nullopt;
             if (cuerpo_visto) return std::nullopt;
-            if (!cit->second.reglas_ok) return std::nullopt; // ver el comentario de ClaseNativa
+            if (!cit->second.reglas_ok) return no("parameter " + p.name + ": its class rules"); // ver el comentario de ClaseNativa
             cuerpo_visto = true;
             ParamRuta pr;
             pr.nombre    = p.name;
@@ -2493,11 +2548,11 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         // el header): sin `?`, y solo los cuatro escalares -- un
         // File/List<File> nunca produce ninguno de esos Type::Kind, asi
         // que ya queda excluido por la misma comprobacion.
-        if (p.type.optional) return std::nullopt;
+        if (p.type.optional) return no("parameter " + p.name + ": optional (?)");
         Type t = Type::from_declared(p.type);
         if (t.kind() != Type::Kind::Int && t.kind() != Type::Kind::Float &&
             t.kind() != Type::Kind::Bool && t.kind() != Type::Kind::String)
-            return std::nullopt;
+            return no("parameter " + p.name + ": type " + t.to_string());
         bool en_path = std::find(en_patron.begin(), en_patron.end(), p.name) != en_patron.end();
 
         bool        con_defecto = false;
@@ -2518,7 +2573,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
             if (d.kind == ExprKind::StringLit) texto_defecto = d.text;
             else if (d.kind == ExprKind::IntLit) texto_defecto = std::to_string(d.int_value);
             else if (d.kind == ExprKind::BoolLit) texto_defecto = d.bool_value ? "true" : "false";
-            else return std::nullopt;
+            else return no("parameter " + p.name + ": its default");
             con_defecto = true;
         }
         params.push_back({p.name, std::move(t), en_path, con_defecto, std::move(texto_defecto)});
@@ -2534,7 +2589,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // solo tienen que demostrar que su valor es construible como Value
     // (Comprobador::es_valor_json), no un Type nativo exacto -- ver esos dos
     // casos en Comprobador::stmt_compilable.
-    if (!comprobador.block_compilable(body, Type::json())) return std::nullopt;
+    if (!comprobador.block_compilable(body, Type::json())) return no(comprobador.motivo());
     // Fase 5: si el cuerpo demostro algun `await` (hoy: solo `await
     // sleep(ms)`, ver Comprobador::tipo_provable), esta ruta se genera
     // como una corrutina de verdad -- ver el comentario del constructor de
@@ -2592,6 +2647,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // mismo hilo. Barato: un vector vacio no reasigna memoria al
     // limpiarse.
     cuerpo += "    lux_script::last_validation_messages().clear();\n";
+    cuerpo += "    lux_script::NativeCtx l_ctx = lux_route_ctx(req, res);\n";
     // Parsed at most once per request, only if some query-style parameter
     // below actually needs it (req.form() itself is cheap when the
     // content-type is not application/x-www-form-urlencoded -- it returns
@@ -3156,17 +3212,31 @@ std::string route_runtime_prelude() {
     // tenga pinta de numero decimal, para que --native nunca acepte (o
     // rechace) un valor que bytecode habria tratado distinto.
     return
+        // The module's tables (NativeModule::bind), for every NativeCtx a
+        // route builds: a map(f) callback or a render() needs them.
+        "static decltype(lux_script::NativeCtx::functions) g_lux_functions = nullptr;\n"
+        "static decltype(lux_script::NativeCtx::templates) g_lux_templates = nullptr;\n"
+        "extern \"C\" void lux_native_bind(const void* f, const void* t) {\n"
+        "    g_lux_functions = static_cast<decltype(g_lux_functions)>(f);\n"
+        "    g_lux_templates = static_cast<decltype(g_lux_templates)>(t);\n"
+        "}\n"
+        "inline lux_script::NativeCtx lux_route_ctx(lux::Request& req, lux::Response& res) {\n"
+        "    lux_script::NativeCtx c{req, res};\n"
+        "    c.functions = g_lux_functions;\n"
+        "    c.templates = g_lux_templates;\n"
+        "    return c;\n"
+        "}\n"
         // Module calls (Generador::llamada_modulo): the function, a
         // NativeCtx over the route's req/res, a failure raised.
         "inline Value lux_module_call(lux::Request& req, lux::Response& res, int id, std::vector<Value> args) {\n"
-        "    lux_script::NativeCtx ctx{req, res};\n"
+        "    lux_script::NativeCtx ctx = lux_route_ctx(req, res);\n"
         "    std::string e;\n"
         "    Value v = lux_script::builtin_module_function_at(id).call(ctx, args, e);\n"
         "    if (!e.empty()) lux_native_fail(std::move(e));\n"
         "    return v;\n"
         "}\n"
         "inline lux::Task<Value> lux_module_await(lux::Request& req, lux::Response& res, int id, std::vector<Value> args) {\n"
-        "    lux_script::NativeCtx ctx{req, res};\n"
+        "    lux_script::NativeCtx ctx = lux_route_ctx(req, res);\n"
         "    std::string e;\n"
         "    Value v;\n"
         "    co_await lux::BlockingAwaitable{req.loop, [&] {\n"
@@ -3174,6 +3244,27 @@ std::string route_runtime_prelude() {
         "    }, &lux::io_blocking_pool()};\n"
         "    if (!e.empty()) lux_native_fail(std::move(e));\n"
         "    co_return v;\n"
+        "}\n"
+        // The same from a function: it has no req/res of its own, so it
+        // uses the request its caller set (the VM, or lux_call_in below).
+        "inline lux_script::NativeCtx& lux_ctx() {\n"
+        "    lux_script::NativeCtx* c = lux_script::current_native_ctx();\n"
+        "    if (!c) lux_native_fail(\"a module was called outside a request\");\n"
+        "    return *c;\n"
+        "}\n"
+        "inline Value lux_fn_module_call(int id, std::vector<Value> args) {\n"
+        "    std::string e;\n"
+        "    Value v = lux_script::builtin_module_function_at(id).call(lux_ctx(), args, e);\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    return v;\n"
+        "}\n"
+        // A route calling a user function: its arguments are evaluated
+        // first (they may co_await, and another request may run on this
+        // thread meanwhile), then the route's context is set for it.
+        "template <class F, class... A>\n"
+        "inline decltype(auto) lux_call_in(lux_script::NativeCtx& c, F&& f, A&&... a) {\n"
+        "    lux_script::current_native_ctx() = &c;\n"
+        "    return f(std::forward<A>(a)...);\n"
         "}\n"
         "inline std::string lux_module_str(const Value& v) { return v.is_str() ? v.as_str() : v.to_string(); }\n"
         "inline int64_t lux_module_int(const Value& v) { return v.is_int() ? v.as_int() : v.is_float() ? static_cast<int64_t>(v.as_float()) : 0; }\n"
