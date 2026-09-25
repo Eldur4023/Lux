@@ -61,22 +61,28 @@ inline std::string percent_decode(const std::string& s, bool fold_plus) {
 }
 
 // Parses "a=1&b=2" (a query string or an application/x-www-form-urlencoded
-// body) into `out`, decoding with '+' folded to a space. Empty pairs are
-// skipped; a later duplicate key wins.
-inline void parse_form_encoded(const std::string& src,
-                               std::unordered_map<std::string, std::string>& out) {
+// body), calling on_pair(key, value) in order, decoded with '+' folded to a
+// space. Empty pairs are skipped.
+template <class OnPair>
+inline void for_each_form_pair(const std::string& src, OnPair on_pair) {
     size_t pos = 0;
     while (pos < src.size()) {
         size_t amp = src.find('&', pos);
         if (amp == std::string::npos) amp = src.size();
         size_t eq = src.find('=', pos);
         if (eq < amp)
-            out[percent_decode(src.substr(pos, eq - pos), true)] =
-                percent_decode(src.substr(eq + 1, amp - eq - 1), true);
+            on_pair(percent_decode(src.substr(pos, eq - pos), true),
+                    percent_decode(src.substr(eq + 1, amp - eq - 1), true));
         else if (amp > pos)
-            out[percent_decode(src.substr(pos, amp - pos), true)] = "";
+            on_pair(percent_decode(src.substr(pos, amp - pos), true), std::string());
         pos = amp + 1;
     }
+}
+
+// The same into a map; a later duplicate key wins.
+inline void parse_form_encoded(const std::string& src,
+                               std::unordered_map<std::string, std::string>& out) {
+    for_each_form_pair(src, [&](std::string k, std::string v) { out[std::move(k)] = std::move(v); });
 }
 
 } // namespace lux

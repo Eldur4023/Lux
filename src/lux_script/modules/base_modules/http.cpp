@@ -270,32 +270,22 @@ Value fn_http_url_encode(NativeCtx&, std::vector<Value>& args, std::string& erro
     return Value::str(lux::percent_encode(args[0].as_str()));
 }
 
-class HttpModule : public BuiltinModule {
-public:
-    const char* name() const override { return "http"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        // Every function that actually reaches a remote server is
-        // is_async: a slow/hung one is the real cost this module exists
-        // to bound (see the module comment above), so `await http.*(...)`
-        // is mandatory for those -- routed through lux::blocking_pool()
-        // (BuiltinModuleFn::is_async) instead of the event loop thread.
-        // url_encode is the one exception: pure text transformation, no
-        // network, no `await` needed or accepted.
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"get",         1, 2, fn_http_get,        /*is_async=*/true},
-            {"post",        2, 3, fn_http_post,       /*is_async=*/true},
-            {"put",         2, 3, fn_http_put,        /*is_async=*/true},
-            {"patch",       2, 3, fn_http_patch,      /*is_async=*/true},
-            {"delete",      1, 2, fn_http_delete,     /*is_async=*/true},
-            {"url_encode",  1, 1, fn_http_url_encode},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(HttpModule)
+// Every function that actually reaches a remote server is
+// is_async: a slow/hung one is the real cost this module exists
+// to bound (see the module comment above), so `await http.*(...)`
+// is mandatory for those -- routed through lux::blocking_pool()
+// (BuiltinModuleFn::is_async) instead of the event loop thread.
+// url_encode is the one exception: pure text transformation, no
+// network, no `await` needed or accepted.
+LUX_MODULE(http, {
+    {"get",         1, 2, fn_http_get,        /*is_async=*/true},
+    {"post",        2, 3, fn_http_post,       /*is_async=*/true},
+    {"put",         2, 3, fn_http_put,        /*is_async=*/true},
+    {"patch",       2, 3, fn_http_patch,      /*is_async=*/true},
+    {"delete",      1, 2, fn_http_delete,     /*is_async=*/true},
+    {"url_encode",  1, 1, fn_http_url_encode},
+})
 
 } // namespace lux_script

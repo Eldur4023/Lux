@@ -43,6 +43,19 @@ struct BuiltinModuleFn {
     int         max_args;     // -1 = no limit
     NativeFn    fn;           // same signature as any other builtin
     bool        is_async = false;
+    // Argument types, checked by call() before fn runs, so a function body
+    // can trust them: s string, i int, n int or float, b bool, l List,
+    // d Dict, f function, x anything; uppercase also accepts null; after
+    // '|' the rest are optional; a trailing '*' takes any number more.
+    std::string sig;
+    std::string full_name;    // "hash.sha256", filled in by the registry
+
+    BuiltinModuleFn(std::string n, int min, int max, NativeFn f, bool async = false)
+        : name(std::move(n)), min_args(min), max_args(max), fn(f), is_async(async) {}
+    // min/max come from the signature: {"hmac_sha256", "ss", fn}
+    BuiltinModuleFn(std::string n, const char* signature, NativeFn f, bool async = false);
+
+    Value call(NativeCtx& ctx, std::vector<Value>& args, std::string& error) const;
 };
 
 // What a module needs to describe itself.  `configure()` is optional --
@@ -202,6 +215,35 @@ struct ModuleRegistrar {
     ::lux_script::detail::ModuleRegistrar lux_module_registrar_##ClassName(   \
         +[]() -> std::unique_ptr<::lux_script::BuiltinModule> {               \
             return std::make_unique<ClassName>();                             \
+        });                                                                   \
+    }
+
+// The common case, a module that is just a name and a function table:
+//
+//     LUX_MODULE(hash, {
+//         {"sha256", 1, 1, fn_hash_sha256},
+//     })
+//
+// A module that needs configure() still writes its class and uses
+// LUX_REGISTER_MODULE.
+namespace detail {
+class TableModule final : public BuiltinModule {
+public:
+    TableModule(const char* name, std::vector<BuiltinModuleFn> fns) : name_(name), fns_(std::move(fns)) {}
+    const char*                         name() const override { return name_; }
+    const std::vector<BuiltinModuleFn>& functions() const override { return fns_; }
+private:
+    const char*                  name_;
+    std::vector<BuiltinModuleFn> fns_;
+};
+} // namespace detail
+
+#define LUX_MODULE(Name, ...)                                                 \
+    namespace {                                                               \
+    ::lux_script::detail::ModuleRegistrar lux_module_registrar_##Name(        \
+        +[]() -> std::unique_ptr<::lux_script::BuiltinModule> {               \
+            return std::make_unique<::lux_script::detail::TableModule>(       \
+                #Name, std::vector<::lux_script::BuiltinModuleFn> __VA_ARGS__); \
         });                                                                   \
     }
 

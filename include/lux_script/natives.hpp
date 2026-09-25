@@ -52,14 +52,24 @@ class SharedState {
 public:
     static SharedState& instance();
 
-    long long incr(const std::string& key, long long by);
-    Value     get(const std::string& key) const;
-    void      set(const std::string& key, Value v);
+    // ttl_ms > 0 makes the key expire. incr() sets it only when it creates
+    // the key, so `state.incr("login:" + ip, 1, 60000)` counts in fixed
+    // one-minute windows: a rate limiter in one line.
+    long long incr(const std::string& key, long long by, long long ttl_ms = 0);
+    Value     get(const std::string& key);
+    void      set(const std::string& key, Value v, long long ttl_ms = 0);
     bool      remove(const std::string& key);
 
 private:
-    mutable std::mutex          mutex_;
-    std::map<std::string, Value> data_;
+    struct Entry { Value v; long long expires_ms = 0; };
+    using Map = std::map<std::string, Entry>;
+
+    Map::iterator live(const std::string& key, long long now);   // end() if absent or expired
+    void          sweep(long long now);
+
+    std::mutex mutex_;
+    Map        data_;
+    unsigned   writes_ = 0;
 };
 
 // Session state during a request.

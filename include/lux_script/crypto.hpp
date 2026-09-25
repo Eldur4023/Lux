@@ -19,7 +19,12 @@ std::string sha256(std::string_view data);
 // Returns the raw 32 bytes of the MAC (RFC 2104).
 std::string hmac_sha256(std::string_view key, std::string_view message);
 
+// PBKDF2-HMAC-SHA256 (RFC 8018), `length` raw bytes: password storage.
+std::string pbkdf2_sha256(std::string_view password, std::string_view salt,
+                          unsigned iterations, size_t length);
+
 // Base64 with the URL-safe alphabet and no padding, as JWT requires (RFC 7515).
+// The decoder takes either alphabet, padded or not.
 std::string base64url_encode(std::string_view raw);
 bool        base64url_decode(std::string_view text, std::string& out);
 

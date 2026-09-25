@@ -194,30 +194,20 @@ Value fn_pdf_close(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::boolean(handles().close(static_cast<int>(args[0].as_int())));
 }
 
-class PdfModule : public BuiltinModule {
-public:
-    const char* name() const override { return "pdf"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"create",         2, 2, fn_pdf_create},
-            {"add_page",       3, 3, fn_pdf_add_page},
-            {"set_color",      4, 4, fn_pdf_set_color},
-            {"set_font",       2, 4, fn_pdf_set_font},
-            {"text",           5, 5, fn_pdf_text},
-            {"rect",           5, 6, fn_pdf_rect},
-            {"line",           5, 5, fn_pdf_line},
-            {"set_line_width", 2, 2, fn_pdf_set_line_width},
-            {"save",           2, 2, fn_pdf_save},
-            {"to_base64",      1, 1, fn_pdf_to_base64},
-            {"close",          1, 1, fn_pdf_close},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(PdfModule)
+LUX_MODULE(pdf, {
+    {"create",         2, 2, fn_pdf_create},
+    {"add_page",       3, 3, fn_pdf_add_page},
+    {"set_color",      4, 4, fn_pdf_set_color},
+    {"set_font",       2, 4, fn_pdf_set_font},
+    {"text",           5, 5, fn_pdf_text},
+    {"rect",           5, 6, fn_pdf_rect},
+    {"line",           5, 5, fn_pdf_line},
+    {"set_line_width", 2, 2, fn_pdf_set_line_width},
+    {"save",           2, 2, fn_pdf_save},
+    {"to_base64",      1, 1, fn_pdf_to_base64},
+    {"close",          1, 1, fn_pdf_close},
+})
 
 } // namespace lux_script

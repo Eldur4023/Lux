@@ -1,3 +1,4 @@
+#include <chrono>
 #include <lux_script/natives.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
@@ -324,7 +325,8 @@ Value fn_state_incr(NativeCtx&, std::vector<Value>& args, std::string& error) {
         if (!args[1].is_int()) { error = "state.incr() expects an integer"; return Value::null(); }
         by = args[1].as_int();
     }
-    return Value::integer(SharedState::instance().incr(args[0].as_str(), by));
+    if (args.size() > 2 && !args[2].is_int()) { error = "state.incr(): the TTL is milliseconds, an int"; return Value::null(); }
+    return Value::integer(SharedState::instance().incr(args[0].as_str(), by, args.size() > 2 ? args[2].as_int() : 0));
 }
 
 Value fn_state_decr(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -342,7 +344,8 @@ Value fn_state_get(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
 Value fn_state_set(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "state.set() expects the key as a string"; return Value::null(); }
-    SharedState::instance().set(args[0].as_str(), args[1]);
+    SharedState::instance().set(args[0].as_str(), args[1],
+                                args.size() > 2 && args[2].is_int() ? args[2].as_int() : 0);
     return args[1];
 }
 
@@ -465,10 +468,10 @@ const std::array<NativeDef, 50> kNatives = {{
     {"__req_method",    0, 0,  fn_req_method},
     {"__req_ip",        0, 0,  fn_req_ip},
     {"__req_body",      0, 0,  fn_req_body},
-    {"__state_incr",    1, 2,  fn_state_incr},
+    {"__state_incr",    1, 3,  fn_state_incr},
     {"__state_decr",    1, 2,  fn_state_decr},
     {"__state_get",     1, 2,  fn_state_get},
-    {"__state_set",     2, 2,  fn_state_set},
+    {"__state_set",     2, 3,  fn_state_set},
     {"__state_remove",  1, 1,  fn_state_remove},
     {"__log_info",      1, 1,  fn_log_info},
     {"__log_warn",      1, 1,  fn_log_warn},
@@ -505,24 +508,52 @@ SharedState& SharedState::instance() {
     return s;
 }
 
-long long SharedState::incr(const std::string& key, long long by) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto&     v   = data_[key];
-    long long cur = v.is_int() ? v.as_int() : 0;
-    long long out = cur + by;
-    v = Value::integer(out);
-    return out;
+namespace {
+long long now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+} // namespace
 
-Value SharedState::get(const std::string& key) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+SharedState::Map::iterator SharedState::live(const std::string& key, long long now) {
     auto it = data_.find(key);
-    return it == data_.end() ? Value::null() : it->second;
+    if (it != data_.end() && it->second.expires_ms && now >= it->second.expires_ms) {
+        data_.erase(it);
+        return data_.end();
+    }
+    return it;
 }
 
-void SharedState::set(const std::string& key, Value v) {
+// ponytail: O(n) every 256 writes; a deadline heap if millions of keys
+// ever carry a TTL.
+void SharedState::sweep(long long now) {
+    if (++writes_ % 256) return;
+    std::erase_if(data_, [now](const auto& kv) { return kv.second.expires_ms && now >= kv.second.expires_ms; });
+}
+
+long long SharedState::incr(const std::string& key, long long by, long long ttl_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    data_[key] = std::move(v);
+    const long long now = now_ms();
+    sweep(now);
+    auto it = live(key, now);
+    if (it == data_.end())
+        it = data_.emplace(key, Entry{Value::integer(0), ttl_ms > 0 ? now + ttl_ms : 0}).first;
+    Value& v = it->second.v;
+    v = Value::integer((v.is_int() ? v.as_int() : 0) + by);
+    return v.as_int();
+}
+
+Value SharedState::get(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = live(key, now_ms());
+    return it == data_.end() ? Value::null() : it->second.v;
+}
+
+void SharedState::set(const std::string& key, Value v, long long ttl_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const long long now = now_ms();
+    sweep(now);
+    data_[key] = Entry{std::move(v), ttl_ms > 0 ? now + ttl_ms : 0};
 }
 
 bool SharedState::remove(const std::string& key) {

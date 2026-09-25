@@ -68,8 +68,18 @@ int self_test() {
     expect("base64url alfabeto url-safe",
            base64url_encode(std::string("\xfb\xff", 2)), "-_8");
 
+    // RFC 7914 §11 test vectors for PBKDF2-HMAC-SHA256.
+    expect("pbkdf2(passwd, salt, 1)", hex(pbkdf2_sha256("passwd", "salt", 1, 64)),
+           "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+           "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783");
+    expect("pbkdf2(Password, NaCl, 80000)", hex(pbkdf2_sha256("Password", "NaCl", 80000, 64)),
+           "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56"
+           "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d");
+    expect("base64 decode, standard alphabet",
+           base64url_decode("+/8=", round) && round == std::string("\xfb\xff", 2) ? "si" : "no", "si");
+
     std::cout << (failures ? "\nFALLOS: " : "\ntodo correcto (")
-              << (failures ? std::to_string(failures) : std::string("11"))
+              << (failures ? std::to_string(failures) : std::string("14"))
               << (failures ? "" : " comprobaciones)") << "\n";
     return failures ? 1 : 0;
 }

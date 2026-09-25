@@ -7,6 +7,9 @@
 # -- run_pdf.sh -- to skip gracefully on a binary built without cairo), so
 # it belongs in the always-runs regression suite too.
 import hash
+import text
+import encoding
+import json
 import csv
 import os
 import math
@@ -23,6 +26,65 @@ get endpoint("/hmac/:key/:msg", string key, string msg):
 
 get endpoint("/random/:n", int n):
     return { "hex": hash.random_hex(n) }
+
+get endpoint("/hash/password"):
+    string h = await hash.password("hunter2")
+    bool good = await hash.verify("hunter2", h)
+    bool bad = await hash.verify("hunter3", h)
+    bool django = await hash.verify("pw", "pbkdf2_sha256$1000$salt123$MWa8jc85h8c6c8Jm+w5qVekbz0jT4egNnQ5GJ8LeL5w=")
+    bool garbage = await hash.verify("pw", "not a hash")
+    return { "format": h.starts_with("pbkdf2_sha256$600000$"), "good": good, "bad": bad, "django": django, "garbage": garbage }
+
+get endpoint("/hash/sign"):
+    string t = hash.sign({ "user": 7 }, "k1")
+    return { "back": hash.unsign(t, "k1"), "tampered": hash.unsign(t + "x", "k1"), "wrong_key": hash.unsign(t, "k2"), "fresh": hash.unsign(t, "k1", 60), "expired": hash.unsign(t, "k1", -1) }
+
+get endpoint("/hash/ids"):
+    string u4 = hash.uuid()
+    string u7 = hash.uuid(7)
+    return { "len": len(u4), "v4": u4.slice(14, 15), "v7": u7.slice(14, 15), "token_len": len(hash.token()), "same": hash.equal("abc", "abc"), "differ": hash.equal("abc", "abd") }
+
+get endpoint("/hash/bad_arg"):
+    return { "h": hash.sha256(5) }
+
+get endpoint("/math/more"):
+    List<Json> xs = [4, 9, 2]
+    List<Json> shuffled = math.shuffle(xs)
+    return { "round2": math.round(3.14159, 2), "clamp": math.clamp(15, 0, 10), "sign": math.sign(-3), "min_list": math.min(xs), "max3": math.max(1, 7, 3), "log2": math.log(8, 2), "choice_in": xs.contains(math.choice(xs)), "shuffled_len": len(shuffled), "sample_len": len(math.sample(xs, 2)), "untouched": xs }
+
+get endpoint("/math/domain"):
+    return { "r": math.sqrt(-1) }
+
+get endpoint("/json/pretty"):
+    return text(json.stringify({ "a": [1, 2], "b": {}, "c": { "d": null } }, 2))
+
+get endpoint("/encoding/basic"):
+    return { "b64": encoding.base64_encode("hi?>"), "b64url": encoding.base64_encode("hi?>", true), "back": encoding.base64_decode("aGk/Pg=="), "hex": encoding.hex_decode(encoding.hex_encode("ok")), "url": encoding.url_decode(encoding.url_encode("a b/ñ")), "query": encoding.query_encode({ "q": "a b", "tag": ["x", "y"], "skip": null }), "parsed": encoding.query_decode("?a=1&b=x+y"), "html": encoding.html_escape("<a href='x'>") }
+
+get endpoint("/encoding/url"):
+    return { "full": encoding.url_parse("https://u@a.com:8080/p/x?q=1#top"), "relative": encoding.url_parse("/next?x=1"), "sneaky": encoding.url_parse(" /\\evil.com/x") }
+
+get endpoint("/encoding/bad_hex"):
+    return { "r": encoding.hex_decode("zz") }
+
+get endpoint("/text/basic"):
+    return { "slug": text.slug("¡Café con Leche! 2024 — Łódź"), "trunc": text.truncate("Hello world", 8), "short": text.truncate("Hi", 8), "num": text.format_number(1234567.891, 2), "num_es": text.format_number(-1234567.891, 2, ".", ","), "pad": text.pad_left("7", 4, "0"), "padr": text.pad_right("ñ", 3, "."), "dist": text.distance("kitten", "sitting") }
+
+get endpoint("/state/ttl"):
+    state.remove("hits")
+    int a = state.incr("hits", 1, 200)
+    int b = state.incr("hits", 1, 200)
+    state.set("token", "abc", 200)
+    Json before = state.get("token")
+    await sleep(260)
+    int c = state.incr("hits", 1, 200)
+    return { "a": a, "b": b, "after_window": c, "before": before, "expired": state.get("token"), "default": state.get("token", "none") }
+
+get endpoint("/state/plain"):
+    state.set("k", { "x": 1 })
+    int n = state.incr("n")
+    state.decr("n", 3)
+    return { "k": state.get("k"), "n": state.get("n"), "removed": state.remove("k"), "gone": state.get("k") }
 
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"

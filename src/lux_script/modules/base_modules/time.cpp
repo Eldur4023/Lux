@@ -187,25 +187,15 @@ Value fn_time_parse_iso(NativeCtx&, std::vector<Value>& args, std::string& error
     return Value::integer(static_cast<long long>(secs) * 1000 - offset_min * 60 * 1000 + ms);
 }
 
-class TimeModule : public BuiltinModule {
-public:
-    const char* name() const override { return "time"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"now",         0, 0, fn_time_now},
-            {"now_seconds", 0, 0, fn_time_now_seconds},
-            {"format",      2, 3, fn_time_format},
-            {"format_iso",  1, 1, fn_time_format_iso},
-            {"parse",       2, 2, fn_time_parse},
-            {"parse_iso",   1, 1, fn_time_parse_iso},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(TimeModule)
+LUX_MODULE(time, {
+    {"now",         0, 0, fn_time_now},
+    {"now_seconds", 0, 0, fn_time_now_seconds},
+    {"format",      2, 3, fn_time_format},
+    {"format_iso",  1, 1, fn_time_format_iso},
+    {"parse",       2, 2, fn_time_parse},
+    {"parse_iso",   1, 1, fn_time_parse_iso},
+})
 
 } // namespace lux_script

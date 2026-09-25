@@ -38,8 +38,10 @@ BuiltinModuleRegistry::BuiltinModuleRegistry() {
 
 void BuiltinModuleRegistry::build_flat_table() {
     for (const auto& [name, slot] : slots_)
-        for (const auto& fn : slot.module->functions())
+        for (const auto& fn : slot.module->functions()) {
             flat_.push_back({name, fn});
+            flat_.back().fn.full_name = name + "." + fn.name;
+        }
 }
 
 BuiltinModuleRegistry& BuiltinModuleRegistry::instance() {
@@ -86,6 +88,58 @@ int BuiltinModuleRegistry::id_of(const std::string& module, const std::string& f
         if (flat_[i].module == module && flat_[i].fn.name == function)
             return static_cast<int>(i);
     return -1;
+}
+
+BuiltinModuleFn::BuiltinModuleFn(std::string n, const char* signature, NativeFn f, bool async)
+    : name(std::move(n)), min_args(0), max_args(0), fn(f), is_async(async), sig(signature) {
+    const size_t bar = sig.find('|');
+    const size_t types = sig.size() - (bar != std::string::npos) - (!sig.empty() && sig.back() == '*');
+    min_args = static_cast<int>(bar == std::string::npos ? types : bar);
+    max_args = !sig.empty() && sig.back() == '*' ? -1 : static_cast<int>(types);
+}
+
+namespace {
+bool fits(char c, const Value& v) {
+    if (c >= 'A' && c <= 'Z') {
+        if (v.is_null()) return true;
+        c = static_cast<char>(c - 'A' + 'a');
+    }
+    switch (c) {
+        case 's': return v.is_str();
+        case 'i': return v.is_int();
+        case 'n': return v.is_num();
+        case 'b': return v.is_bool();
+        case 'l': return v.is_list();
+        case 'd': return v.is_dict();
+        case 'f': return v.is_func();
+        default:  return true;   // 'x'
+    }
+}
+
+const char* describe(char c) {
+    switch (c | 0x20) {
+        case 's': return "a string";  case 'i': return "an int";
+        case 'n': return "a number";  case 'b': return "a bool";
+        case 'l': return "a List";    case 'd': return "a Dict";
+        case 'f': return "a function";
+        default:  return "a value";
+    }
+}
+} // namespace
+
+Value BuiltinModuleFn::call(NativeCtx& ctx, std::vector<Value>& args, std::string& error) const {
+    size_t k = 0;
+    for (size_t i = 0; i < args.size(); ++i, ++k) {
+        if (k < sig.size() && sig[k] == '|') ++k;
+        if (k >= sig.size() || sig[k] == '*') break;
+        if (!fits(sig[k], args[i])) {
+            error = full_name + "(): argument " + std::to_string(i + 1) + " must be " +
+                    describe(sig[k]) + (sig[k] >= 'A' && sig[k] <= 'Z' ? " or null" : "") +
+                    ", not " + args[i].type_name();
+            return Value::null();
+        }
+    }
+    return fn(ctx, args, error);
 }
 
 const BuiltinModuleFn& builtin_module_function_at(int id) {

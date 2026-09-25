@@ -220,25 +220,15 @@ Value fn_regex_split(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::list(std::move(out));
 }
 
-class RegexModule : public BuiltinModule {
-public:
-    const char* name() const override { return "regex"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"test",     2, 2, fn_regex_test},
-            {"find",     2, 2, fn_regex_find},
-            {"find_all", 2, 2, fn_regex_find_all},
-            {"groups",   2, 2, fn_regex_groups},
-            {"replace",  3, 3, fn_regex_replace},
-            {"split",    2, 2, fn_regex_split},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(RegexModule)
+LUX_MODULE(regex, {
+    {"test",     2, 2, fn_regex_test},
+    {"find",     2, 2, fn_regex_find},
+    {"find_all", 2, 2, fn_regex_find_all},
+    {"groups",   2, 2, fn_regex_groups},
+    {"replace",  3, 3, fn_regex_replace},
+    {"split",    2, 2, fn_regex_split},
+})
 
 } // namespace lux_script

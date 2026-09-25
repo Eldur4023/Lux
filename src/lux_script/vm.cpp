@@ -528,7 +528,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
 
                 std::string error;
                 Value out = in.op == Op::CallNative ? native_at(id).fn(ctx, args, error)
-                                                    : builtin_module_function_at(id).fn(ctx, args, error);
+                                                    : builtin_module_function_at(id).call(ctx, args, error);
                 if (!error.empty()) return fail(std::move(error), in.loc);
                 push(std::move(out));
                 break;

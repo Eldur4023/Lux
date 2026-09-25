@@ -410,41 +410,31 @@ Value fn_csv_to_csv(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::str(write_csv_text(*t));
 }
 
-class CsvModule : public BuiltinModule {
-public:
-    const char* name() const override { return "csv"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"parse",            1, 2, fn_csv_parse},
-            {"close",            1, 1, fn_csv_close},
-            {"columns",          1, 1, fn_csv_columns},
-            {"row_count",        1, 1, fn_csv_row_count},
-            {"rows",             1, 1, fn_csv_rows},
-            {"get",              3, 3, fn_csv_get},
-            {"filter_eq",        3, 3, fn_csv_filter_eq},
-            {"filter_gt",        3, 3, fn_csv_filter_gt},
-            {"filter_lt",        3, 3, fn_csv_filter_lt},
-            {"filter_ge",        3, 3, fn_csv_filter_ge},
-            {"filter_le",        3, 3, fn_csv_filter_le},
-            {"filter_contains",  3, 3, fn_csv_filter_contains},
-            {"select",           2, 2, fn_csv_select},
-            {"sort_by",          2, 3, fn_csv_sort_by},
-            {"slice",            3, 3, fn_csv_slice},
-            {"sum",              2, 2, fn_csv_sum},
-            {"mean",             2, 2, fn_csv_mean},
-            {"min",              2, 2, fn_csv_min},
-            {"max",              2, 2, fn_csv_max},
-            {"count",            1, 1, fn_csv_count},
-            {"group_sum",        3, 3, fn_csv_group_sum},
-            {"to_csv",           1, 1, fn_csv_to_csv},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(CsvModule)
+LUX_MODULE(csv, {
+    {"parse",            1, 2, fn_csv_parse},
+    {"close",            1, 1, fn_csv_close},
+    {"columns",          1, 1, fn_csv_columns},
+    {"row_count",        1, 1, fn_csv_row_count},
+    {"rows",             1, 1, fn_csv_rows},
+    {"get",              3, 3, fn_csv_get},
+    {"filter_eq",        3, 3, fn_csv_filter_eq},
+    {"filter_gt",        3, 3, fn_csv_filter_gt},
+    {"filter_lt",        3, 3, fn_csv_filter_lt},
+    {"filter_ge",        3, 3, fn_csv_filter_ge},
+    {"filter_le",        3, 3, fn_csv_filter_le},
+    {"filter_contains",  3, 3, fn_csv_filter_contains},
+    {"select",           2, 2, fn_csv_select},
+    {"sort_by",          2, 3, fn_csv_sort_by},
+    {"slice",            3, 3, fn_csv_slice},
+    {"sum",              2, 2, fn_csv_sum},
+    {"mean",             2, 2, fn_csv_mean},
+    {"min",              2, 2, fn_csv_min},
+    {"max",              2, 2, fn_csv_max},
+    {"count",            1, 1, fn_csv_count},
+    {"group_sum",        3, 3, fn_csv_group_sum},
+    {"to_csv",           1, 1, fn_csv_to_csv},
+})
 
 } // namespace lux_script

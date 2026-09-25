@@ -450,27 +450,17 @@ Value fn_proc_close(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::null();
 }
 
-class ProcModule : public BuiltinModule {
-public:
-    const char* name() const override { return "proc"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"start", 1, 3, fn_proc_start},
-            {"alive", 1, 1, fn_proc_alive},
-            // is_async: both block the calling worker for up to
-            // `timeout_ms` -- see kMaxTimeoutMs's comment.
-            {"read",  3, 3, fn_proc_read,  /*is_async=*/true},
-            {"wait",  2, 2, fn_proc_wait,  /*is_async=*/true},
-            {"kill",  1, 2, fn_proc_kill},
-            {"close", 1, 1, fn_proc_close},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(ProcModule)
+LUX_MODULE(proc, {
+    {"start", 1, 3, fn_proc_start},
+    {"alive", 1, 1, fn_proc_alive},
+    // is_async: both block the calling worker for up to
+    // `timeout_ms` -- see kMaxTimeoutMs's comment.
+    {"read",  3, 3, fn_proc_read,  /*is_async=*/true},
+    {"wait",  2, 2, fn_proc_wait,  /*is_async=*/true},
+    {"kill",  1, 2, fn_proc_kill},
+    {"close", 1, 1, fn_proc_close},
+})
 
 } // namespace lux_script

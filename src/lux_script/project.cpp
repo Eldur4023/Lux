@@ -505,7 +505,7 @@ lux::Task<Value> run_builtin_module_async(const VM::Result& r, lux::Request& req
     // allows -- not CPU-bound work. See io_blocking_pool()'s comment
     // (blocking_pool.hpp) for the starvation this fixes.
     co_await lux::BlockingAwaitable{req.loop, [&] {
-        out = fn.fn(ctx, args, error);
+        out = fn.call(ctx, args, error);
     }, &lux::io_blocking_pool()};
     if (!error.empty()) co_return db_error(error);
     co_return out;

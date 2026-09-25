@@ -197,25 +197,15 @@ Value fn_rooms_count(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::integer(RoomRegistry::instance().count(args[0].as_str()));
 }
 
-class RoomsModule : public BuiltinModule {
-public:
-    const char* name() const override { return "rooms"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"join",             1, 1, fn_rooms_join},
-            {"leave",            1, 1, fn_rooms_leave},
-            {"leave_all",        0, 0, fn_rooms_leave_all},
-            {"broadcast",        2, 2, fn_rooms_broadcast},
-            {"broadcast_others", 2, 2, fn_rooms_broadcast_others},
-            {"count",            1, 1, fn_rooms_count},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(RoomsModule)
+LUX_MODULE(rooms, {
+    {"join",             1, 1, fn_rooms_join},
+    {"leave",            1, 1, fn_rooms_leave},
+    {"leave_all",        0, 0, fn_rooms_leave_all},
+    {"broadcast",        2, 2, fn_rooms_broadcast},
+    {"broadcast_others", 2, 2, fn_rooms_broadcast_others},
+    {"count",            1, 1, fn_rooms_count},
+})
 
 } // namespace lux_script

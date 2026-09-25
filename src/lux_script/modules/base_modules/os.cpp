@@ -495,44 +495,34 @@ Value fn_os_run(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return Value::dict(std::move(out));
 }
 
-class OsModule : public BuiltinModule {
-public:
-    const char* name() const override { return "os"; }
-
-    const std::vector<BuiltinModuleFn>& functions() const override {
-        static const std::vector<BuiltinModuleFn> fns = {
-            {"getenv",       1, 2, fn_os_getenv},
-            {"cwd",          0, 0, fn_os_cwd},
-            {"path_join",    1, -1, fn_os_path_join},
-            {"path_exists",  1, 1, fn_os_path_exists},
-            {"is_dir",       1, 1, fn_os_is_dir},
-            {"is_file",      1, 1, fn_os_is_file},
-            {"file_size",    1, 1, fn_os_file_size},
-            {"mtime_ms",     1, 1, fn_os_mtime_ms},
-            {"path_basename",1, 1, fn_os_path_basename},
-            {"path_dirname", 1, 1, fn_os_path_dirname},
-            {"path_abs",     1, 1, fn_os_path_abs},
-            // is_async: real, unbounded disk/process I/O -- see the module
-            // comment at the top of this file and BuiltinModuleFn::is_async.
-            {"read_file",    1, 1, fn_os_read_file,  /*is_async=*/true},
-            {"write_file",   2, 2, fn_os_write_file, /*is_async=*/true},
-            {"list_dir",     1, 1, fn_os_list_dir},
-            {"remove_file",  1, 1, fn_os_remove_file},
-            {"remove_dir",   1, 2, fn_os_remove_dir},
-            {"make_dir",     1, 1, fn_os_make_dir},
-            // is_async: real disk I/O moving file CONTENT, same class as
-            // read_file/write_file above -- not just metadata like
-            // remove_dir/make_dir/rename's own fast path.
-            {"copy_file",    2, 3, fn_os_copy_file,   /*is_async=*/true},
-            {"move",         2, 2, fn_os_move,        /*is_async=*/true},
-            {"run",          1, 2, fn_os_run,        /*is_async=*/true},
-        };
-        return fns;
-    }
-};
-
 } // namespace
 
-LUX_REGISTER_MODULE(OsModule)
+LUX_MODULE(os, {
+    {"getenv",       1, 2, fn_os_getenv},
+    {"cwd",          0, 0, fn_os_cwd},
+    {"path_join",    1, -1, fn_os_path_join},
+    {"path_exists",  1, 1, fn_os_path_exists},
+    {"is_dir",       1, 1, fn_os_is_dir},
+    {"is_file",      1, 1, fn_os_is_file},
+    {"file_size",    1, 1, fn_os_file_size},
+    {"mtime_ms",     1, 1, fn_os_mtime_ms},
+    {"path_basename",1, 1, fn_os_path_basename},
+    {"path_dirname", 1, 1, fn_os_path_dirname},
+    {"path_abs",     1, 1, fn_os_path_abs},
+    // is_async: real, unbounded disk/process I/O -- see the module
+    // comment at the top of this file and BuiltinModuleFn::is_async.
+    {"read_file",    1, 1, fn_os_read_file,  /*is_async=*/true},
+    {"write_file",   2, 2, fn_os_write_file, /*is_async=*/true},
+    {"list_dir",     1, 1, fn_os_list_dir},
+    {"remove_file",  1, 1, fn_os_remove_file},
+    {"remove_dir",   1, 2, fn_os_remove_dir},
+    {"make_dir",     1, 1, fn_os_make_dir},
+    // is_async: real disk I/O moving file CONTENT, same class as
+    // read_file/write_file above -- not just metadata like
+    // remove_dir/make_dir/rename's own fast path.
+    {"copy_file",    2, 3, fn_os_copy_file,   /*is_async=*/true},
+    {"move",         2, 2, fn_os_move,        /*is_async=*/true},
+    {"run",          1, 2, fn_os_run,        /*is_async=*/true},
+})
 
 } // namespace lux_script

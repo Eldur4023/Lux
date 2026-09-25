@@ -66,9 +66,16 @@ constexpr size_t kBlock = 64;
 
 } // namespace
 
-std::string sha256(std::string_view data) {
-    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+namespace {
+constexpr uint32_t kIV[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                             0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+// Finishes a hash whose state `h` has already absorbed `prefix` bytes (a
+// multiple of the block): the IV and 0 for a plain sha256, a precomputed
+// HMAC pad for pbkdf2_sha256.
+std::string sha256_from(const uint32_t start[8], size_t prefix, std::string_view data) {
+    uint32_t h[8];
+    std::memcpy(h, start, sizeof h);
 
     const auto* p   = reinterpret_cast<const uint8_t*>(data.data());
     size_t      len = data.size();
@@ -83,7 +90,7 @@ std::string sha256(std::string_view data) {
     tail[rest] = 0x80;
 
     size_t tail_len = (rest + 1 + 8 <= kBlock) ? kBlock : 2 * kBlock;
-    uint64_t bits   = static_cast<uint64_t>(len) * 8;
+    uint64_t bits   = static_cast<uint64_t>(prefix + len) * 8;
     for (int i = 0; i < 8; ++i)
         tail[tail_len - 1 - static_cast<size_t>(i)] =
             static_cast<uint8_t>((bits >> (8 * i)) & 0xFF);
@@ -99,6 +106,9 @@ std::string sha256(std::string_view data) {
     }
     return out;
 }
+} // namespace
+
+std::string sha256(std::string_view data) { return sha256_from(kIV, 0, data); }
 
 std::string hmac_sha256(std::string_view key, std::string_view message) {
     // RFC 2104: a key longer than the block is replaced by its hash.
@@ -118,6 +128,38 @@ std::string hmac_sha256(std::string_view key, std::string_view message) {
     return sha256(outer);
 }
 
+std::string pbkdf2_sha256(std::string_view password, std::string_view salt,
+                          unsigned iterations, size_t length) {
+    // HMAC with its two padded-key blocks compressed once, up front: every
+    // iteration then costs two compressions instead of four.
+    std::string k(password);
+    if (k.size() > kBlock) k = sha256(k);
+    k.resize(kBlock, '\0');
+    uint8_t  ipad[kBlock], opad[kBlock];
+    uint32_t inner[8], outer[8];
+    for (size_t i = 0; i < kBlock; ++i) {
+        ipad[i] = static_cast<uint8_t>(k[i]) ^ 0x36;
+        opad[i] = static_cast<uint8_t>(k[i]) ^ 0x5c;
+    }
+    std::memcpy(inner, kIV, sizeof inner); compress(inner, ipad);
+    std::memcpy(outer, kIV, sizeof outer); compress(outer, opad);
+    auto hmac = [&](std::string_view m) { return sha256_from(outer, kBlock, sha256_from(inner, kBlock, m)); };
+
+    std::string out;
+    for (uint32_t block = 1; out.size() < length; ++block) {
+        std::string first(salt);
+        for (int s = 24; s >= 0; s -= 8) first += static_cast<char>((block >> s) & 0xFF);
+        std::string u = hmac(first), t = u;
+        for (unsigned i = 1; i < iterations; ++i) {
+            u = hmac(u);
+            for (size_t j = 0; j < t.size(); ++j) t[j] ^= u[j];
+        }
+        out += t;
+    }
+    out.resize(length);
+    return out;
+}
+
 // ─── Base64url (RFC 4648 §5, no padding) ─────────────────────────────────────
 
 namespace {
@@ -128,8 +170,8 @@ int decode_char(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '-') return 62;
-    if (c == '_') return 63;
+    if (c == '-' || c == '+') return 62;
+    if (c == '_' || c == '/') return 63;
     return -1;
 }
 } // namespace
