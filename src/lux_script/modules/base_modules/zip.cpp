@@ -1,14 +1,20 @@
-// "Download all as .zip" without a compression library: entries are
-// stored, not deflated -- what goes in such an archive (photos, PDFs,
-// video) is compressed already. Files are streamed, never loaded whole.
+// "Download all as .zip". With zlib (the gzip module's build) an entry is
+// deflated unless it is compressed already (photos, video, PDFs...); without
+// it everything is stored. Files are streamed, never loaded whole.
 // ponytail: no ZIP64, so no entry or archive past 4 GB; add it if that is
 // ever needed.
 #include <lux_script/builtin_module.hpp>
 
 #include <array>
+#include <cctype>
 #include <cstdint>
+#include <vector>
 #include <filesystem>
 #include <fstream>
+
+#ifdef LUX_GZIP
+#include <zlib.h>
+#endif
 
 namespace lux_script {
 
@@ -35,7 +41,22 @@ void le(std::string& out, uint64_t v, int bytes) {
     for (int i = 0; i < bytes; ++i) out += static_cast<char>((v >> (8 * i)) & 0xFF);
 }
 
-struct Entry { std::string name; uint32_t crc, size, offset; };
+struct Entry { std::string name; uint32_t crc, size, packed, offset; uint16_t method; };
+
+// Deflating a JPEG or an MP4 spends CPU to gain nothing.
+bool worth_deflating(const std::string& name) {
+#ifdef LUX_GZIP
+    std::string ext = fs::path(name).extension().string();
+    for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* e : {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".avif", ".mp4", ".mov",
+                          ".mkv", ".webm", ".mp3", ".m4a", ".ogg", ".flac", ".zip", ".gz", ".7z", ".pdf", ".docx", ".xlsx"})
+        if (ext == e) return false;
+    return true;
+#else
+    (void)name;
+    return false;
+#endif
+}
 
 // create(dest, [path, ...] or [[path, name_in_zip], ...]) -> number of
 // files written. A name keeps no leading '/' and no '..' part, so the
@@ -64,33 +85,63 @@ Value fn_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
         // Local header with bit 3 set: CRC and sizes follow the data, so
         // the file is read exactly once.
+        const uint16_t method = worth_deflating(name) ? 8 : 0;   // 8 deflate, 0 stored
         std::string h;
         le(h, 0x04034b50, 4); le(h, 20, 2); le(h, 0x0808, 2);   // bit 3 + UTF-8 names
-        le(h, 0, 2); le(h, 0, 4);                                // stored, no DOS time
+        le(h, method, 2); le(h, 0, 4);                           // no DOS time
         le(h, 0, 4); le(h, 0, 4); le(h, 0, 4);
         le(h, name.size(), 2); le(h, 0, 2);
         h += name;
         out.write(h.data(), static_cast<std::streamsize>(h.size()));
 
         uint32_t crc = 0;
-        while (in) {
+        uint64_t packed = 0;
+#ifdef LUX_GZIP
+        z_stream z{};
+        if (method == 8) deflateInit2(&z, 6, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY);   // raw deflate
+        std::vector<char> zbuf(1 << 16);
+#endif
+        while (true) {
             in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
             const auto n = static_cast<size_t>(in.gcount());
             crc = crc32_update(crc, buf.data(), n);
-            out.write(buf.data(), static_cast<std::streamsize>(n));
+            if (method == 0) {
+                out.write(buf.data(), static_cast<std::streamsize>(n));
+                packed += n;
+            }
+#ifdef LUX_GZIP
+            else {
+                z.next_in = reinterpret_cast<Bytef*>(buf.data());
+                z.avail_in = static_cast<uInt>(n);
+                const int flush = in ? Z_NO_FLUSH : Z_FINISH;
+                do {
+                    z.next_out = reinterpret_cast<Bytef*>(zbuf.data());
+                    z.avail_out = static_cast<uInt>(zbuf.size());
+                    deflate(&z, flush);
+                    const size_t got = zbuf.size() - z.avail_out;
+                    out.write(zbuf.data(), static_cast<std::streamsize>(got));
+                    packed += got;
+                } while (z.avail_out == 0);
+            }
+#endif
+            if (!in) break;
         }
+#ifdef LUX_GZIP
+        if (method == 8) deflateEnd(&z);
+#endif
         std::string d;
-        le(d, 0x08074b50, 4); le(d, crc, 4); le(d, size, 4); le(d, size, 4);
+        le(d, 0x08074b50, 4); le(d, crc, 4); le(d, packed, 4); le(d, size, 4);
         out.write(d.data(), static_cast<std::streamsize>(d.size()));
-        entries.push_back({name, crc, static_cast<uint32_t>(size), static_cast<uint32_t>(offset)});
-        offset += h.size() + size + d.size();
+        entries.push_back({name, crc, static_cast<uint32_t>(size), static_cast<uint32_t>(packed),
+                           static_cast<uint32_t>(offset), method});
+        offset += h.size() + packed + d.size();
     }
 
     std::string dir;
     for (const Entry& e : entries) {
         le(dir, 0x02014b50, 4); le(dir, 20, 2); le(dir, 20, 2); le(dir, 0x0808, 2);
-        le(dir, 0, 2); le(dir, 0, 4);
-        le(dir, e.crc, 4); le(dir, e.size, 4); le(dir, e.size, 4);
+        le(dir, e.method, 2); le(dir, 0, 4);
+        le(dir, e.crc, 4); le(dir, e.packed, 4); le(dir, e.size, 4);
         le(dir, e.name.size(), 2); le(dir, 0, 2); le(dir, 0, 2); le(dir, 0, 2); le(dir, 0, 2);
         le(dir, 0, 4); le(dir, e.offset, 4);
         dir += e.name;

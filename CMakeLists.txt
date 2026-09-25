@@ -39,6 +39,9 @@ option(LUX_POSTGRES "Modulo postgres (libpq)"                         ON)
 option(LUX_MYSQL    "Modulo mysql (libmysqlclient)"                   ON)
 option(LUX_PDF      "Native module: pdf (cairo)"                      ON)
 option(LUX_HTTP     "Native module: http (libcurl)"                   ON)
+option(LUX_CRYPTO   "Native module: crypto (OpenSSL libcrypto)"       ON)
+option(LUX_GZIP     "Native module: gzip, and deflate in zip (zlib)"  ON)
+option(LUX_IMAGE    "Native module: image (libjpeg, libpng, libwebp)" ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
 # Lux links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
@@ -154,7 +157,10 @@ set(_lux_module_exclude
     ${LUX_MODULE_EXCLUDE}
     "src/lux_script/modules/base_modules/pdf.cpp"
     "src/lux_script/modules/base_modules/http.cpp"
-    "src/lux_script/modules/base_modules/mail.cpp")
+    "src/lux_script/modules/base_modules/mail.cpp"
+    "src/lux_script/modules/base_modules/crypto.cpp"
+    "src/lux_script/modules/base_modules/gzip.cpp"
+    "src/lux_script/modules/base_modules/image.cpp")
 foreach(_excluded ${_lux_module_exclude})
     list(REMOVE_ITEM LUX_MODULE_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/${_excluded})
 endforeach()
@@ -266,62 +272,43 @@ endif()
 # `pdf` (NATIVE-MODULES.md): built on cairo's PDF surface -- a well-established,
 # already-liberally-licensed 2D graphics library with native PDF output, so
 # there was no need to hunt for a PDF-specific dependency.
-if(LUX_PDF)
+# lux_optional_module(<option> <label> PACKAGES <pkg-config names> FILES <.cpp>)
+#
+# A module whose library may be missing: compiled in only when every
+# package is found, skipped (with a line saying what to install) otherwise.
+# Its link flags also go to every --native .so, which links the whole
+# liblux_script.a: an object in it that references a library needs that
+# library there too, whatever the .lux being compiled uses.
+set(LUX_NATIVE_EXTRA_LIBS "")
+function(lux_optional_module option label)
+    cmake_parse_arguments(M "" "" "PACKAGES;FILES" ${ARGN})
+    if(NOT ${option})
+        return()
+    endif()
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
-        pkg_check_modules(CAIRO QUIET cairo)
+        pkg_check_modules(_${option} QUIET ${M_PACKAGES})
     endif()
-    if(CAIRO_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/pdf.cpp)
-        target_compile_definitions(lux_script PRIVATE LUX_PDF)
-        target_include_directories(lux_script PRIVATE ${CAIRO_INCLUDE_DIRS})
-        target_link_libraries(lux_script PRIVATE ${CAIRO_LIBRARIES})
-        # native_build.cpp compiles each --native .so with a fresh g++
-        # invocation that links the WHOLE liblux_script.a (see
-        # LUX_NATIVE_SCRIPT_LIB below) -- since pdf.cpp's object
-        # file is in that archive and references cairo, that g++ invocation
-        # needs cairo's link flags too, or loading ANY generated .so (not
-        # just a route using `pdf`) fails with "undefined symbol:
-        # cairo_pdf_surface_create_for_stream". Found by the native_route_
-        # shadow suite immediately after enabling LUX_PDF, not guessed.
-        list(JOIN CAIRO_LDFLAGS " " CAIRO_LDFLAGS_STR)
-        target_compile_definitions(lux_script PRIVATE
-            LUX_NATIVE_CAIRO_LIBS="${CAIRO_LDFLAGS_STR}")
-        message(STATUS "pdf module: enabled")
-    else()
-        message(STATUS "pdf module: SKIPPED (libcairo2-dev missing)")
+    if(NOT _${option}_FOUND)
+        message(STATUS "${label} module: SKIPPED (needs ${M_PACKAGES} development files)")
+        return()
     endif()
-endif()
+    target_sources(lux_script PRIVATE ${M_FILES})
+    target_compile_definitions(lux_script PRIVATE ${option})
+    target_include_directories(lux_script PRIVATE ${_${option}_INCLUDE_DIRS})
+    target_link_libraries(lux_script PRIVATE ${_${option}_LIBRARIES})
+    list(JOIN _${option}_LDFLAGS " " flags)
+    set(LUX_NATIVE_EXTRA_LIBS "${LUX_NATIVE_EXTRA_LIBS} ${flags}" PARENT_SCOPE)
+    message(STATUS "${label} module: enabled")
+endfunction()
 
-# `http` (NATIVE-MODULES.md): outbound HTTP(S) client on libcurl -- an
-# explicit, narrow exception to "Lux never links TLS" (see that comment
-# at the top of this file): that principle is about not being an INBOUND
-# TLS terminator, which does not and cannot extend to outbound calls (there
-# is no reverse proxy between Lux and a third-party HTTPS API). libcurl
-# brings a mature TLS backend rather than Lux hand-rolling one.
-if(LUX_HTTP)
-    find_package(PkgConfig QUIET)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(LUX_CURL QUIET libcurl)
-    endif()
-    if(LUX_CURL_FOUND)
-        target_sources(lux_script PRIVATE src/lux_script/modules/base_modules/http.cpp
-                                          src/lux_script/modules/base_modules/mail.cpp)
-        target_compile_definitions(lux_script PRIVATE LUX_HTTP)
-        target_include_directories(lux_script PRIVATE ${LUX_CURL_INCLUDE_DIRS})
-        target_link_libraries(lux_script PRIVATE ${LUX_CURL_LIBRARIES})
-        # Same reason as LUX_NATIVE_CAIRO_LIBS just above: every --native
-        # .so links the whole liblux_script.a, so http.cpp's curl
-        # references need curl's link flags on EVERY --native build, not
-        # only one that happens to use `http`.
-        list(JOIN LUX_CURL_LDFLAGS " " LUX_CURL_LDFLAGS_STR)
-        target_compile_definitions(lux_script PRIVATE
-            LUX_NATIVE_CURL_LIBS="${LUX_CURL_LDFLAGS_STR}")
-        message(STATUS "http module: enabled")
-    else()
-        message(STATUS "http module: SKIPPED (libcurl4-openssl-dev missing)")
-    endif()
-endif()
+set(_m src/lux_script/modules/base_modules)
+lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp)
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp)
+lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp)
+lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp)
+lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp)
+target_compile_definitions(lux_script PRIVATE LUX_NATIVE_EXTRA_LIBS="${LUX_NATIVE_EXTRA_LIBS}")
 target_compile_options(lux_script PRIVATE -Wall -Wextra)
 
 # The Lux binary.

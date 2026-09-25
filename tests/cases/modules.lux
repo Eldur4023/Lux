@@ -7,6 +7,7 @@
 # -- run_pdf.sh -- to skip gracefully on a binary built without cairo), so
 # it belongs in the always-runs regression suite too.
 import hash
+import gzip
 import zip
 import net
 import text
@@ -154,7 +155,7 @@ get endpoint("/net/basic"):
 get endpoint("/zip/create"):
     string dir = os.path_join(os.temp_dir(), "lux-zip-test")
     os.make_dir(dir)
-    await os.write_file(os.path_join(dir, "a.txt"), "hello zip")
+    await os.write_file(os.path_join(dir, "a.txt"), "hello zip hello zip hello zip hello zip hello zip")
     await os.write_file(os.path_join(dir, "b.bin"), "")
     Json n = await zip.create(os.path_join(dir, "out.zip"), [os.path_join(dir, "a.txt"), [os.path_join(dir, "b.bin"), "../../evil/b.bin"]])
     return { "n": n, "path": os.path_join(dir, "out.zip") }
@@ -175,6 +176,22 @@ get endpoint("/handles"):
     csv.close(a)
     csv.close(b)
     return { "not_small": a > 1000000 and b > 1000000, "not_sequential": b - a != 1 }
+
+get endpoint("/gzip/basic"):
+    string text = "abc".repeat(1000)
+    string packed = gzip.compress(text)
+    string bomb = gzip.compress("0".repeat(100000))
+    string caught = ""
+    try:
+        gzip.decompress(bomb, 1000)
+    catch e:
+        caught = e.message
+    string bad = ""
+    try:
+        gzip.decompress("not gzip at all")
+    catch e:
+        bad = e.message
+    return { "smaller": len(packed) < 100, "back": gzip.decompress(packed) == text, "capped": caught, "bad": bad }
 
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"

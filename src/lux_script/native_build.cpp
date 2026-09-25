@@ -334,8 +334,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // symbol" en CUALQUIER ruta con `await` (encontrado por
     // native_route_shadow al construir con -DLUX_IO_URING=ON, no
     // adivinado de antemano) -- el mismo tipo de descuido de "una flag que
-    // un proceso nuevo no hereda sola" que ya motivo LUX_NATIVE_CAIRO_LIBS/
-    // LUX_NATIVE_CURL_LIBS mas abajo.
+    // un proceso nuevo no hereda sola" que ya motivo LUX_NATIVE_EXTRA_LIBS
+    // mas abajo.
     cmd << "-DLUX_IO_URING ";
 #endif
     // LUX_NATIVE_INCLUDE_DIR/LUX_NATIVE_SCRIPT_LIB: horneadas por CMake
@@ -346,20 +346,10 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     cmd << "-I" << std::quoted(std::string(LUX_NATIVE_INCLUDE_DIR)) << " ";
     cmd << std::quoted(src_path.string()) << " -o " << std::quoted(so_path.string());
     cmd << " " << std::quoted(std::string(LUX_NATIVE_SCRIPT_LIB));
-#ifdef LUX_NATIVE_CAIRO_LIBS
-    // liblux_script.a carries pdf.cpp's object file unconditionally
-    // (it is part of the archive regardless of which .lux is being compiled
-    // right now), so cairo's own link flags are needed on EVERY --native
-    // build, not only one that happens to use `pdf` -- see the comment next
-    // to LUX_NATIVE_CAIRO_LIBS in CMakeLists.txt for how this was found.
-    // Not std::quoted: this can be several space-separated flags
-    // ("-lcairo -lpixman-1..."), and quoting it would turn them into one.
-    cmd << " " << LUX_NATIVE_CAIRO_LIBS;
-#endif
-#ifdef LUX_NATIVE_CURL_LIBS
-    // Same reasoning, same fix, for http.cpp/libcurl.
-    cmd << " " << LUX_NATIVE_CURL_LIBS;
-#endif
+// The optional modules' libraries (cairo, curl, libcrypto...): the archive
+    // carries their objects whatever this .lux uses -- see
+    // lux_optional_module() in CMakeLists.txt. Several flags, not quoted.
+    cmd << " " << LUX_NATIVE_EXTRA_LIBS;
     // liblux.a: SOLO si hay rutas -- una funcion suelta nunca usa
     // lux::Task/lux::Response, asi que nunca deja un simbolo de lux
     // sin resolver. Orden importante para un enlazado estatico: DESPUES de
