@@ -427,22 +427,23 @@ the archive's now-unresolved symbols.
   module's own timeout), but no longer the event-loop thread serving every OTHER connection on
   that core. A failure is raised at the `await` (`VM::resume_error`), exactly like a
   synchronous function's — one error model, caught by `try` like any runtime error; the database
-  modules raise the same way. No native (`--native`) codegen yet for either path (next bullet still
-  applies) — `await os.run(...)`/`await http.get(...)` fall back to bytecode like any other
-  `BuiltinModuleCall` today.
-- **No native (`--native`) codegen for any module function yet.** Deliberate and safe (§3.4),
-  not an oversight — falls back to bytecode per route, cleanly, with the fallback verified
-  against the real binary rather than assumed.
-- **No request-scoped handle cleanup.** `csv`/`pdf` handles live until explicitly `close()`d or
-  the process exits (§5.2) — nothing frees a request's leftover handles when it ends.
+  modules raise the same way. With `--native`, a module call inside a route compiles too: the generated code calls the same
+  `BuiltinModuleFn::call()` with a `NativeCtx` over the route's request/response (an awaited one
+  on the I/O pool) and converts the result to the type the signature declares.
+- **Module calls compile to native only inside routes.** A module function takes the request
+  context, which a standalone user function does not have, so one that calls a module stays in
+  bytecode.
+- **Handles are released by idle time, not per request.** `csv`/`pdf`/`proc` handles are
+  random and dropped after 10 minutes (an hour for `proc`) unused — a leftover handle does not
+  live for good, but it is not freed the moment its request ends either.
 
 ## 7. How this is validated
 
 `hash` and `csv` are dependency-free, so they live in the always-runs suite:
 `tests/cases/modules.lux` + the `"== native modules =="` block in `tests/run_tests.sh` — real
 HTTP requests against a real running `lux` binary, `hash` checked byte-for-byte against
-Python's `hashlib`/`hmac`, `csv` checked against hand-computed filter/sum/mean/group_sum
-results and RFC 4180 quoted-field parsing, plus (in `"== compile errors =="`) the missing-
+Python's `hashlib`/`hmac`, `csv` checked through `read()`/`write()`, List methods and RFC 4180
+quoted-field parsing, plus (in `"== compile errors =="`) the missing-
 `import` case. All of it is part of the `regression` ctest suite.
 
 `pdf` carries an optional dependency (cairo, `LUX_PDF`), so — like `sqlite`/`postgres`/`mysql`

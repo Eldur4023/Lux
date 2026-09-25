@@ -46,7 +46,10 @@ The string after the function name is its **signature**, checked before the func
 the body can use `as_str()`/`as_int()` without checking: `s` string, `i` int, `n` int or
 float, `b` bool, `l` List, `d` Dict, `f` function, `x` anything; an uppercase letter also
 accepts `null`; what follows `|` is optional; a trailing `*` takes any number of further
-arguments. The argument count the compiler checks comes from it too. Set `error` to fail the
+arguments; `>` then one letter declares what it returns (`s` `i` `b` `l` `d`, `r` float;
+nothing, or anything else, is `Json`) — the compiler checks a call site's use of it, so leave it
+out for a function that can return `null`. The argument count the compiler checks comes from
+it too: `{"hmac_sha256", "ss>s", fn}`. Set `error` to fail the
 call (a catchable Lux Script error, or `{"error": ...}` for an async function), and pass
 `/*is_async=*/true` as a fourth field for anything that waits on disk, the network, a child
 process or real CPU work, so it runs on the I/O pool and has to be `await`ed.

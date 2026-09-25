@@ -1472,6 +1472,15 @@ hash.sha256(): argument 1 must be a string, not int
 Functions marked **await** do real I/O or CPU work and run on the I/O pool, never on the event
 loop: `await` is mandatory. Everything else is synchronous and fast.
 
+A function's return type is known to the compiler, so a method on its result is checked like
+one on a variable (`hash.sha256(s).uppercase()` does not compile). With `--native`, a route
+that calls modules compiles to native code too; only a user function or method that calls one
+stays in bytecode.
+
+`csv`, `pdf` and `proc` hand out a handle (an `int`) for an object that outlives the call. A
+handle is random — a route cannot reach someone else's document by guessing — and one nobody
+used for 10 minutes (an hour for `proc`) is released, so a forgotten `close()` does not leak.
+
 A module function that fails raises an error — awaited or not, the same as a database call. Left
 alone it ends the handler with a `500 {"error": message, "at": "file:line:col"}`; `try` catches
 it where there is something better to do:
@@ -1534,7 +1543,7 @@ return redirect(next)
 |---|---|
 | `slug(s)` | `"¡Café con Leche!"` → `"cafe-con-leche"` (Latin letters transliterated) |
 | `truncate(s, n[, suffix])` | At most `n` characters, `suffix` (default `…`) included |
-| `format_number(x[, decimals, thousands, point])` | `format_number(1234.5, 2, ".", ",")` → `"1.234,50"` |
+| `format_number(x[, decimals, thousands, point])` | `format_number(1234.5, 2, ".", ",")` → `"1.234,50"`; rounds half-up in decimal (`2.675` → `"2.68"`); a decimal string (`"1234.565"`) is taken exactly |
 | `pad_left(s, n[, ch])` `pad_right(s, n[, ch])` | `pad_left("7", 4, "0")` → `"0007"` |
 | `distance(a, b)` | Levenshtein distance, for "did you mean…?" |
 
@@ -1577,8 +1586,10 @@ backreferences inside the pattern — and a subject is capped at 4096 bytes.
 
 ### csv
 
-`read(text[, header, delimiter])` → a `List` of `Dict`s with typed cells; `write(rows[,
-columns, delimiter])` → text. A UTF-8 BOM is dropped, `;` works as a delimiter (what Excel
+`read(text[, header, delimiter, typed])` → a `List` of `Dict`s; `write(rows[, columns,
+delimiter])` → text. A cell becomes a number only when nothing is lost: `"01234"` (a zip
+code), `"+34600111222"` or a 25-digit account number stay strings; `typed` `false` keeps
+every cell a string. A UTF-8 BOM is dropped, `;` works as a delimiter (what Excel
 writes in many locales), and a cell that would run as a spreadsheet formula (`=`, `+`, `-`,
 `@`) is written defused. Filter, sort and aggregate with the `List` methods:
 
@@ -1649,17 +1660,73 @@ to 4 GB.
 `create(w, h)` `add_page(h, w, h)` · `text(h, x, y, s, size)` `text_width(h, s, size)` ·
 `set_font(h, family[, bold, italic])` `set_color(h, r, g, b)` `set_line_width(h, w)` ·
 `rect(h, x, y, w, h[, filled])` `line(h, x1, y1, x2, y2)` `image(h, png, x, y[, w, h])` ·
+`text_box(h, x, y, width, text, size[, line_height])` (wrapped; returns the y below it) ·
+`table(h, x, y, widths, rows[, {size, header, padding, border, margin}])` (wrapped cells, a
+shaded header row repeated on every page it breaks onto; returns the y below it) ·
 `send(h[, filename, download])` (the PDF as this request's response) `save(h, path)`
 `to_base64(h)` · `close(h)`. Sizes in points (A4 is 595 × 842). Needs cairo at build time
 (`libcairo2-dev`).
+
+### gzip
+
+`compress(s[, level])` `decompress(bytes[, max_bytes])` · **await** `compress_file(src, dst[,
+level])` `decompress_file(src, dst[, max_bytes])`. `decompress` reads gzip or zlib, and caps its
+output (64 MB for a string, 4 GB for a file) so a small upload cannot expand to gigabytes. With
+this module built in, `zip.create` deflates entries too. Needs zlib (`zlib1g-dev`).
+
+### crypto
+
+| | |
+|---|---|
+| `key()` | A new 256-bit key — keep it in an env variable |
+| `encrypt(text, key[, aad])` `decrypt(token, key[, aad])` | AES-256-GCM. `decrypt` is `null` if the token was altered, is for another key, or another `aad` |
+| `sign(alg, private_pem, data)` `verify(alg, public_key, data, signature)` | RS256/384/512, PS256/384/512, ES256/ES384, EdDSA |
+| `jwt_sign(claims, alg, private_pem[, kid])` `jwt_verify(token, key[, {aud, iss, leeway_s}])` | Asymmetric JWTs; `jwt_verify` is the claims or `null` |
+
+A public key is a PEM, an X.509 certificate, a JWK `Dict`, or a JWKS (`{"keys": [...]}`,
+picked by the token's `kid`) — so a provider's key set can be passed as fetched:
+
+```lux
+Json keys = (await http.get("https://www.googleapis.com/oauth2/v3/certs"))["body"]
+Json who = crypto.jwt_verify(id_token, keys, { "aud": env("GOOGLE_CLIENT_ID"), "iss": "https://accounts.google.com" })
+```
+
+`jwt_verify` refuses `alg: none`, an algorithm that does not fit the key (the RS256→HS256
+confusion), expired or not-yet-valid tokens, and a wrong `aud`/`iss`. Through OpenSSL's
+libcrypto (`libssl-dev`); the session and HS256 JWT support of §9–10 does not need it.
+
+### image
+
+**await** `info(path)` → `{width, height, format}` (from the header alone) · **await**
+`resize(src, dst[, {width, height, fit, quality}])` → `{width, height}`, where `fit` is
+`"contain"` (inside the box, the default), `"cover"` (fills it, centre-cropped) or `"fill"`
+(stretched), and the format comes from `dst` (`.jpg`, `.png`, `.webp`). With no size it just
+converts.
+
+```lux
+post endpoint("/avatar", File photo):
+    string saved = photo.save("uploads")
+    await image.resize(saved, "public/avatars/" + str(session.user) + ".webp", { "width": 256, "height": 256, "fit": "cover" })
+```
+
+A phone photo is turned upright from its EXIF orientation, and the output carries no metadata
+— no camera, no GPS position. An image over 50 megapixels is refused before decoding. Needs
+libjpeg, libpng and libwebp (`libjpeg-dev libpng-dev libwebp-dev`).
 
 ### http
 
 **await** `get(url[, headers, options])` `delete(url[, headers, options])`
 `post(url, body[, headers, options])` `put` `patch` → `{status, headers, body}`, with `body`
-parsed when it is JSON. A `Dict` body is sent as JSON. `options`: `timeout_ms` (default 15 s,
-up to 120 s) and `public_only` — refuse any private, loopback or link-local address (checked
-on the address actually connected to, redirects included), for a URL that comes from a user:
+parsed when it is JSON. A `Dict` body is sent as JSON. `options`:
+
+| | |
+|---|---|
+| `timeout_ms` | Default 15 s, up to 120 s |
+| `public_only` | Refuse private, loopback and link-local addresses (checked on the address connected to, redirects included) — for a URL that comes from a user |
+| `form` | Send the `Dict` body as `application/x-www-form-urlencoded` (OAuth token endpoints) |
+| `files` | `{field: path}`: a `multipart/form-data` upload, the body `Dict`'s fields alongside |
+| `save_to` | Stream the response body to this file (up to 4 GB; in memory the cap is 16 MB); the result has `saved` bytes |
+
 
 ```lux
 Json r = await http.get(webhook_url, null, { "public_only": true, "timeout_ms": 5000 })
@@ -1688,7 +1755,9 @@ post endpoint("/contact"):
                                "subject": "Contact: " + form("subject"), "text": form("message") })
 ```
 
-**await** `send({to, cc, bcc, reply_to, from, subject, text, html})` → `true` (a failure raises). `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
+**await** `send({to, cc, bcc, reply_to, from, subject, text, html, attachments})` → `true` (a
+failure raises). `attachments` is a `List` of file paths or `{name, content}` for something made
+on the spot (`{"name": "report.csv", "content": csv.write(rows)}`), up to 25 MB. `to`/`cc`/`bcc` take one address or a `List`; with both `text` and `html`
 the mail carries both. Every header value is stripped of line breaks, so a form field cannot
 add a header, and `bcc` never appears in the message. Built with the `http` module (libcurl).
 
