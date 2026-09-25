@@ -1,0 +1,68 @@
+# The optional modules built on system libraries -- gzip (zlib), crypto
+# (libcrypto), image (libjpeg/libpng/libwebp) -- in their own suite
+# (run_extras.sh), skipped on a binary built without them.
+import gzip
+import crypto
+import os
+import json
+import time
+
+app:
+    port 8830
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+get endpoint("/gzip/basic"):
+    string text = "abc".repeat(1000)
+    string packed = gzip.compress(text)
+    string bomb = gzip.compress("0".repeat(100000))
+    string caught = ""
+    try:
+        gzip.decompress(bomb, 1000)
+    catch e:
+        caught = e.message
+    string bad = ""
+    try:
+        gzip.decompress("not gzip at all")
+    catch e:
+        bad = e.message
+    return { "smaller": len(packed) < 100, "back": gzip.decompress(packed) == text, "capped": caught, "bad": bad }
+get endpoint("/crypto/cipher"):
+    string k = crypto.key()
+    string t = crypto.encrypt("secret ñ", k)
+    string bound = crypto.encrypt("for user 7", k, "user:7")
+    string tampered = t.slice(0, -2) + "AA"
+    return { "back": crypto.decrypt(t, k), "fresh_nonce": t != crypto.encrypt("secret ñ", k), "tampered": crypto.decrypt(tampered, k), "other_key": crypto.decrypt(t, crypto.key()), "aad_ok": crypto.decrypt(bound, k, "user:7"), "aad_wrong": crypto.decrypt(bound, k, "user:8") }
+
+get endpoint("/crypto/bad_key"):
+    return { "r": crypto.encrypt("x", "hunter2") }
+
+fn string pem(string name):
+    return os.path_join(os.getenv("LUX_TEST_TMP", "/tmp"), name)
+
+get endpoint("/crypto/sign/:alg/:kind", string alg, string kind):
+    string priv = await os.read_file(pem(kind + ".key"))
+    string pub = await os.read_file(pem(kind + ".pub"))
+    string sig = crypto.sign(alg, priv, "hello")
+    return { "ok": crypto.verify(alg, pub, "hello", sig), "tampered": crypto.verify(alg, pub, "hellO", sig), "sig": sig }
+
+get endpoint("/crypto/jwt/:alg/:kind", string alg, string kind):
+    string priv = await os.read_file(pem(kind + ".key"))
+    string pub = await os.read_file(pem(kind + ".pub"))
+    int now = time.now_seconds()
+    string t = crypto.jwt_sign({ "sub": "u1", "aud": "app", "iss": "me", "exp": now + 60 }, alg, priv, "k1")
+    string old = crypto.jwt_sign({ "sub": "u1", "exp": now - 3600 }, alg, priv)
+    return { "claims": crypto.jwt_verify(t, pub, { "aud": "app", "iss": "me" }), "wrong_aud": crypto.jwt_verify(t, pub, { "aud": "other" }), "expired": crypto.jwt_verify(old, pub) }
+
+get endpoint("/crypto/jwk"):
+    string priv = await os.read_file(pem("rsa.key"))
+    Json jwks = json.parse(await os.read_file(pem("rsa.jwks")))
+    string t = crypto.jwt_sign({ "sub": "jwk" }, "RS256", priv, "k1")
+    string other_kid = crypto.jwt_sign({ "sub": "jwk" }, "RS256", priv, "nope")
+    return { "claims": crypto.jwt_verify(t, jwks), "unknown_kid": crypto.jwt_verify(other_kid, jwks) }
+
+get endpoint("/crypto/attacks"):
+    string pub = await os.read_file(pem("rsa.pub"))
+    string none_token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0."
+    return { "none": crypto.jwt_verify(none_token, pub), "hs256_with_public_key": crypto.jwt_verify("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln", pub), "rs_alg_on_ec_key": crypto.verify("RS256", await os.read_file(pem("ec.pub")), "x", "c2ln") }

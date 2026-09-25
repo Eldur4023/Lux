@@ -455,6 +455,13 @@ add_test(NAME http
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(http PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
+# gzip/crypto/image (zlib, libcrypto, libjpeg/libpng/libwebp): skipped when
+# the binary lacks any of them.
+add_test(NAME extras
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_extras.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(extras PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
 # ── Fuzzing ───────────────────────────────────────────────────────────────────
 # No sanitizer flags here on purpose: for ASan/UBSan to be worth anything they
 # have to instrument lux_script/lux too, not just these two .cpp files, so
