@@ -322,6 +322,7 @@ else fail "every \"1s\" runs on its own" ">= 2 runs" "$ticks"; fi
 kill -0 "$SRV" 2>/dev/null && ok "a failing task does not take the server down" \
                            || fail "a failing task does not take the server down" "alive" "dead"
 check "every is not reachable over HTTP" GET /__every/0 404 'Not Found'
+check "handles cannot be guessed by counting" GET /handles 200 '"not_small":true,"not_sequential":true'
 check "csv.parse/columns/rows"     GET /csv/basic                 200 '"name":"ana","age":30,"city":"madrid"'
 check "csv row_count"              GET /csv/basic                 200 '"row_count":3'
 check "csv.read + List.filter"     GET /csv/read_and_aggregate 200 '"madrid":[{"name":"ana","age":30,"city":"madrid"},{"name":"cleo","age":35,"city":"madrid"}]'

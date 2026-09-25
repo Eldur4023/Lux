@@ -17,6 +17,7 @@
 #include <cstring>
 #include <chrono>
 #include <mutex>
+#include <random>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -71,33 +72,40 @@ public:
         return r;
     }
 
-    int put(pid_t pid, int stdout_fd, int stdin_fd) {
+    // Random 53-bit ids (a handle cannot be guessed by counting), and a
+    // handle nobody touched for an hour is closed -- closed, not killed.
+    long long put(pid_t pid, int stdout_fd, int stdin_fd) {
         auto e = std::make_shared<ProcEntry>();
         e->pid       = pid;
         e->stdout_fd = stdout_fd;
         e->stdin_fd  = stdin_fd;
+        for (long long stale : stale_ids()) close(stale);
         std::lock_guard<std::mutex> lock(mutex_);
-        int id = next_id_++;
-        procs_.emplace(id, std::move(e));
+        thread_local std::mt19937_64 rng{std::random_device{}()};
+        long long id;
+        do id = static_cast<long long>(rng() & ((1ULL << 53) - 1)) | 1; while (procs_.count(id));
+        procs_.emplace(id, Slot{std::move(e), std::chrono::steady_clock::now()});
         return id;
     }
 
     // Kept alive for the caller's whole call via the returned shared_ptr,
     // even if close() erases it from `procs_` concurrently -- see the
     // module comment on why that is enough here, unlike rooms.cpp.
-    std::shared_ptr<ProcEntry> get(int handle) {
+    std::shared_ptr<ProcEntry> get(long long handle) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = procs_.find(handle);
-        return it == procs_.end() ? nullptr : it->second;
+        if (it == procs_.end()) return nullptr;
+        it->second.used = std::chrono::steady_clock::now();
+        return it->second.entry;
     }
 
-    void close(int handle) {
+    void close(long long handle) {
         std::shared_ptr<ProcEntry> e;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             auto it = procs_.find(handle);
             if (it == procs_.end()) return;
-            e = it->second;
+            e = it->second.entry;
             procs_.erase(it);
         }
         std::lock_guard<std::mutex> elock(e->mutex);
@@ -142,9 +150,19 @@ public:
     }
 
 private:
-    std::mutex                                   mutex_;
-    std::unordered_map<int, std::shared_ptr<ProcEntry>> procs_;
-    int                                           next_id_ = 1;
+    struct Slot { std::shared_ptr<ProcEntry> entry; std::chrono::steady_clock::time_point used; };
+
+    std::vector<long long> stale_ids() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<long long> out;
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& [id, slot] : procs_)
+            if (now - slot.used > std::chrono::hours(1)) out.push_back(id);
+        return out;
+    }
+
+    std::mutex                              mutex_;
+    std::unordered_map<long long, Slot>     procs_;
 
     std::mutex           orphan_mutex_;
     std::vector<pid_t>   orphan_pids_;
@@ -193,7 +211,7 @@ Value fn_proc_start(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // with the pipe full it writes what fits, maybe 0, and the caller tries the
 // rest later. write(h, null) closes stdin -- the EOF a filter waits for.
 Value fn_proc_write(NativeCtx&, std::vector<Value>& args, std::string& error) {
-    auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
+    auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
     std::lock_guard<std::mutex> lock(e->mutex);
     if (e->stdin_fd < 0) { error = "proc.write(): this process has no stdin: \"pipe\" (or it was closed)"; return Value::null(); }
@@ -217,7 +235,7 @@ Value fn_proc_write(NativeCtx&, std::vector<Value>& args, std::string& error) {
 Value fn_proc_alive(NativeCtx&, std::vector<Value>& args, std::string& error) {
     ProcRegistry::instance().reap_orphans();
 
-    auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
+    auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
 
     std::lock_guard<std::mutex> lock(e->mutex);
@@ -254,7 +272,7 @@ Value fn_proc_read(NativeCtx&, std::vector<Value>& args, std::string& error) {
         return Value::null();
     }
 
-    auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
+    auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
 
     std::lock_guard<std::mutex> lock(e->mutex);
@@ -296,7 +314,7 @@ Value fn_proc_wait(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
     ProcRegistry::instance().reap_orphans();
 
-    auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
+    auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
 
     std::lock_guard<std::mutex> lock(e->mutex);
@@ -335,7 +353,7 @@ Value fn_proc_wait(NativeCtx&, std::vector<Value>& args, std::string& error) {
 Value fn_proc_kill(NativeCtx&, std::vector<Value>& args, std::string& error) {
     const int sig = args.size() > 1 ? static_cast<int>(args[1].as_int()) : SIGTERM;
 
-    auto e = ProcRegistry::instance().get(static_cast<int>(args[0].as_int()));
+    auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
 
     std::lock_guard<std::mutex> lock(e->mutex);
@@ -346,7 +364,7 @@ Value fn_proc_kill(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // ─── close() ─────────────────────────────────────────────────────────────────
 
 Value fn_proc_close(NativeCtx&, std::vector<Value>& args, std::string&) {
-    ProcRegistry::instance().close(static_cast<int>(args[0].as_int()));
+    ProcRegistry::instance().close(args[0].as_int());
     return Value::null();
 }
 

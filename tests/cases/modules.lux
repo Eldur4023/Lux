@@ -169,6 +169,13 @@ every "1s":
 get endpoint("/every/ticks"):
     return { "ticks": state.get("every_ticks", 0) }
 
+get endpoint("/handles"):
+    int a = csv.parse("x\n1\n")
+    int b = csv.parse("x\n2\n")
+    csv.close(a)
+    csv.close(b)
+    return { "not_small": a > 1000000 and b > 1000000, "not_sequential": b - a != 1 }
+
 get endpoint("/csv/basic"):
     string data = "name,age,city\nana,30,madrid\nbob,25,paris\ncleo,35,madrid\n"
     int h = csv.parse(data)

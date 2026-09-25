@@ -71,8 +71,8 @@ Value fn_pdf_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
     return Value::integer(handles().put(std::move(doc)));
 }
 
-PdfDoc* doc(std::vector<Value>& a, std::string& error, bool drawing = true) {
-    auto* d = handles().get(static_cast<int>(a[0].as_int()));
+std::shared_ptr<PdfDoc> doc(std::vector<Value>& a, std::string& error, bool drawing = true) {
+    auto d = handles().get(a[0].as_int());
     if (!d) error = "pdf: unknown handle";
     else if (drawing && d->finished) { error = "pdf: document already saved; cannot draw on it anymore"; return nullptr; }
     return d;
@@ -83,9 +83,9 @@ double num(const std::vector<Value>& a, size_t i) { return a[i].as_float(); }
 // Every drawing call: find the document, run the cairo calls, true.
 template <class F>
 Value draw(std::vector<Value>& a, std::string& error, F f) {
-    PdfDoc* d = doc(a, error);
+    auto d = doc(a, error);
     if (!d) return Value::null();
-    f(d->cr, d);
+    f(d->cr, d.get());
     return Value::boolean(true);
 }
 
@@ -121,7 +121,7 @@ Value fn_pdf_text(NativeCtx&, std::vector<Value>& a, std::string& e) {
 // How wide `text` is at `size` in the current font -- what right-aligning
 // an amount or centring a title needs.
 Value fn_pdf_text_width(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    PdfDoc* d = doc(a, error);
+    auto d = doc(a, error);
     if (!d) return Value::null();
     cairo_set_font_size(d->cr, num(a, 2));
     cairo_text_extents_t ext;
@@ -151,7 +151,7 @@ Value fn_pdf_set_line_width(NativeCtx&, std::vector<Value>& a, std::string& e) {
 
 // A PNG file at x, y -- scaled to w x h when given (a logo).
 Value fn_pdf_image(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    PdfDoc* d = doc(a, error);
+    auto d = doc(a, error);
     if (!d) return Value::null();
     cairo_surface_t* img = cairo_image_surface_create_from_png(a[1].as_str().c_str());
     if (cairo_surface_status(img) != CAIRO_STATUS_SUCCESS) {
@@ -171,19 +171,18 @@ Value fn_pdf_image(NativeCtx&, std::vector<Value>& a, std::string& error) {
     return Value::boolean(true);
 }
 
-// The finished PDF bytes, or nullptr with `error` set.
-const std::string* bytes(std::vector<Value>& a, std::string& error) {
-    PdfDoc* d = doc(a, error, false);
-    if (!d) return nullptr;
-    finish(*d);
-    return &d->buffer;
+// The document, finished (its bytes in ->buffer), or nullptr with `error`.
+std::shared_ptr<PdfDoc> finished(std::vector<Value>& a, std::string& error) {
+    auto d = doc(a, error, false);
+    if (d) finish(*d);
+    return d;
 }
 
 Value fn_pdf_save(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    const std::string* b = bytes(a, error);
-    if (!b) return Value::null();
+    const auto d = finished(a, error);
+    if (!d) return Value::null();
     std::ofstream f(a[1].as_str(), std::ios::binary);
-    if (!f.write(b->data(), static_cast<std::streamsize>(b->size()))) {
+    if (!f.write(d->buffer.data(), static_cast<std::streamsize>(d->buffer.size()))) {
         error = "pdf.save(): cannot write '" + a[1].as_str() + "'";
         return Value::null();
     }
@@ -191,27 +190,27 @@ Value fn_pdf_save(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 Value fn_pdf_to_base64(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    const std::string* b = bytes(a, error);
-    return b ? Value::str(crypto::base64_encode(*b)) : Value::null();
+    const auto d = finished(a, error);
+    return d ? Value::str(crypto::base64_encode(d->buffer)) : Value::null();
 }
 
 // The PDF as this request's response: `pdf.send(doc, "invoice.pdf")`
 // shows it in the browser; pass true as a third argument to download it.
 Value fn_pdf_send(NativeCtx& ctx, std::vector<Value>& a, std::string& error) {
-    const std::string* b = bytes(a, error);
-    if (!b) return Value::null();
+    const auto d = finished(a, error);
+    if (!d) return Value::null();
     std::string name = a.size() > 1 ? a[1].as_str() : "document.pdf";
     std::erase_if(name, [](char c) { return c == '"' || c == '\\' || static_cast<unsigned char>(c) < 0x20; });
     const bool download = a.size() > 2 && a[2].as_bool();
     ctx.res.header("Content-Type", "application/pdf")
            .header("Content-Disposition", std::string(download ? "attachment" : "inline") + "; filename=\"" + name + "\"")
-           .send(*b);
+           .send(d->buffer);
     ctx.response_written = true;
     return Value::null();
 }
 
 Value fn_pdf_close(NativeCtx&, std::vector<Value>& a, std::string&) {
-    return Value::boolean(handles().close(static_cast<int>(a[0].as_int())));
+    return Value::boolean(handles().close(a[0].as_int()));
 }
 
 } // namespace

@@ -1,7 +1,9 @@
 #pragma once
 #include <map>
 #include <memory>
+#include <chrono>
 #include <mutex>
+#include <random>
 #include <unordered_map>
 #include <string>
 #include <vector>
@@ -247,33 +249,56 @@ private:
         });                                                                   \
     }
 
-// Integer handles for module objects that outlive a request (csv tables, pdf
-// documents). Mutex-protected: every event-loop thread can reach them.
-// Objects live behind unique_ptr so their address never moves.
+// Integer handles for module objects that outlive a request (csv tables,
+// pdf documents). Mutex-protected: every event-loop thread can reach them.
+//
+// An id is random (53 bits: exact in JSON, and no route can guess another
+// user's document by counting), and an entry nobody touched for `idle` is
+// dropped, so a handler that forgot close() does not leak it for good.
 template <class T>
 class HandleTable {
 public:
-    int put(std::unique_ptr<T> v) {
+    using Clock = std::chrono::steady_clock;
+    explicit HandleTable(Clock::duration idle = std::chrono::minutes(10)) : idle_(idle) {}
+
+    long long put(std::unique_ptr<T> v) {
         std::lock_guard<std::mutex> lock(mutex_);
-        int id = next_id_++;
-        items_.emplace(id, std::move(v));
+        sweep_locked();
+        long long id;
+        do id = random_id(); while (items_.count(id));
+        items_.emplace(id, Entry{std::shared_ptr<T>(std::move(v)), Clock::now()});
         return id;
     }
-    int put(T v) { return put(std::make_unique<T>(std::move(v))); }
-    T* get(int id) {
+    long long put(T v) { return put(std::make_unique<T>(std::move(v))); }
+
+    // Kept alive by the caller's shared_ptr even if close() runs meanwhile.
+    std::shared_ptr<T> get(long long id) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = items_.find(id);
-        return it == items_.end() ? nullptr : it->second.get();
+        if (it == items_.end()) return nullptr;
+        it->second.used = Clock::now();
+        return it->second.value;
     }
-    bool close(int id) {
+    bool close(long long id) {
         std::lock_guard<std::mutex> lock(mutex_);
         return items_.erase(id) > 0;
     }
 
 private:
-    std::mutex                                  mutex_;
-    std::unordered_map<int, std::unique_ptr<T>> items_;
-    int                                         next_id_ = 1;
+    struct Entry { std::shared_ptr<T> value; Clock::time_point used; };
+
+    static long long random_id() {
+        thread_local std::mt19937_64 rng{std::random_device{}()};
+        return static_cast<long long>(rng() & ((1ULL << 53) - 1)) | 1;
+    }
+    void sweep_locked() {
+        const auto now = Clock::now();
+        std::erase_if(items_, [&](const auto& kv) { return now - kv.second.used > idle_; });
+    }
+
+    Clock::duration                         idle_;
+    std::mutex                              mutex_;
+    std::unordered_map<long long, Entry>    items_;
 };
 
 } // namespace lux_script

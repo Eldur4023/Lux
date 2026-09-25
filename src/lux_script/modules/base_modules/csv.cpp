@@ -189,8 +189,8 @@ Value fn_write(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 // ─── Handle-based form ───────────────────────────────────────────────────────
 
-Table* table(const std::vector<Value>& a, std::string& error) {
-    Table* t = handles().get(static_cast<int>(a[0].as_int()));
+std::shared_ptr<Table> table(const std::vector<Value>& a, std::string& error) {
+    auto t = handles().get(a[0].as_int());
     if (!t) error = "csv: unknown handle";
     return t;
 }
@@ -200,12 +200,12 @@ Value fn_parse(NativeCtx&, std::vector<Value>& a, std::string&) {
 }
 
 Value fn_rows(NativeCtx&, std::vector<Value>& a, std::string& e) {
-    const Table* t = table(a, e);
+    const auto t = table(a, e);
     return t ? to_rows(*t) : Value::null();
 }
 
 Value fn_columns(NativeCtx&, std::vector<Value>& a, std::string& e) {
-    const Table* t = table(a, e);
+    const auto t = table(a, e);
     if (!t) return Value::null();
     Value::List out;
     for (const auto& c : t->columns) out.push_back(Value::str(c));
@@ -213,17 +213,17 @@ Value fn_columns(NativeCtx&, std::vector<Value>& a, std::string& e) {
 }
 
 Value fn_row_count(NativeCtx&, std::vector<Value>& a, std::string& e) {
-    const Table* t = table(a, e);
+    const auto t = table(a, e);
     return t ? Value::integer(static_cast<long long>(t->rows.size())) : Value::null();
 }
 
 Value fn_to_csv(NativeCtx&, std::vector<Value>& a, std::string& e) {
-    const Table* t = table(a, e);
+    const auto t = table(a, e);
     return t ? Value::str(to_text(*t, ',')) : Value::null();
 }
 
 Value fn_close(NativeCtx&, std::vector<Value>& a, std::string&) {
-    return Value::boolean(handles().close(static_cast<int>(a[0].as_int())));
+    return Value::boolean(handles().close(a[0].as_int()));
 }
 
 } // namespace
