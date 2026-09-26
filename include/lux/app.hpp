@@ -20,10 +20,6 @@ public:
     // Route registration — support both :param and {param} styles.
     // Each registration also captures compile-time type info for OpenAPI generation.
     template<typename F> App& get   (std::string path, F&& h) { router_.add("GET",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& post  (std::string path, F&& h) { router_.add("POST",   std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& put   (std::string path, F&& h) { router_.add("PUT",    std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& patch (std::string path, F&& h) { router_.add("PATCH",  std::move(path), std::forward<F>(h)); return *this; }
-    template<typename F> App& del   (std::string path, F&& h) { router_.add("DELETE", std::move(path), std::forward<F>(h)); return *this; }
     template<typename F> App& any   (std::string path, F&& h) {                                     router_.add("*",      std::move(path), std::forward<F>(h)); return *this; }
 
     // Middleware (applied in order for every request)
@@ -203,6 +199,7 @@ public:
                 co_return;
             }
 
+            req.bind_stream();
             if (!req._raw_write) {
                 res.status(500).json_text(R"({"error":"no raw writer for WS upgrade"})");
                 co_return;

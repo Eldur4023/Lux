@@ -53,12 +53,19 @@ private:
     using traits = detail::callable_traits<decltype(&std::decay_t<F>::operator())>;
 
     template<typename... A>
-    static Task<void> invoke(F& f, Request& req, Response& res, std::tuple<A...>*) {
-        if constexpr (std::is_same_v<typename traits::result, Task<void>>)
-            co_await f(detail::handler_arg<A>::get(req, res)...);
-        else
-            f(detail::handler_arg<A>::get(req, res)...);
+    static Task<void> invoke_sync(F& f, Request& req, Response& res, std::tuple<A...>*) {
+        f(detail::handler_arg<A>::get(req, res)...);
         co_return;
+    }
+
+    // A handler that already returns a Task is that Task: wrapping it in a
+    // coroutine of its own was one more frame and co_await per request.
+    template<typename... A>
+    static Task<void> invoke(F& f, Request& req, Response& res, std::tuple<A...>* args) {
+        if constexpr (std::is_same_v<typename traits::result, Task<void>>)
+            return f(detail::handler_arg<A>::get(req, res)...);
+        else
+            return invoke_sync(f, req, res, args);
     }
 
 public:

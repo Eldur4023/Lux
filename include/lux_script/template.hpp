@@ -28,6 +28,8 @@ namespace lux_script {
 // The template is compiled once at startup, like the routes.  Rendering is
 // walking a list of very simple instructions: paste a chunk of text, or
 // evaluate an expression and paste its escaped result.
+inline constexpr uint32_t kNoLoop = UINT32_MAX;
+
 struct Template {
     enum class Op : uint8_t {
         Text,          // pastes texts[a]
@@ -44,7 +46,7 @@ struct Template {
         uint32_t  a    = 0;
         uint32_t  b    = 0;
         uint32_t  slot = 0;   // item slot, in loops
-        uint32_t  slot_loop = 0;
+        uint32_t  slot_loop = 0;   // kNoLoop: the body never reads `loop`
         SourceLoc loc;
     };
 

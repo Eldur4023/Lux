@@ -171,7 +171,7 @@ static std::string compilar_y_correr(const Program& prog, const ClassSigs& class
     { std::ofstream out(src_path, std::ios::trunc); out << codigo; }
 
     std::ostringstream cmd;
-    cmd << "g++ -O2 -std=c++20 " << std::quoted(src_path.string()) << " -o "
+    cmd << "g++ -O2 -std=c++23 " << std::quoted(src_path.string()) << " -o "
         << std::quoted(bin_path.string()) << " 2> " << std::quoted(err_path.string());
     if (std::system(cmd.str().c_str()) != 0) {
         std::printf("  FALLA: el C++ generado no compilo -- ver %s\n", err_path.string().c_str());

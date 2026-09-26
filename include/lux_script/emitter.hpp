@@ -78,7 +78,7 @@ struct TemplateCtx {
     std::vector<Template>* table = nullptr;
     // "file|key:type,..." -> index in `table`: how a --native route finds
     // the template its render() compiled to (render_key(), native_gen).
-    std::map<std::string, size_t>* by_key = nullptr;
+    std::map<std::string, size_t, std::less<>>* by_key = nullptr;
 };
 
 class Emitter {

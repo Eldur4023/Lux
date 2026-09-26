@@ -26,9 +26,8 @@ get endpoint("/chain"):
     return { "h": caller("a") }
 
 # Semantics --native has to keep, one per line of the response: a list
-# shared by two variables, a local held as a Value (sort() on it, an int
-# summed with a range() element), and/or on non-bools, an int division
-# that is not exact.
+# shared by two variables, sort() on a typed list, an int summed with a
+# range() element, and/or on non-bools, an int division that is not exact.
 get endpoint("/values"):
     List<int> b = [1, 2]
     List<int> a = b
@@ -60,3 +59,75 @@ get endpoint("/awaits"):
 get endpoint("/nothing"):
     Json n = null
     return n
+
+fn string repeat(string s, int n):
+    string out = ""
+    for int i in range(n):
+        out = out + s
+    return out
+
+# --native moves a local instead of copying it only where nobody reads it
+# again: each line is a read that must NOT be moved (read next round, read
+# later, read twice, read by a catch), or one that may.
+get endpoint("/moves"):
+    string s = ""
+    for int i in range(5):
+        s = s + str(i)
+    Json row = { "k": 1 }
+    List<Json> rows = []
+    for int i in range(3):
+        rows.add(row)
+    List<string> parts = []
+    string piece = "ab"
+    int i = 0
+    while i < 4:
+        i = i + 1
+        if i == 2:
+            continue
+        parts.add(piece)
+        if i == 3:
+            break
+    Json a = { "x": 1 }
+    Json b = a
+    Json a2 = { "y": 2 }
+    Json d = a2
+    List<int> xs = [1, 2]
+    List<int> ys = xs
+    ys.add(3)
+    List<Json> pair = [row, row]
+    string caught = ""
+    Json kept = { "z": 3 }
+    try:
+        Json t = kept
+        int z = 1 / 0
+    catch e:
+        caught = str(kept)
+    return { "s": s, "rows": rows, "parts": parts, "piece": piece, "b": b, "a2": a2, "d": d, "xs": xs, "pair": pair, "caught": caught, "rep": repeat("xy", 3) }
+
+# List methods on typed lists (native on --native): the same results as the
+# VM, edge cases included (empty lists, negative and out-of-range indexes).
+get endpoint("/list_methods"):
+    List<int> xs = [5, 3, 9, 3]
+    List<int> ys = xs
+    List<float> fs = [2.5, 1.5]
+    List<float> nofs = []
+    List<string> words = ["b", "a", "c"]
+    bool had = xs.contains(9)
+    int at = xs.index_of(3)
+    int missing = xs.index_of(7)
+    bool gone = xs.remove_at(0)
+    bool out = xs.remove_at(10)
+    xs.sort()
+    words.sort()
+    words.reverse()
+    xs.insert(-1, 7)
+    xs.insert(100, 1)
+    List<int> part = xs.slice(1, -1)
+    List<int> tail = xs.slice(-2)
+    List<int> both = part.concat(tail)
+    Json first = xs.first()
+    Json last = xs.last()
+    Json popped = xs.pop()
+    Json lo = xs.min()
+    Json hi = words.max()
+    return { "had": had, "at": at, "missing": missing, "gone": gone, "out": out, "xs": xs, "ys": ys, "words": words, "part": part, "tail": tail, "both": both, "joined": words.join("-"), "first": first, "last": last, "popped": popped, "lo": lo, "hi": hi, "isum": xs.sum(), "fsum": fs.sum(), "esum": nofs.sum(), "emin": nofs.min(), "epop": nofs.pop() }

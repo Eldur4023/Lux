@@ -5,7 +5,8 @@ namespace lux {
 
 BlockingPool::~BlockingPool() { stop(); }
 
-void BlockingPool::start(size_t core_workers, size_t max_workers) {
+void BlockingPool::start(size_t core_workers, size_t max_workers,
+                         std::chrono::milliseconds stall) {
     if (!threads_.empty()) return;
     if (core_workers == 0) core_workers = 1;
     // +8, not the naive-looking "just multiply core count" -- measured
@@ -16,6 +17,7 @@ void BlockingPool::start(size_t core_workers, size_t max_workers) {
     core_workers_ = core_workers;
     max_workers_  = max_workers;
     live_workers_ = core_workers;
+    stall_        = stall;
 
     for (size_t i = 0; i < core_workers; ++i)
         threads_.emplace_back([this] { worker_loop(/*overflow=*/false); });
@@ -52,6 +54,7 @@ void BlockingPool::worker_loop(bool overflow) {
             --idle_workers_;
             job = std::move(jobs_.front());
             jobs_.pop();
+            if (stall_.count()) last_taken_ = std::chrono::steady_clock::now();
         }
         // A handler that throws cannot take the worker down with it: the
         // coroutine it was posting a resume for would simply never resume,
@@ -73,7 +76,8 @@ void BlockingPool::submit(std::function<void()> job) {
         // behind others with nobody free to even start it -- and there is
         // still room under the cap, grow the pool by one right now instead
         // of making it wait for an existing worker to free up.
-        if (jobs_.size() > idle_workers_ && live_workers_ < max_workers_) {
+        if (jobs_.size() > idle_workers_ && live_workers_ < max_workers_ &&
+            (!stall_.count() || std::chrono::steady_clock::now() - last_taken_ > stall_)) {
             ++live_workers_;
             spawn_overflow = true;
         }

@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <set>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
@@ -139,6 +140,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     std::vector<RutaGenerada> rutas_generadas;       // void(Request&, Response&)
     std::vector<RutaGenerada> rutas_async_generadas; // Task<void>(Request&, Response&)
     std::string               rutas_cuerpos;
+    std::string               registros;     // record structs, before templates and routes
+    std::set<std::string>     render_keys;   // render() keys, see generate_native_template
 
     // A check's Peticiones: a return or parameter becomes a Value (Json),
     // and the whole set is generated again. Each is one type turned into
@@ -171,6 +174,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     rutas_generadas.clear();
     rutas_async_generadas.clear();
     rutas_cuerpos.clear();
+    registros.clear();
+    render_keys.clear();
 
     auto drop_fn = [&](const std::string& n) { changed |= firmas.erase(n) > 0; };
 
@@ -279,6 +284,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         if (!generada) continue;
 
         rutas_cuerpos += generada->cuerpo_cpp + "\n\n";
+        registros += generada->registros_cpp;
+        render_keys.insert(generada->plantillas.begin(), generada->plantillas.end());
         (generada->asincrona ? rutas_async_generadas : rutas_generadas)
             .push_back({i, generada->simbolo});
     }
@@ -291,7 +298,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     const bool con_rutas = !rutas_generadas.empty() || !rutas_async_generadas.empty();
 
     std::string codigo =
-        "#include <cctype>\n#include <cstdint>\n#include <initializer_list>\n#include <map>\n"
+        "#include <algorithm>\n#include <array>\n#include <cctype>\n#include <charconv>\n#include <cstring>\n#include <cstdint>\n#include <initializer_list>\n#include <map>\n"
         "#include <string>\n#include <utility>\n#include <vector>\n\n";
     // lux_script::Value hace falta SIEMPRE que algo pueda usar str() --
     // Generador::expr() lo traduce a valor_json(...).to_string(), el mismo
@@ -347,7 +354,32 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                   "#include <lux_script/auth.hpp>\n#include <lux/logger.hpp>\n#include <lux/multipart.hpp>\n\n" +
                   route_runtime_prelude() + "\n";
     codigo += clases_texto + "\n" + prototipos + "\n" + cuerpos;
-    if (con_rutas) codigo += rutas_cuerpos;
+    if (con_rutas) {
+        codigo += registros;
+        // Each template a route renders, compiled here the way
+        // emit_compiled_render does (same file, same names and types, so the
+        // same expressions at the same indices), into C++.
+        for (const auto& fnkey : render_keys) {
+            // "#..." after the key: a variant for record arguments.
+            const std::string key = fnkey.substr(0, fnkey.find('#'));
+            const std::string name = key.substr(0, key.find('|'));
+            std::vector<TypedName> keys;
+            for (size_t i = key.find('|') + 1; i < key.size();) {
+                const size_t colon = key.find(':', i), comma = key.find(',', i);
+                keys.push_back({key.substr(i, colon - i), key.substr(colon + 1, comma - colon - 1)});
+                i = comma + 1;
+            }
+            DiagnosticBag tdiags;
+            Template tpl;
+            auto source = read_whole_file(std::filesystem::path(prog.app.templates_dir) / name);
+            if (source && compile_template(*source, name, prog.app.templates_dir, keys, tdiags, tpl))
+                codigo += generate_native_template(tpl, fnkey) + "\n";
+            else   // build_routes reports why; this only has to link
+                codigo += "static void " + native_template_fn(fnkey) + "(lux_script::NativeCtx&, auto&&...) {\n"
+                          "    lux_native_fail(\"render(): template not compiled\");\n}\n";
+        }
+        codigo += rutas_cuerpos;
+    }
 
     std::error_code ec;
     std::filesystem::create_directories(cache_dir, ec);
@@ -391,7 +423,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // wrappers extern "C" siguen exportados igual, dlsym() no se entera),
     // solo la asuncion de codegen -- no hay ningun escenario de
     // LD_PRELOAD/interposicion real que este .so necesite soportar.
-    cmd << cxx << " -O2 -shared -fPIC -fno-semantic-interposition -std=c++20 ";
+    cmd << cxx << " -O2 -shared -fPIC -fno-semantic-interposition -std=c++23 ";
 #ifdef LUX_IO_URING
     // lux::core::EventLoop (event_loop.hpp) resuelve a IoUringLoop o
     // EpollLoop segun si ESTE macro esta definido en el momento en que se

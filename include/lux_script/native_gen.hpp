@@ -156,7 +156,6 @@ struct Peticiones {
     bool                                                      retorno_value = false;
     std::vector<std::pair<std::string, size_t>>               params;          // function, parameter
     std::vector<std::tuple<std::string, std::string, size_t>> metodo_params;   // class, method, parameter
-    bool vacia() const { return !retorno_value && params.empty() && metodo_params.empty(); }
 };
 
 // The type native code holds a declared one in: `int?`, `string?`,
@@ -319,6 +318,13 @@ struct RutaNativa {
     // tablas de NativeModule (rutas_por_indice / rutas_async_por_indice)
     // dejar el puntero que resuelva dlsym().
     bool asincrona = false;
+
+    // The render() keys ("page.html|title:string,...") this route calls,
+    // each compiled to its own C++ function (generate_native_template).
+    std::set<std::string> plantillas;
+    // Its record structs (native_gen.cpp, FormaRegistro): before every
+    // route and template, which may both use them.
+    std::string registros_cpp;
 };
 
 // Genera el C++ de una ruta, o nullopt si algo de ella (parametros o cuerpo)
@@ -344,5 +350,14 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
 // cuando el modulo tiene al menos una ruta nativa (a diferencia de las
 // otras: una funcion nativa nunca necesita lux::Request/Response).
 std::string route_runtime_prelude();
+
+// The C++ function a render() of `key` calls under --native.
+std::string native_template_fn(const std::string& key);
+
+// That function, from the template compiled for `key` -- the same one
+// build_routes compiles at run time, so an expression it hands back to the
+// VM (anything but a name or a chain of fields) is found there by index.
+// The values stay arguments: only the template's shape is compiled.
+std::string generate_native_template(const struct Template& t, const std::string& key);
 
 } // namespace lux_script

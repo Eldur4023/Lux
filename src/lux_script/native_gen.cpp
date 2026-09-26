@@ -1,12 +1,15 @@
 #include <lux_script/native_gen.hpp>
 #include <lux_script/natives.hpp>
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/template.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 
@@ -170,8 +173,10 @@ std::string literal_string(const std::string& s) {
             case '\r': out += "\\r";  break;
             default:
                 if (c < 0x20) {
+                    // Octal, not \x: a hex escape runs on through any hex
+                    // digit that follows it ("\x01a" is one character).
                     char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\x%02x", c);
+                    std::snprintf(buf, sizeof(buf), "\\%03o", c);
                     out += buf;
                 } else {
                     out += static_cast<char>(c);
@@ -464,6 +469,38 @@ public:
         return false;
     }
 
+    // A List method on a typed list (LList::lux_m_*, list_runtime_prelude)
+    // when the arguments are exactly what the VM would accept without an
+    // error; anything else goes the dynamic way (metodo_dinamico). Where
+    // the VM returns Json, so does this (a Value).
+    std::optional<Type> metodo_lista(const IrExpr& e, const Type& tl) const {
+        const Type el = tl.element();
+        const Type::Kind k = el.kind();
+        const bool orden = k == Type::Kind::Int || k == Type::Kind::Float || k == Type::Kind::String;
+        const Type tint = Type::primitive(Type::Kind::Int);
+        const std::string& m = e.call_name;
+        const size_t n = e.args.size();
+        auto es = [&](size_t i, const Type& t) {
+            if (i >= n || !e.args[i].value || !e.args[i].name.empty()) return false;
+            auto a = tipo_provable(*e.args[i].value);
+            return a && !es_json_dinamico(*a) && *a == t;
+        };
+        if ((m == "contains" || m == "index_of") && n == 1 && es(0, el))
+            return Type::primitive(m == "contains" ? Type::Kind::Bool : Type::Kind::Int);
+        if (m == "remove_at" && n == 1 && es(0, tint)) return Type::primitive(Type::Kind::Bool);
+        if (m == "sort" && n == 0 && orden) return tl;
+        if (m == "reverse" && n == 0) return tl;
+        if (m == "slice" && (n == 1 || n == 2) && es(0, tint) && (n == 1 || es(1, tint))) return tl;
+        if (m == "concat" && n == 1 && es(0, tl)) return tl;
+        if (m == "join" && n == 1 && k == Type::Kind::String && es(0, Type::primitive(Type::Kind::String)))
+            return Type::primitive(Type::Kind::String);
+        if (m == "insert" && n == 2 && es(0, tint) && es(1, el)) return tl;
+        if ((m == "first" || m == "last" || m == "pop") && n == 0) return Type::json();
+        if ((m == "min" || m == "max") && n == 0 && orden) return Type::json();
+        if (m == "sum" && n == 0 && (k == Type::Kind::Int || k == Type::Kind::Float)) return Type::json();
+        return std::nullopt;
+    }
+
     // Nullopt si no se puede demostrar; si no, el Type exacto que el VM
     // SIEMPRE produciria para esta expresion, con los mismos valores.
     // Any other builtin method, through the VM's own call_method() on a
@@ -569,6 +606,17 @@ public:
                t.kind() == Type::Kind::Json;
     }
     bool for_dinamico(const IrStmt& s) const { return for_dinamicos_.count(&s) > 0; }
+    bool for_rango(const IrStmt& s) const { return for_rangos_.count(&s) > 0; }
+    bool es_range_int(const IrExpr& e) const {
+        if (e.kind != IrExprKind::Call || e.call_shape != IrCallShape::BuiltinGlobalCall ||
+            e.call_name != "range" || e.args.empty() || e.args.size() > 3) return false;
+        for (const auto& a : e.args) {
+            if (!a.value || !a.name.empty()) return false;
+            auto t = tipo_provable(*a.value);
+            if (!t || t->kind() != Type::Kind::Int) return false;
+        }
+        return true;
+    }
 
     // Does this Binary run on Values (lux_json_*), not on native types?
     bool binaria_json(const IrExpr& e) const { return binarias_json_.count(&e) > 0; }
@@ -976,6 +1024,8 @@ private:
                             if (!targ || *targ != tobj->element()) return std::nullopt;
                             return tobj;
                         }
+                        if (tobj->kind() == Type::Kind::List && !es_json_dinamico(*tobj))
+                            return metodo_lista(e, *tobj);
                         // Los dos metodos de Dict que reconoce metodos_de()
                         // (natives.cpp: kDict) sin depender de un contexto de
                         // ruta (el tercero, "save", solo existe sobre un File
@@ -1501,6 +1551,12 @@ public:
             //
             case IrStmtKind::For: {
                 if (!s.target) return false;
+                // `for i in range(...)` over ints: a counter loop, no List.
+                if (es_range_int(*s.target)) {
+                    for_rangos_.insert(&s);
+                    registrar(s.slot, Type::primitive(Type::Kind::Int));
+                    return block_compilable(s.body, retorno_fn);
+                }
                 auto titer = tipo_provable(*s.target);
                 if (!titer) return false;
                 if (titer->kind() == Type::Kind::List && !es_json_dinamico(*titer)) {
@@ -1561,6 +1617,7 @@ private:
     mutable Peticiones               peticiones_;
     mutable bool                     usa_sesion_ = false;
     std::set<const IrStmt*>          for_dinamicos_;
+    std::set<const IrStmt*>          for_rangos_;
     std::string                      motivo_;
 };
 
@@ -1588,6 +1645,220 @@ const std::map<std::string, std::string>& operadores_binarios() {
     };
     return ops;
 }
+
+// A literal (scalars, and lists/dicts of literals with literal string
+// keys) as the Value it evaluates to -- what the generated code would build
+// at run time, built here instead. Duplicate keys: the later one wins,
+// where the first stood (Dict::set, as LuxD::add does).
+bool constante(const IrExpr& e, Value& out) {
+    switch (e.kind) {
+        case IrExprKind::IntLit:    out = Value::integer(e.int_value);   return true;
+        case IrExprKind::FloatLit:  out = Value::real(e.float_value);    return true;
+        case IrExprKind::BoolLit:   out = Value::boolean(e.bool_value);  return true;
+        case IrExprKind::StringLit: out = Value::str(e.text);            return true;
+        case IrExprKind::NullLit:   out = Value::null();                 return true;
+        case IrExprKind::ListLit: {
+            Value::List l;
+            for (const auto& i : e.items) {
+                Value v;
+                if (!i || !constante(*i, v)) return false;
+                l.push_back(std::move(v));
+            }
+            out = Value::list(std::move(l));
+            return true;
+        }
+        case IrExprKind::DictLit: {
+            Value::Dict d;
+            for (const auto& en : e.entries) {
+                Value v;
+                if (!en.key || en.key->kind != IrExprKind::StringLit || !en.value || !constante(*en.value, v))
+                    return false;
+                d.set(std::string(en.key->text), std::move(v));
+            }
+            out = Value::dict(std::move(d));
+            return true;
+        }
+        default: return false;
+    }
+}
+
+// ── Records ──────────────────────────────────────────────────────────────
+//
+// A route's List<Json> built only from dict literals with the same keys,
+// in the same order, each always of the same scalar type -- rows for a
+// template or a JSON reply -- is a vector of structs instead of Dicts: no
+// Dict, no key strings, no count per row, and a template reads a field
+// where it is. See Generador::analizar_registros for what it may be used
+// for; anywhere else the list stays a Value.
+struct FormaRegistro {
+    std::vector<std::pair<std::string, Type::Kind>> campos;
+
+    // Keys in hex: they may hold any character, the key file may not.
+    std::string codigo() const {
+        static const char* hx = "0123456789abcdef";
+        std::string s;
+        for (const auto& [k, t] : campos) {
+            for (unsigned char c : k) { s += hx[c >> 4]; s += hx[c & 15]; }
+            s += t == Type::Kind::Int ? ":i;" : t == Type::Kind::Float ? ":f;" : t == Type::Kind::Bool ? ":b;" : ":s;";
+        }
+        return s;
+    }
+    static FormaRegistro de_codigo(const std::string& s) {
+        FormaRegistro f;
+        for (size_t i = 0; i < s.size();) {
+            const size_t c = s.find(':', i);
+            std::string k;
+            for (size_t j = i; j + 1 < c; j += 2) k += static_cast<char>(std::stoi(s.substr(j, 2), nullptr, 16));
+            const char t = s[c + 1];
+            f.campos.push_back({k, t == 'i' ? Type::Kind::Int : t == 'f' ? Type::Kind::Float
+                                 : t == 'b' ? Type::Kind::Bool : Type::Kind::String});
+            i = c + 3;
+        }
+        return f;
+    }
+    std::string nombre() const { return "LRec_" + std::to_string(std::hash<std::string>{}(codigo())); }
+    int indice(const std::string& k) const {
+        for (size_t i = 0; i < campos.size(); ++i) if (campos[i].first == k) return static_cast<int>(i);
+        return -1;
+    }
+
+    // The struct, its Value (the Dict the VM would have built) and its JSON
+    // (Value::write_json's bytes: keys escaped here, once, by the same code).
+    std::string texto() const {
+        const std::string n = nombre(), g = "LUX_" + n;
+        std::string s = "#ifndef " + g + "\n#define " + g + "\nstruct " + n + " {";
+        for (size_t i = 0; i < campos.size(); ++i)
+            s += std::string(" ") + (campos[i].second == Type::Kind::Int ? "int64_t" : campos[i].second == Type::Kind::Float ? "double"
+                                   : campos[i].second == Type::Kind::Bool ? "bool" : "std::string") + " f" + std::to_string(i) + ";";
+        s += " };\ninline Value lux_rec_value(const " + n + "& r) {\n    return LuxD{" + std::to_string(campos.size()) + "}";
+        for (size_t i = 0; i < campos.size(); ++i)
+            s += ".add_new(std::string(" + literal_string(campos[i].first) + "), lux_v(r.f" + std::to_string(i) + "))";
+        s += ".done();\n}\n"
+             "inline Value lux_rec_value(const LList<" + n + ">& l) {\n"
+             "    Value::List out;\n    out.reserve(l.lux_items().size());\n"
+             "    for (const auto& r : l.lux_items()) out.push_back(lux_rec_value(r));\n"
+             "    return Value::list(std::move(out));\n}\n"
+             "inline std::string lux_rec_json(const LList<" + n + ">& l) {\n"
+             "    std::string o;\n    o.reserve(256);\n    o += '[';\n"
+             "    for (size_t j = 0; j < l.lux_items().size(); ++j) {\n"
+             "        const auto& r = l.lux_items()[j];\n        if (j) o += ',';\n";
+        for (size_t i = 0; i < campos.size(); ++i) {
+            std::string k;
+            json_string(campos[i].first, k);
+            s += "        o += " + literal_string((i ? "," : "{") + k + ":") + "; lux_rec_put(o, r.f" + std::to_string(i) + ");\n";
+        }
+        s += "        o += '}';\n    }\n    o += ']';\n    return o;\n}\n#endif\n";
+        return s;
+    }
+};
+
+// ── Which locals are still needed after each statement ──────────────────
+//
+// A read of a local nobody reads again before it is overwritten can take
+// the value instead of copying it (Generador::consumir): no count bump and
+// drop for a Value, no copy of a string's bytes. Backward liveness over
+// the IR, by slot; a loop goes round until nothing changes. A statement
+// inside a `try` moves nothing: a throw can land in a catch that reads
+// anything.
+struct Vida {
+    std::map<const IrStmt*, std::set<int>> despues;
+    std::set<const IrStmt*>                en_try;
+};
+
+void usos(const IrExpr* e, std::set<int>& out) {
+    if (!e) return;
+    if (e->kind == IrExprKind::Ident && e->slot >= 0) out.insert(e->slot);
+    usos(e->object.get(), out);
+    usos(e->lhs.get(), out);
+    usos(e->rhs.get(), out);
+    for (const auto& a : e->args) usos(a.value.get(), out);
+    for (const auto& i : e->items) usos(i.get(), out);
+    for (const auto& d : e->entries) { usos(d.key.get(), out); usos(d.value.get(), out); }
+}
+
+class AnalisisVida {
+public:
+    explicit AnalisisVida(Vida& v) : v_(v) {}
+
+    std::set<int> bloque(const IrBlock& b, std::set<int> vivas) {
+        for (auto it = b.rbegin(); it != b.rend(); ++it)
+            if (*it) vivas = sentencia(**it, vivas);
+        return vivas;
+    }
+
+private:
+    struct Bucle { const std::set<int>* salida; const std::set<int>* cabeza; };
+
+    static std::set<int> con(std::set<int> a, const std::set<int>& b) {
+        a.insert(b.begin(), b.end());
+        return a;
+    }
+    static std::set<int> de(std::initializer_list<const IrExpr*> es) {
+        std::set<int> s;
+        for (const IrExpr* e : es) usos(e, s);
+        return s;
+    }
+
+    std::set<int> sentencia(const IrStmt& s, const std::set<int>& despues) {
+        v_.despues[&s] = despues;
+        if (en_try_) v_.en_try.insert(&s);
+        switch (s.kind) {
+            case IrStmtKind::Return:   return de({s.value.get()});
+            case IrStmtKind::ExprStmt: return con(despues, de({s.value.get()}));
+            case IrStmtKind::VarDecl: {
+                auto r = despues;
+                r.erase(s.slot);
+                return con(r, de({s.value.get()}));
+            }
+            case IrStmtKind::Assign: {
+                auto r = despues;
+                if (s.assign_target == IrAssignTarget::Local) r.erase(s.assign_slot);
+                return con(r, de({s.value.get(), s.assign_object.get(), s.assign_index.get()}));
+            }
+            case IrStmtKind::If:
+                return con(con(bloque(s.body, despues), bloque(s.orelse, despues)), de({s.value.get()}));
+            case IrStmtKind::While: {
+                std::set<int> cabeza = con(despues, de({s.value.get()}));
+                for (;;) {
+                    bucles_.push_back({&despues, &cabeza});
+                    auto dentro = bloque(s.body, cabeza);
+                    bucles_.pop_back();
+                    auto nueva = con(con(dentro, despues), de({s.value.get()}));
+                    if (nueva == cabeza) return cabeza;
+                    cabeza = std::move(nueva);
+                }
+            }
+            case IrStmtKind::For: {
+                std::set<int> cabeza = despues;
+                for (;;) {
+                    bucles_.push_back({&despues, &cabeza});
+                    auto dentro = bloque(s.body, cabeza);
+                    bucles_.pop_back();
+                    dentro.erase(s.slot);   // set afresh every round
+                    auto nueva = con(dentro, despues);
+                    if (nueva == cabeza) break;
+                    cabeza = std::move(nueva);
+                }
+                return con(cabeza, de({s.target.get()}));
+            }
+            case IrStmtKind::Try: {
+                auto captura = bloque(s.orelse, despues);
+                if (!s.name.empty()) captura.erase(s.slot);
+                ++en_try_;
+                auto cuerpo = bloque(s.body, con(despues, captura));
+                --en_try_;
+                return con(cuerpo, captura);
+            }
+            case IrStmtKind::Break:    return bucles_.empty() ? despues : *bucles_.back().salida;
+            case IrStmtKind::Continue: return bucles_.empty() ? despues : *bucles_.back().cabeza;
+            default:                   return con(despues, de({s.value.get(), s.target.get()}));
+        }
+    }
+
+    Vida&              v_;
+    std::vector<Bucle> bucles_;
+    int                en_try_ = 0;
+};
 
 class Generador {
 public:
@@ -1636,7 +1907,12 @@ public:
             case IrExprKind::FloatLit:  return literal_float(e.float_value);
             case IrExprKind::BoolLit:   return e.bool_value ? "true" : "false";
             case IrExprKind::StringLit: return "std::string(" + literal_string(e.text) + ")";
-            case IrExprKind::Ident:     return nombre_cpp(e.text);
+            case IrExprKind::Ident: {
+                const std::string n = &e == mover_ ? "std::move(" + nombre_cpp(e.text) + ")" : nombre_cpp(e.text);
+                // A record list read as the Value it stands for (see
+                // analizar_registros: only where the route is ending).
+                return registro(&e) ? "lux_rec_value(" + n + ")" : n;
+            }
             case IrExprKind::NullLit:   return "Value::null()";
             case IrExprKind::FuncRef:   return "Value::func(" + std::to_string(e.call_index) + ")";
 
@@ -1759,6 +2035,11 @@ public:
                     return "lux_div_check(" + expr(*e.lhs) + ", " + expr(*e.rhs) + ")";
                 if (e.text == "%")
                     return "lux_mod_check(" + expr(*e.lhs) + ", " + expr(*e.rhs) + ")";
+                // A string's `+` appends to its left operand when that is
+                // an rvalue: a moved local grows in place, s = s + x in a
+                // loop no longer copies s every round.
+                if (e.text == "+" && e.lhs->type.kind() == Type::Kind::String)
+                    return "(" + consumir(*e.lhs, false) + " + " + expr(*e.rhs) + ")";
                 return "(" + expr(*e.lhs) + " " + operadores_binarios().at(e.text) + " " +
                        expr(*e.rhs) + ")";
             }
@@ -1789,20 +2070,33 @@ public:
                 if (comprobador_.dinamica(e)) {
                     const std::string ctx = con_ctx() ? "l_ctx" : "lux_ctx()";
                     std::string args = "LuxL{}";
-                    for (const auto& a : e.args) args += ".add(" + valor_json(*a.value) + ")";
+                    for (const auto& a : e.args) args += ".add(" + consumir(*a.value, true) + ")";
                     args += ".items()";
                     if (e.call_shape == IrCallShape::BuiltinMethodCall)
                         return "lux_dyn_method(" + ctx + ", " + valor_json(*e.object) + ", " +
                                literal_string(e.call_name) + ", " + args + ")";
                     if (e.call_shape == IrCallShape::BuiltinGlobalCall && e.call_name == "render") {
-                        // Same key emit_compiled_render (emitter.cpp) files it under.
-                        std::string key = e.args[0].value->text + "|", datos = "LuxD{}";
+                        // Same key emit_compiled_render (emitter.cpp) files it
+                        // under; the template itself is compiled to C++
+                        // (generate_native_template), its values passed in.
+                        // A record list goes in as itself, to a variant of
+                        // the template for it: "#<argument>=<shape>" after
+                        // the key (generate_native_template).
+                        std::string key = e.args[0].value->text + "|", datos, formas;
                         for (size_t i = 1; i < e.args.size(); ++i) {
                             key += e.args[i].name + ":" + e.args[i].value->type.base_name() + ",";
-                            datos += ".add(" + literal_string(e.args[i].name) + ", " + valor_json(*e.args[i].value) + ")";
+                            const IrExpr& a = *e.args[i].value;
+                            if (const FormaRegistro* f = registro(&a)) {
+                                formas += "#" + std::to_string(i - 1) + "=" + f->codigo();
+                                datos += (i > 1 ? ", " : "") + (movibles_.count(a.slot) ? "std::move(" + nombre_cpp(a.text) + ")"
+                                                                                       : nombre_cpp(a.text));
+                            } else {
+                                datos += (i > 1 ? ", " : "") + consumir(a, true);
+                            }
                         }
-                        return "lux_dyn_global(" + ctx + ", " + std::to_string(native_id("__render_tpl")) +
-                               ", LuxL{}.add(lux_template(" + literal_string(key) + ")).add(" + datos + ".done()).items())";
+                        plantillas_.insert(key + formas);
+                        return "(" + native_template_fn(key + formas) + "(" + ctx + (datos.empty() ? "" : ", ") + datos +
+                               "), Value::null())";
                     }
                     return "lux_dyn_global(" + ctx + ", " + std::to_string(e.call_index) + ", " + args + ")";
                 }
@@ -1855,13 +2149,18 @@ public:
                 // mismo caso) en vez de expr(): expr() en un DictLit
                 // asume Dict<string,V> homogeneo, exactamente lo que este
                 // literal NO es.
-                if (e.call_shape == IrCallShape::BuiltinMethodCall &&
-                    e.object->type.kind() == Type::Kind::List) {
-                    auto tobj = comprobador_.tipo_provable(*e.object);
+                if (auto tobj = e.call_shape == IrCallShape::BuiltinMethodCall ? comprobador_.tipo_provable(*e.object)
+                                                                                : std::nullopt;
+                    tobj && tobj->kind() == Type::Kind::List) {
                     if (tobj && tobj->element().kind() == Type::Kind::Json)
                         return "lux_json_list_add(" + expr(*e.object) + ", " +
-                               valor_json(*e.args[0].value) + ")";
-                    return expr(*e.object) + ".lux_add(" + expr(*e.args[0].value) + ")";
+                               consumir(*e.args[0].value, true) + ")";
+                    if (e.call_name == "add")
+                        return expr(*e.object) + ".lux_add(" + consumir(*e.args[0].value, false) + ")";
+                    std::string s = expr(*e.object) + ".lux_m_" + e.call_name + "(";
+                    for (size_t i = 0; i < e.args.size(); ++i)
+                        s += (i ? ", " : "") + consumir(*e.args[i].value, false);
+                    return s + ")";
                 }
 
                 // "has"/"keys" sobre un Dict: mismo criterio, sintaxis de
@@ -1893,6 +2192,7 @@ public:
                     return valor_json(*e.args[0].value) + ".to_string()";
                 }
                 if (e.call_shape == IrCallShape::BuiltinGlobalCall && e.call_name == "len") {
+                    if (registro(e.args[0].value.get())) return nombre_cpp(e.args[0].value->text) + ".lux_len()";
                     auto t = comprobador_.tipo_provable(*e.args[0].value);
                     // Json (Fase 5.5): puede ser string/List/Dict en tiempo
                     // de ejecucion -- lux_json_len() decide, igual que
@@ -2057,7 +2357,7 @@ public:
     // result is converted to the C++ type its signature declares.
     std::string llamada_modulo(const IrExpr& call, bool awaited) const {
         std::string params = "LuxL{}";
-        for (const auto& a : call.args) params += ".add(" + valor_json(*a.value) + ")";
+        for (const auto& a : call.args) params += ".add(" + consumir(*a.value, true) + ")";
         params += ".items()";
         const std::string id = std::to_string(call.call_index);
         const std::string v = awaited ? "(co_await lux_module_await(l_ctx, " + id + ", " + params + "))"
@@ -2104,7 +2404,7 @@ public:
         std::string s;
         for (size_t i = 0; i < call.args.size(); ++i) {
             const bool value = f && i < f->params.size() && es_json_dinamico(f->params[i]);
-            s += (i ? ", " : "") + (value ? valor_json(*call.args[i].value) : expr(*call.args[i].value));
+            s += (i ? ", " : "") + consumir(*call.args[i].value, value);
         }
         return s;
     }
@@ -2125,7 +2425,7 @@ public:
             params = "lux_db_params(";
             for (size_t i = 1; i < call.args.size(); ++i) {
                 if (i > 1) params += ", ";
-                params += valor_json(*call.args[i].value);
+                params += consumir(*call.args[i].value, true);
             }
             params += ")";
         }
@@ -2178,6 +2478,11 @@ public:
     }
 
     std::string block(const IrBlock& b, int indent) {
+        if (profundidad_ == 0) {
+            AnalisisVida(vida_).bloque(b, {});
+            if (ruta_) analizar_registros(b);
+        }
+        ++profundidad_;
         std::string s;
         const std::string p(static_cast<size_t>(indent) * 4, ' ');
         for (size_t i = 0; i < b.size(); ++i) {
@@ -2188,7 +2493,172 @@ public:
             }
             s += p + donde(*b[i]) + stmt(*b[i], indent) + "\n";
         }
+        --profundidad_;
         return s;
+    }
+
+    // The locals `s` may take instead of copy: read once in it, and not
+    // needed afterwards. Only a plain statement: a compound one's header
+    // runs again (a loop) or before a body that may read it.
+    std::set<int> movibles(const IrStmt& s) const {
+        const bool simple = s.kind == IrStmtKind::ExprStmt || s.kind == IrStmtKind::VarDecl ||
+                            s.kind == IrStmtKind::Assign || s.kind == IrStmtKind::Return;
+        auto it = vida_.despues.find(&s);
+        if (!simple || it == vida_.despues.end() || vida_.en_try.count(&s)) return {};
+        std::set<int> vivas = s.kind == IrStmtKind::Return ? std::set<int>{} : it->second;
+        if (s.kind == IrStmtKind::VarDecl) vivas.erase(s.slot);
+        if (s.kind == IrStmtKind::Assign && s.assign_target == IrAssignTarget::Local) vivas.erase(s.assign_slot);
+        std::map<int, int> veces;
+        std::function<void(const IrExpr*)> contar = [&](const IrExpr* e) {
+            if (!e) return;
+            if (e->kind == IrExprKind::Ident && e->slot >= 0) ++veces[e->slot];
+            contar(e->object.get()); contar(e->lhs.get()); contar(e->rhs.get());
+            for (const auto& a : e->args) contar(a.value.get());
+            for (const auto& i : e->items) contar(i.get());
+            for (const auto& d : e->entries) { contar(d.key.get()); contar(d.value.get()); }
+        };
+        contar(s.value.get()); contar(s.assign_object.get()); contar(s.assign_index.get()); contar(s.target.get());
+        std::set<int> r;
+        for (const auto& [slot, n] : veces)
+            if (n == 1 && !vivas.count(slot)) r.insert(slot);
+        return r;
+    }
+
+    // A dict literal's shape, when every key is a literal (distinct, not an
+    // internal "__" one) and every value a proven scalar or string.
+    std::optional<FormaRegistro> forma_de(const IrExpr& d) const {
+        if (d.kind != IrExprKind::DictLit || d.entries.empty()) return std::nullopt;
+        FormaRegistro f;
+        std::set<std::string> vistas;
+        for (const auto& en : d.entries) {
+            if (!en.key || en.key->kind != IrExprKind::StringLit || !en.value ||
+                !vistas.insert(en.key->text).second || en.key->text.rfind("__", 0) == 0)
+                return std::nullopt;
+            auto t = comprobador_.tipo_provable(*en.value);
+            if (!t || es_json_dinamico(*t)) return std::nullopt;
+            if (t->kind() != Type::Kind::Int && t->kind() != Type::Kind::Float &&
+                t->kind() != Type::Kind::Bool && t->kind() != Type::Kind::String)
+                return std::nullopt;
+            f.campos.push_back({en.key->text, t->kind()});
+        }
+        return f;
+    }
+
+    // Which of a route's List<Json> locals are records (FormaRegistro): one
+    // declared `[]`, then only `x.add({...})` of a single shape, `len(x)`,
+    // a render() argument, or read anywhere inside a `return` (the route
+    // ends there, so the Value it becomes is the last word). Any other use
+    // -- a loop over it, an index, an assignment, a function argument --
+    // could see the Dicts the VM has, so it stays a Value.
+    void analizar_registros(const IrBlock& body) {
+        std::map<int, std::optional<FormaRegistro>> cand;
+        std::set<int> fuera;
+        // A block's locals give their slots back when it ends (end_scope),
+        // so one slot can be two variables: only a slot declared once is
+        // one variable all the way.
+        std::map<int, int> declaraciones;
+        std::function<void(const IrBlock&)> buscar = [&](const IrBlock& b) {
+            for (const auto& s : b) {
+                if (!s) continue;
+                if (s->kind == IrStmtKind::VarDecl || s->kind == IrStmtKind::For ||
+                    (s->kind == IrStmtKind::Try && !s->name.empty()))
+                    ++declaraciones[s->slot];
+                if (s->kind == IrStmtKind::VarDecl && s->value && s->value->kind == IrExprKind::ListLit &&
+                    s->value->items.empty()) {
+                    const Type d = comprobador_.nativo(s->decl_type);
+                    if (d.kind() == Type::Kind::List && d.element().kind() == Type::Kind::Json) cand[s->slot];
+                }
+                buscar(s->body);
+                buscar(s->orelse);
+            }
+        };
+        buscar(body);
+        for (const auto& [slot, n] : declaraciones)
+            if (n > 1) fuera.insert(slot);
+        if (cand.empty()) return;
+        auto es_cand = [&](const IrExpr* e) { return e && e->kind == IrExprKind::Ident && cand.count(e->slot); };
+        std::function<void(const IrExpr*, bool)> ver = [&](const IrExpr* e, bool escape) {
+            if (!e) return;
+            if (es_cand(e)) { if (!escape) fuera.insert(e->slot); return; }
+            if (e->kind == IrExprKind::Call && e->call_shape == IrCallShape::BuiltinGlobalCall) {
+                if (e->call_name == "len" && e->args.size() == 1 && es_cand(e->args[0].value.get())) return;
+                if (e->call_name == "render") {
+                    for (size_t i = 0; i < e->args.size(); ++i)
+                        if (!(i > 0 && es_cand(e->args[i].value.get()))) ver(e->args[i].value.get(), escape);
+                    return;
+                }
+            }
+            ver(e->object.get(), escape);
+            ver(e->lhs.get(), escape);
+            ver(e->rhs.get(), escape);
+            for (const auto& a : e->args) ver(a.value.get(), escape);
+            for (const auto& i : e->items) ver(i.get(), escape);
+            for (const auto& d : e->entries) { ver(d.key.get(), escape); ver(d.value.get(), escape); }
+        };
+        std::function<void(const IrBlock&)> ver_bloque = [&](const IrBlock& b) {
+            for (const auto& sp : b) {
+                if (!sp) continue;
+                const IrStmt& s = *sp;
+                const IrExpr* v = s.value.get();
+                if (s.kind == IrStmtKind::ExprStmt && v && v->kind == IrExprKind::Call &&
+                    v->call_shape == IrCallShape::BuiltinMethodCall && v->call_name == "add" &&
+                    es_cand(v->object.get()) && v->args.size() == 1 && v->args[0].value) {
+                    const int slot = v->object->slot;
+                    auto f = forma_de(*v->args[0].value);
+                    if (!f) fuera.insert(slot);
+                    else if (!cand[slot]) cand[slot] = f;
+                    else if (cand[slot]->campos != f->campos) fuera.insert(slot);
+                    ver(v->args[0].value.get(), false);
+                    continue;
+                }
+                if (s.kind == IrStmtKind::Assign && s.assign_target == IrAssignTarget::Local &&
+                    cand.count(s.assign_slot))
+                    fuera.insert(s.assign_slot);
+                ver(v, s.kind == IrStmtKind::Return);
+                ver(s.target.get(), false);
+                ver(s.assign_object.get(), false);
+                ver(s.assign_index.get(), false);
+                ver_bloque(s.body);
+                ver_bloque(s.orelse);
+            }
+        };
+        ver_bloque(body);
+        for (const auto& [slot, f] : cand)
+            if (f && !fuera.count(slot)) registros_[slot] = *f;
+    }
+
+    const FormaRegistro* registro(const IrExpr* e) const {
+        if (!e || e->kind != IrExprKind::Ident) return nullptr;
+        auto it = registros_.find(e->slot);
+        return it == registros_.end() ? nullptr : &it->second;
+    }
+
+    // The records' C++, before the route that uses them (and the templates
+    // after it).
+    std::string registros_codigo() const {
+        std::string s;
+        for (const auto& [_, f] : registros_) s += f.texto();
+        return s;
+    }
+
+    // `e` where its value is taken (a by-value argument, an element, the
+    // right side of a declaration): a local that movibles() allows is moved.
+    // Emitted more than once would read a moved-from value: then a copy.
+    std::string consumir(const IrExpr& e, bool json) const {
+        auto t = e.kind == IrExprKind::Ident ? comprobador_.tipo_provable(e) : std::nullopt;
+        const bool escalar = t && !es_json_dinamico(*t) &&
+                             (t->kind() == Type::Kind::Int || t->kind() == Type::Kind::Float || t->kind() == Type::Kind::Bool);
+        const bool mueve = e.kind == IrExprKind::Ident && e.slot >= 0 && movibles_.count(e.slot) && !escalar;
+        const IrExpr* antes = std::exchange(mover_, mueve ? &e : mover_);
+        std::string r = json ? valor_json(e) : expr(e);
+        mover_ = antes;
+        if (mueve) {
+            const std::string m = "std::move(" + nombre_cpp(e.text) + ")";
+            const size_t p = r.find(m);
+            if (p == std::string::npos || r.find(m, p + 1) != std::string::npos)
+                r = json ? valor_json(e) : expr(e);
+        }
+        return r;
     }
 
     // A route notes where each statement is, for its 500's "at" and the log
@@ -2208,6 +2678,10 @@ public:
     std::string cond(const IrExpr& e) const { return "lux_truthy(" + expr(e) + ")"; }
 
     std::string stmt(const IrStmt& s, int indent) {
+        struct Restaura {
+            std::set<int>& r; std::set<int> v;
+            ~Restaura() { r = std::move(v); }
+        } restaura{movibles_, std::exchange(movibles_, movibles(s))};
         switch (s.kind) {
             case IrStmtKind::Return:
                 if (ruta_ && s.value && comprobador_.es_llamada_respuesta(*s.value))
@@ -2218,10 +2692,19 @@ public:
                        (retorno_json_ ? valor_json(*s.value) : expr(*s.value)) + ";";
 
             case IrStmtKind::ExprStmt:
+                if (const FormaRegistro* f = s.value && s.value->kind == IrExprKind::Call ? registro(s.value->object.get()) : nullptr) {
+                    // x.add({...}): the literal's values in its own order.
+                    std::string r = nombre_cpp(s.value->object->text) + ".lux_add(" + f->nombre() + "{";
+                    const auto& en = s.value->args[0].value->entries;
+                    for (size_t i = 0; i < en.size(); ++i) r += (i ? ", " : "") + consumir(*en[i].value, false);
+                    return r + "});";
+                }
                 return expr(*s.value) + ";";
 
             case IrStmtKind::VarDecl: {
                 registrar(s.slot, s.name);
+                if (const auto it = registros_.find(s.slot); it != registros_.end())
+                    return "LList<" + it->second.nombre() + "> " + nombre_cpp(s.name) + ";";
                 // El tipo REAL (el que Comprobador registro, ver su caso
                 // VarDecl) no siempre es el declarado -- Fase 5.5: `int
                 // stock = filas[0]["stock"]` genera un `Value stock = ...`,
@@ -2244,12 +2727,12 @@ public:
                 // defecto de ESE tipo exacto sin que haga falta deducir
                 // nada de un literal sin elementos.
                 if (comprobador_.en_value(s))
-                    return "Value " + nombre_cpp(s.name) + " = " + valor_json(*s.value) + ";";
+                    return "Value " + nombre_cpp(s.name) + " = " + consumir(*s.value, true) + ";";
                 auto t_valor    = s.value ? comprobador_.tipo_provable(*s.value) : std::nullopt;
                 const Type decl = comprobador_.nativo(s.decl_type);
                 Type tipo_real  = t_valor ? *t_valor : decl;
                 std::string val = (!s.value || !t_valor) ? valor_por_defecto(decl)
-                                                          : expr(*s.value);
+                                                          : consumir(*s.value, false);
                 return tipo_cpp(tipo_real) + " " + nombre_cpp(s.name) + " = " + val + ";";
             }
 
@@ -2264,7 +2747,7 @@ public:
                     return "lux_json_set_index(" + expr(*s.assign_object) + ", " + valor_json(*s.assign_index) +
                            ", " + valor_json(*s.value) + ");";
                 if (comprobador_.en_value(s))
-                    return nombre_cpp(ranura_a_nombre_.at(s.assign_slot)) + " = " + valor_json(*s.value) + ";";
+                    return nombre_cpp(ranura_a_nombre_.at(s.assign_slot)) + " = " + consumir(*s.value, true) + ";";
                 if (s.assign_target == IrAssignTarget::Index)
                     return expr(*s.assign_object) + ".lux_set(" + expr(*s.assign_index) +
                            ", " + expr(*s.value) + ");";
@@ -2275,7 +2758,7 @@ public:
                 // es el que se registro cuando esa ranura se declaro (un
                 // parametro o un VarDecl anterior).
                 return nombre_cpp(ranura_a_nombre_.at(s.assign_slot)) + " = " +
-                       expr(*s.value) + ";";
+                       consumir(*s.value, false) + ";";
             }
 
             case IrStmtKind::If: {
@@ -2318,6 +2801,24 @@ public:
             // verdad, no hace falta ningun parcheo de saltos como en el
             // bytecode.
             case IrStmtKind::For: {
+                registrar(s.slot, s.name);   // the body may assign to it
+                // range()'s bounds are read once, like the List it would
+                // build; the variable is a copy, so the body cannot move it.
+                if (comprobador_.for_rango(s)) {
+                    const auto& a = s.target->args;
+                    const bool uno = a.size() == 1;
+                    std::string r = "{\n";
+                    r += pad(indent + 1) + "const int64_t l__r_a = " + (uno ? "0" : expr(*a[0].value)) + ";\n";
+                    r += pad(indent + 1) + "const int64_t l__r_b = " + expr(*a[uno ? 0 : 1].value) + ";\n";
+                    r += pad(indent + 1) + "const int64_t l__r_s = " + (a.size() == 3 ? expr(*a[2].value) : "1") + ";\n";
+                    r += pad(indent + 1) + "if (l__r_s == 0) lux_native_fail(\"range(): step cannot be 0\");\n";
+                    r += pad(indent + 1) + "for (int64_t l__r_i = l__r_a; l__r_s > 0 ? l__r_i < l__r_b : l__r_i > l__r_b; l__r_i += l__r_s) {\n";
+                    r += pad(indent + 2) + "int64_t " + nombre_cpp(s.name) + " = l__r_i;\n";
+                    r += block(s.body, indent + 2);
+                    r += pad(indent + 1) + "}\n";
+                    r += pad(indent) + "}";
+                    return r;
+                }
                 if (comprobador_.for_dinamico(s)) {
                     std::string r = "{\n";
                     r += pad(indent + 1) + "Value l__for_items = lux_iter(" + valor_json(*s.target) + ");\n";
@@ -2369,6 +2870,14 @@ public:
     // already wrote the response (pdf.send()), the return value is dropped.
     std::string respuesta_de_retorno(const IrExpr* e) const {
         if (!e) return "if (!lux_answered(res, l_ctx)) res.status(204).send(\"\"); " + ret_vacio();
+        if (registro(e))
+            return "if (!lux_answered(res, l_ctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(lux_rec_json(" +
+                   nombre_cpp(e->text) + ")); " + ret_vacio();
+        // A literal's JSON is the same every time: serialized here, once,
+        // by the very Value::to_json_text() the request would have run.
+        if (Value k; constante(*e, k) && !k.is_null())
+            return "if (!lux_answered(res, l_ctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(std::string(" +
+                   literal_string(k.to_json_text()) + ")); " + ret_vacio();
         // A dynamic value may turn out null at run time: a 204, as in bytecode.
         auto t = comprobador_.tipo_provable(*e);
         if (t && es_json_dinamico(*t))
@@ -2388,14 +2897,20 @@ public:
     std::string valor_json(const IrExpr& e) const {
         // A chain of calls (LuxL/LuxD): see route_runtime_prelude.
         if (e.kind == IrExprKind::DictLit) {
-            std::string s = "LuxD{}";
+            // Distinct literal keys cannot collide: appended without the
+            // lookup a repeated key needs.
+            std::set<std::string> keys;
+            bool distinct = true;
             for (const auto& entry : e.entries)
-                s += ".add(" + expr(*entry.key) + ", " + valor_json(*entry.value) + ")";
+                distinct = distinct && entry.key->kind == IrExprKind::StringLit && keys.insert(entry.key->text).second;
+            std::string s = "LuxD{" + std::to_string(e.entries.size()) + "}";
+            for (const auto& entry : e.entries)
+                s += (distinct ? ".add_new(" : ".add(") + expr(*entry.key) + ", " + consumir(*entry.value, true) + ")";
             return s + ".done()";
         }
         if (e.kind == IrExprKind::ListLit) {
-            std::string s = "LuxL{}";
-            for (const auto& item : e.items) s += ".add(" + valor_json(*item) + ")";
+            std::string s = "LuxL{" + std::to_string(e.items.size()) + "}";
+            for (const auto& item : e.items) s += ".add(" + consumir(*item, true) + ")";
             return s + ".done()";
         }
         // Fase 5.8: `<valor>.status(codigo)` -- ver el comentario de
@@ -2409,6 +2924,7 @@ public:
         if (e.kind == IrExprKind::Call && e.call_shape == IrCallShape::BuiltinMethodCall &&
             e.call_name == "status")
             return "(res.status(" + expr(*e.args[0].value) + "), " + valor_json(*e.object) + ")";
+        if (e.kind == IrExprKind::StringLit) return "lux_k<" + literal_string(e.text) + ">()";
         auto t = comprobador_.tipo_provable(e);
         // Json (Fase 5.5), o un List<Json>/Dict<string,Json> (mismo
         // tipo_cpp() que Json, ver native_gen.cpp): la expresion YA es un
@@ -2437,13 +2953,21 @@ public:
         const auto& a = e.args;
         if (e.call_name == "status")
             return "res.status(" + expr(*a[0].value) + ").send(\"\")";
+        // Literal arguments are turned into their text here, once (see
+        // constante()).
+        Value k;
+        const bool fijo = (e.call_name == "text" || e.call_name == "html" || e.call_name == "json") &&
+                          constante(*a[0].value, k);
         if (e.call_name == "text")
-            return "res.text(" + valor_json(*a[0].value) + ".to_string())";
+            return "res.text(" + (fijo ? "std::string(" + literal_string(k.to_string()) + ")"
+                                       : valor_json(*a[0].value) + ".to_string()") + ")";
         if (e.call_name == "html")
-            return "res.html(" + valor_json(*a[0].value) + ".to_string())";
+            return "res.html(" + (fijo ? "std::string(" + literal_string(k.to_string()) + ")"
+                                       : valor_json(*a[0].value) + ".to_string()") + ")";
         if (e.call_name == "json")
             return "res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
-                   valor_json(*a[0].value) + ".to_json_text())";
+                   (fijo ? "std::string(" + literal_string(k.to_json_text()) + ")"
+                         : valor_json(*a[0].value) + ".to_json_text()") + ")";
         if (e.call_name == "redirect") {
             const std::string codigo = a.size() > 1 ? expr(*a[1].value) : "302";
             return "res.status(" + codigo + ").header(\"Location\", " + expr(*a[0].value) +
@@ -2494,6 +3018,17 @@ private:
     bool                             asincrona_ = false;
     std::map<int, std::string>      ranura_a_nombre_;
     mutable int                      n_try_ = 0;
+    mutable std::set<std::string>    plantillas_;
+    Vida                             vida_;
+    int                              profundidad_ = 0;
+    std::set<int>                    movibles_;
+    mutable const IrExpr*            mover_ = nullptr;
+    std::map<int, FormaRegistro>     registros_;
+
+public:
+    const std::set<std::string>& plantillas() const { return plantillas_; }
+
+private:
 
     static std::string pad(int indent) { return std::string(static_cast<size_t>(indent) * 4, ' '); }
 
@@ -3232,9 +3767,37 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         if (con_archivos)
             cuerpo += "    std::vector<lux::MultipartPart> l__parts;\n"
                       "    if (auto p = lux::parse_multipart(req)) { l__parts = std::move(*p); l_ctx.parts = &l__parts; l_ctx.uploads = true; }\n";
+        // A Dict class body whose validate: rules compiled: bytecode binds
+        // it, the rules run here (see construir_clases).
+        const ClaseNativa* reglas = nullptr;
+        size_t             reglas_en = 0;
+        for (size_t i = 0; i < route.params.size(); ++i) {
+            const auto& tp = route.params[i].type;
+            auto cit = clases.find(tp.name);
+            if (!tp.optional && cit != clases.end() && cit->second.dinamica && cit->second.reglas_ok &&
+                !cit->second.reglas.empty()) { reglas = &cit->second; reglas_en = i; }
+        }
         cuerpo += "    std::vector<Value> l__args;\n"
                   "    if (!lux_script::prepare_native_args(g_lux_binds, " + std::to_string(indice) +
-                  ", req, res, l_ctx, l__args)) { " + gen.ret_vacio() + " }\n";
+                  ", req, res, l_ctx, l__args" + (reglas ? ", false" : "") + ")) { " + gen.ret_vacio() + " }\n";
+        if (reglas) {
+            cuerpo += "    {\n        const Value::Dict& __d = l__args[" + std::to_string(reglas_en) + "].as_dict();\n";
+            for (const auto& c : reglas->campos)
+                cuerpo += "        const Value& " + nombre_cpp(c.nombre) + " = __d.find(" + literal_string(c.nombre) + ")->second;\n";
+            cuerpo += "        std::vector<std::string> __msgs;\n";
+            for (const auto& r : reglas->reglas)
+                cuerpo += "        if (!(" + r.condicion_cpp + ")) __msgs.push_back(" + literal_string(r.mensaje) + ");\n";
+            cuerpo += "        if (!__msgs.empty()) {\n"
+                      "            lux_script::last_validation_messages() = __msgs;\n"
+                      "            Value::Dict __e;\n"
+                      "            __e[\"error\"] = Value::str(\"Validation failed\");\n"
+                      "            Value::List __l;\n"
+                      "            for (const auto& __m : __msgs) __l.push_back(Value::str(__m));\n"
+                      "            __e[\"messages\"] = Value::list(std::move(__l));\n"
+                      "            res.status(422).header(\"Content-Type\", \"application/json; charset=utf-8\")"
+                      ".send(Value::dict(std::move(__e)).to_json_text());\n"
+                      "            " + gen.ret_vacio() + "\n        }\n    }\n";
+        }
         for (size_t i = 0; i < params.size(); ++i) {
             const Type& t = params[i].tipo;
             const std::string v = "l__args[" + std::to_string(i) + "]";
@@ -3372,9 +3935,483 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     cuerpo += "    }\n";
     cuerpo += "}";
 
+    out.registros_cpp = gen.registros_codigo();
     out.cuerpo_cpp = "extern \"C\" " + std::string(asincrona ? "lux::Task<void>" : "void") +
                      " " + out.simbolo + "(lux::Request& req, lux::Response& res) " + cuerpo;
+    out.plantillas = gen.plantillas();
     return out;
+}
+
+std::string native_template_fn(const std::string& key) {
+    return "lux_tpl_" + std::to_string(std::hash<std::string>{}(key));
+}
+
+// Template::code, instruction by instruction, as straight-line C++: text is
+// appended as constants, {{ name.field... }} read in place, loops and ifs
+// become gotos between the instructions' labels (every local is declared
+// before the first one, so no jump crosses an initialisation). Anything the
+// VM has to evaluate goes back to it -- eval_template_expr, same chunk,
+// same errors.
+std::string generate_native_template(const Template& t, const std::string& fnkey) {
+    // "#<argument>=<shape>" after the key: that argument is a record list
+    // (FormaRegistro), not a Value.
+    const std::string key = fnkey.substr(0, fnkey.find('#'));
+    std::map<size_t, FormaRegistro> formas;
+    for (size_t h = fnkey.find('#'); h != std::string::npos;) {
+        const size_t eq = fnkey.find('=', h), next = fnkey.find('#', h + 1);
+        formas[std::stoul(fnkey.substr(h + 1, eq - h - 1))] =
+            FormaRegistro::de_codigo(fnkey.substr(eq + 1, next == std::string::npos ? std::string::npos : next - eq - 1));
+        h = next;
+    }
+    // A chunk that only reads slot `s` / field `f` of slot `s`.
+    auto lee = [](const Chunk& c, uint32_t s) {
+        return c.code.size() == 2 && c.code[0].op == Op::LoadLocal && c.code[0].operand == s && c.code[1].op == Op::Return;
+    };
+    auto campo = [](const Chunk& c, uint32_t s) -> std::optional<std::string> {
+        if (c.code.size() != 3 || c.code[0].op != Op::LoadLocal || c.code[0].operand != s ||
+            c.code[1].op != Op::GetMember || c.code[2].op != Op::Return)
+            return std::nullopt;
+        const Value& k = c.constants[c.code[1].operand];
+        return k.is_str() ? std::optional<std::string>(k.as_str()) : std::nullopt;
+    };
+    auto usa = [](const Chunk& c, uint32_t s) {
+        for (const auto& in : c.code) if (in.op == Op::LoadLocal && in.operand == s) return true;
+        return false;
+    };
+    auto con_expr = [](Template::Op op) {
+        return op == Template::Op::Write || op == Template::Op::WriteRaw || op == Template::Op::JumpIfFalse ||
+               op == Template::Op::LoopStart;
+    };
+
+    std::string args, params;   // the call's arguments, in the key's order
+    // Record slot -> {argument, shape}: loops over it walk the structs. One
+    // read any other way (the list whole, an index, a filter) and the whole
+    // list becomes its Value up front.
+    std::map<uint32_t, std::pair<size_t, FormaRegistro>> rec_slot;
+    {
+        const std::string list = key.substr(key.find('|') + 1);
+        size_t i = 0;
+        std::vector<std::string> names;
+        while (i < list.size()) {
+            const size_t colon = list.find(':', i), comma = list.find(',', i);
+            names.push_back(list.substr(i, colon - i));
+            i = comma + 1;
+        }
+        for (size_t a = 0; a < names.size(); ++a) {
+            const auto it = std::find_if(t.names.begin(), t.names.end(),
+                                         [&](const TypedName& n) { return n.name == names[a]; });
+            const auto f = formas.find(a);
+            params += (f == formas.end() ? ", Value a" : ", LList<" + f->second.nombre() + "> a") + std::to_string(a);
+            if (it == t.names.end()) continue;
+            const uint32_t s = static_cast<uint32_t>(it - t.names.begin());
+            const std::string A = "a" + std::to_string(a);
+            if (f == formas.end()) { args += "    s[" + std::to_string(s) + "] = std::move(" + A + ");\n"; continue; }
+            bool directo = true;
+            for (const auto& in : t.code)
+                if (con_expr(in.op) && usa(t.exprs[in.a], s) &&
+                    !((in.op == Template::Op::LoopStart || in.op == Template::Op::JumpIfFalse) && lee(t.exprs[in.a], s)))
+                    directo = false;
+            if (directo) rec_slot[s] = {a, f->second};
+            else args += "    s[" + std::to_string(s) + "] = lux_rec_value(" + A + ");\n";
+        }
+    }
+    // Loops over a record list: LoopStart pc -> {argument, shape, whether
+    // the item is also needed as a Value (read other than {{ it.field }})}.
+    struct RecLoop { std::string arg; FormaRegistro forma; bool valor = false; };
+    std::map<size_t, RecLoop> rec_loop;
+    for (size_t pc = 0; pc < t.code.size(); ++pc) {
+        const auto& in = t.code[pc];
+        if (in.op != Template::Op::LoopStart) continue;
+        auto rs = std::find_if(rec_slot.begin(), rec_slot.end(), [&](const auto& r) { return lee(t.exprs[in.a], r.first); });
+        if (rs == rec_slot.end()) continue;
+        RecLoop L{"a" + std::to_string(rs->second.first), rs->second.second};
+        for (size_t q = pc + 1; q < t.code.size() && !(t.code[q].op == Template::Op::LoopNext && t.code[q].b == pc + 1); ++q) {
+            const auto& iq = t.code[q];
+            if (!con_expr(iq.op)) continue;
+            // Every read of the item a field it has: translate() reads it
+            // off the struct. Anything else (the row whole, a field it
+            // lacks) needs the row as its Value.
+            const auto& c = t.exprs[iq.a].code;
+            for (size_t k = 0; k < c.size(); ++k)
+                if (c[k].op == Op::LoadLocal && c[k].operand == in.slot &&
+                    !(k + 1 < c.size() && c[k + 1].op == Op::GetMember &&
+                      t.exprs[iq.a].constants[c[k + 1].operand].is_str() &&
+                      L.forma.indice(t.exprs[iq.a].constants[c[k + 1].operand].as_str()) >= 0))
+                    L.valor = true;
+        }
+        rec_loop[pc] = std::move(L);
+    }
+    std::map<size_t, const RecLoop*> rec_open;   // record loops the pc being emitted is inside
+    std::set<uint32_t> targets;
+    for (const auto& in : t.code)
+        if (in.op != Template::Op::Text && in.op != Template::Op::Write && in.op != Template::Op::WriteRaw)
+            targets.insert(in.b);
+
+    // `loop` slot -> its LoopStart: loop.index and co. are read off that
+    // loop's counter. Only a loop something reads `loop` of any other way
+    // (whole, or through the VM) builds the Dict.
+    std::map<uint32_t, size_t> loop_at;
+    for (size_t pc = 0; pc < t.code.size(); ++pc)
+        if (t.code[pc].op == Template::Op::LoopStart && t.code[pc].slot_loop != kNoLoop)
+            loop_at[t.code[pc].slot_loop] = pc;
+    std::set<uint32_t> loop_dict;
+
+    std::map<uint32_t, std::string> item_ptr;   // loop item slot -> its pointer, while the loop is open
+    int n_hints = 0, n_emit = 0, depth = 1;
+    std::string statics;
+
+    // An expression's bytecode as C++, op by op over a stack of pointers
+    // (xp) to where each value is -- a slot, a field in place, or xv[] when
+    // it had to be computed. nullopt: an op this does not know, and the VM
+    // evaluates it. `pure`: no call in it, nothing can change a list under
+    // a pointer into it.
+    struct Tx { std::string code; bool pure = true; int depth = 0; };
+    auto translate = [&](const Chunk& c, int& hints, std::string& st) -> std::optional<Tx> {
+        Tx r;
+        const auto& code = c.code;
+        const std::string E = "e" + std::to_string(n_emit) + "_";
+        std::map<size_t, int> depth_at;   // jump target -> stack depth there
+        int d = 0;
+        bool live = true;
+        auto P = [](int i) { return "xp[" + std::to_string(i) + "]"; };
+        auto X = [](int i) { return "xv[" + std::to_string(i) + "]"; };
+        auto set = [&](int i, const std::string& val) { r.code += "    " + X(i) + " = " + val + "; " + P(i) + " = &" + X(i) + ";\n"; };
+        auto jump = [&](size_t to, int at) {
+            auto [it, fresh] = depth_at.emplace(to, at);
+            return to > 0 && (fresh || it->second == at);
+        };
+        auto args = [&](int from, int to) {
+            std::string a = "{";
+            for (int i = from; i < to; ++i) a += (i > from ? ", *" : "*") + P(i);
+            return a + "}";
+        };
+        for (size_t pc = 0; pc < code.size(); ++pc) {
+            if (auto it = depth_at.find(pc); it != depth_at.end()) {
+                if (live && it->second != d) return std::nullopt;
+                d = it->second; live = true;
+                r.code += E + std::to_string(pc) + ":;\n";
+            } else if (!live) continue;   // after a return, nothing jumps to
+            const Instr& in = code[pc];
+            const int op = static_cast<int>(in.operand);
+            auto need = [&](int n) { return d >= n; };
+            switch (in.op) {
+                case Op::Const: {
+                    const Value& k = c.constants[in.operand];
+                    if (k.is_str()) {
+                        const std::string n = "k" + std::to_string(n_emit) + "_" + std::to_string(pc);
+                        st += "    static const Value " + n + " = Value::str(std::string(" + literal_string(k.as_str()) +
+                              ", " + std::to_string(k.as_str().size()) + "));\n";
+                        r.code += "    " + P(d) + " = &" + n + ";\n";
+                    } else if (k.is_int()) {
+                        set(d, "Value::integer(" + (k.as_int() == INT64_MIN ? std::string("INT64_MIN") : std::to_string(k.as_int()) + "LL") + ")");
+                    } else if (k.is_float() && std::isfinite(k.as_float())) {
+                        char buf[64];
+                        std::snprintf(buf, sizeof buf, "%a", k.as_float());
+                        set(d, std::string("Value::real(") + buf + ")");
+                    } else if (k.is_bool()) {
+                        set(d, k.as_bool() ? "Value::boolean(true)" : "Value::boolean(false)");
+                    } else if (k.is_null()) {
+                        set(d, "Value()");
+                    } else return std::nullopt;
+                    ++d;
+                    break;
+                }
+                case Op::LoadLocal: {
+                    if (in.operand >= t.names.size()) return std::nullopt;
+                    // A record row's field, read off its struct (lux_v: no
+                    // allocation for a number or a bool).
+                    if (pc + 1 < code.size() && code[pc + 1].op == Op::GetMember && c.constants[code[pc + 1].operand].is_str()) {
+                        bool hecho = false;
+                        for (const auto& [lpc, L] : rec_open) {
+                            if (t.code[lpc].slot != in.operand) continue;
+                            const int j = L->forma.indice(c.constants[code[pc + 1].operand].as_str());
+                            if (j < 0) break;
+                            set(d, "lux_v(r" + std::to_string(lpc) + "->f" + std::to_string(j) + ")");
+                            ++d; ++pc; hecho = true;
+                            break;
+                        }
+                        if (hecho) break;
+                    }
+                    static const std::set<std::string> kLoopFields = {"index", "index0", "first", "last", "length"};
+                    const auto lp = loop_at.find(in.operand);
+                    if (lp != loop_at.end()) {
+                        const bool field = pc + 1 < code.size() && code[pc + 1].op == Op::GetMember &&
+                                           kLoopFields.count(c.constants[code[pc + 1].operand].as_str());
+                        if (!field) {
+                            loop_dict.insert(in.operand);
+                            r.code += "    " + P(d) + " = &s[" + std::to_string(in.operand) + "];\n";
+                        } else {
+                            const std::string L = std::to_string(lp->second), f = c.constants[code[pc + 1].operand].as_str();
+                            const std::string i = "static_cast<long long>(i" + L + ")",
+                                              n = rec_loop.count(lp->second) ? "static_cast<long long>(rl" + L + "->size())"
+                                                                             : "static_cast<long long>(l" + L + ".as_list().size())";
+                            set(d, f == "index" ? "Value::integer(" + i + " + 1)" : f == "index0" ? "Value::integer(" + i + ")"
+                                 : f == "first" ? "Value::boolean(" + i + " == 0)" : f == "last" ? "Value::boolean(" + i + " + 1 == " + n + ")"
+                                 : "Value::integer(" + n + ")");
+                            ++pc;
+                        }
+                    } else {
+                        const auto ptr = item_ptr.find(in.operand);
+                        r.code += "    " + P(d) + " = " + (ptr != item_ptr.end() ? ptr->second : "&s[" + std::to_string(in.operand) + "]") + ";\n";
+                    }
+                    ++d;
+                    break;
+                }
+                case Op::GetMember: {
+                    if (!need(1)) return std::nullopt;
+                    const std::string k = literal_string(c.constants[in.operand].as_str());
+                    const std::string h = "h" + std::to_string(hints++);
+                    r.code += "    { const Value* o = " + P(d - 1) + "; " + P(d - 1) + " = lux_tpl_field(o, " + k + ", " + h +
+                              "); if (!" + P(d - 1) + ") lux_tpl_no_field(*o, " + k + "); }\n";
+                    break;
+                }
+                case Op::CoerceInt:
+                case Op::CoerceFloat:
+                    if (!need(1)) return std::nullopt;
+                    set(d - 1, in.op == Op::CoerceInt
+                        ? P(d - 1) + "->is_float() ? Value::integer(static_cast<long long>(" + P(d - 1) + "->as_float())) : Value(*" + P(d - 1) + ")"
+                        : P(d - 1) + "->is_int() ? Value::real(static_cast<double>(" + P(d - 1) + "->as_int())) : Value(*" + P(d - 1) + ")");
+                    break;
+                case Op::Neg:
+                    if (!need(1)) return std::nullopt;
+                    set(d - 1, "lux_tpl_neg(*" + P(d - 1) + ")");
+                    break;
+                case Op::Not:
+                    if (!need(1)) return std::nullopt;
+                    set(d - 1, "Value::boolean(!" + P(d - 1) + "->truthy())");
+                    break;
+                case Op::Add: case Op::Sub: case Op::Mul: case Op::Div: case Op::Mod:
+                case Op::Eq: case Op::Ne: case Op::Lt: case Op::Le: case Op::Gt: case Op::Ge:
+                case Op::AddInt: case Op::SubInt: case Op::MulInt:
+                case Op::LtInt: case Op::LeInt: case Op::GtInt: case Op::GeInt:
+                case Op::GetIndex: {
+                    if (!need(2)) return std::nullopt;
+                    const std::string a = "*" + P(d - 2), b = "*" + P(d - 1);
+                    const std::string ints = P(d - 2) + "->is_int() && " + P(d - 1) + "->is_int() ? ";
+                    const std::string x = P(d - 2) + "->as_int()", y = P(d - 1) + "->as_int()";
+                    auto cmp = [&](int k) { return "lux_tpl_cmp(" + a + ", " + b + ", " + std::to_string(k) + ")"; };
+                    auto arit = [&](char k) { return "lux_json_arit(" + a + ", " + b + ", '" + std::string(1, k) + "')"; };
+                    std::string v;
+                    switch (in.op) {
+                        case Op::Add:    v = "lux_tpl_add(" + a + ", " + b + ")"; break;
+                        case Op::Sub:    v = arit('-'); break;
+                        case Op::Mul:    v = arit('*'); break;
+                        case Op::Div:    v = arit('/'); break;
+                        case Op::Mod:    v = arit('%'); break;
+                        case Op::Eq:     v = "Value::boolean(" + P(d - 2) + "->equals(" + b + "))"; break;
+                        case Op::Ne:     v = "Value::boolean(!" + P(d - 2) + "->equals(" + b + "))"; break;
+                        case Op::Lt:     v = cmp(0); break;
+                        case Op::Le:     v = cmp(1); break;
+                        case Op::Gt:     v = cmp(2); break;
+                        case Op::Ge:     v = cmp(3); break;
+                        case Op::AddInt: v = ints + "Value::integer(" + x + " + " + y + ") : lux_tpl_add(" + a + ", " + b + ")"; break;
+                        case Op::SubInt: v = ints + "Value::integer(" + x + " - " + y + ") : " + arit('-'); break;
+                        case Op::MulInt: v = ints + "Value::integer(" + x + " * " + y + ") : " + arit('*'); break;
+                        case Op::LtInt:  v = ints + "Value::boolean(" + x + " < " + y + ") : " + cmp(0); break;
+                        case Op::LeInt:  v = ints + "Value::boolean(" + x + " <= " + y + ") : " + cmp(1); break;
+                        case Op::GtInt:  v = ints + "Value::boolean(" + x + " > " + y + ") : " + cmp(2); break;
+                        case Op::GeInt:  v = ints + "Value::boolean(" + x + " >= " + y + ") : " + cmp(3); break;
+                        default:         v = "lux_json_index(" + a + ", " + b + ")"; break;
+                    }
+                    set(d - 2, v);
+                    --d;
+                    break;
+                }
+                case Op::ConcatN: {
+                    const int n = op;
+                    if (n < 1 || !need(n)) return std::nullopt;
+                    std::string l;
+                    for (int i = d - n; i < d; ++i) l += (i > d - n ? ", " : "") + P(i);
+                    set(d - n, "lux_tpl_concat({" + l + "})");
+                    d = d - n + 1;
+                    break;
+                }
+                case Op::CallMethod: {
+                    const int argc = op & 0xFF, base = d - argc - 1;
+                    if (base < 0) return std::nullopt;
+                    const std::string m = "m" + std::to_string(n_emit) + "_" + std::to_string(pc);
+                    const std::string& name = c.constants[in.operand >> 8].as_str();
+                    st += "    static const std::string " + m + "(" + literal_string(name) + ", " + std::to_string(name.size()) + ");\n";
+                    set(base, "lux_tpl_method(ctx, *" + P(base) + ", " + m + ", " + args(base + 1, d) + ")");
+                    d = base + 1;
+                    r.pure = false;
+                    break;
+                }
+                case Op::CallNative:
+                case Op::CallBuiltinModule: {
+                    const int argc = op & 0xFF, base = d - argc;
+                    if (base < 0) return std::nullopt;
+                    set(base, std::string(in.op == Op::CallNative ? "lux_dyn_global" : "lux_tpl_module") + "(ctx, " +
+                              std::to_string(in.operand >> 8) + ", " + args(base, d) + ")");
+                    d = base + 1;
+                    r.pure = false;
+                    break;
+                }
+                case Op::Jump:
+                    if (!jump(in.operand, d) || in.operand <= pc) return std::nullopt;
+                    r.code += "    goto " + E + std::to_string(in.operand) + ";\n";
+                    live = false;
+                    break;
+                case Op::JumpIfFalse:
+                    if (!need(1) || in.operand <= pc || !jump(in.operand, d - 1)) return std::nullopt;
+                    r.code += "    if (!" + P(d - 1) + "->truthy()) goto " + E + std::to_string(in.operand) + ";\n";
+                    --d;
+                    break;
+                case Op::JumpIfFalsePeek:
+                case Op::JumpIfTruePeek:
+                    if (!need(1) || in.operand <= pc || !jump(in.operand, d)) return std::nullopt;
+                    r.code += std::string("    if (") + (in.op == Op::JumpIfFalsePeek ? "!" : "") + P(d - 1) +
+                              "->truthy()) goto " + E + std::to_string(in.operand) + ";\n";
+                    --d;
+                    break;
+                case Op::Return:
+                    if (!need(1)) return std::nullopt;
+                    r.code += "    v = " + P(d - 1) + "; goto " + E + "end;\n";
+                    live = false;
+                    break;
+                case Op::ReturnNull:
+                    r.code += "    v = &lux_tpl_none; goto " + E + "end;\n";
+                    live = false;
+                    break;
+                default:
+                    return std::nullopt;
+            }
+            r.depth = std::max(r.depth, d);
+        }
+        if (live) return std::nullopt;
+        for (const auto& [to, _] : depth_at) if (to >= code.size()) return std::nullopt;
+        r.code += E + "end:;\n";
+        return r;
+    };
+
+    // First pass: which expressions compile, whether any calls something.
+    // A loop's item is read where it is in the list, instead of copied into
+    // its slot (a refcount up and down per pass), only when nothing could
+    // change the list under that pointer or reads the slot through the VM.
+    bool all_direct = true;
+    for (const auto& c : t.exprs) {
+        int h = 0;
+        std::string st;
+        const auto r = translate(c, h, st);
+        all_direct = all_direct && r && r->pure;
+        if (!r)
+            for (const auto& in : c.code)
+                if (in.op == Op::LoadLocal && loop_at.count(in.operand)) loop_dict.insert(in.operand);
+    }
+
+    auto eval = [&](uint32_t k) {
+        const auto r = translate(t.exprs[k], n_hints, statics);
+        ++n_emit;
+        if (!r) return "    v = &lux_tpl_eval(ctx, tpl, " + std::to_string(k) + ", s, tmp);\n";
+        depth = std::max(depth, r->depth);
+        return r->code;
+    };
+    auto set_loop = [&](const Template::Instr& in, const std::string& i, const std::string& n) {
+        return !loop_dict.count(in.slot_loop) ? std::string()
+             : "    s[" + std::to_string(in.slot_loop) + "] = lux_script::template_loop_value(" + i + ", " + n + ");\n";
+    };
+
+    std::string locals, body;
+    for (size_t pc = 0; pc < t.code.size(); ++pc) {
+        const auto& in = t.code[pc];
+        const std::string P = std::to_string(pc), B = std::to_string(in.b);
+        if (targets.count(static_cast<uint32_t>(pc))) body += "t" + P + ":\n";
+        switch (in.op) {
+            case Template::Op::Text:
+                body += "    out.lit(" + literal_string(t.texts[in.a]) + ", " + std::to_string(t.texts[in.a].size()) + ");\n";
+                break;
+            case Template::Op::Write:
+            case Template::Op::WriteRaw: {
+                // {{ it.field }} of a record row: written from the struct,
+                // as lux_tpl_write would write that value.
+                const bool esc = in.op == Template::Op::Write;
+                std::string fast;
+                for (const auto& [lpc, L] : rec_open) {
+                    const auto f = campo(t.exprs[in.a], t.code[lpc].slot);
+                    const int j = f ? L->forma.indice(*f) : -1;
+                    if (j < 0) continue;
+                    const std::string fld = "r" + std::to_string(lpc) + "->f" + std::to_string(j);
+                    const Type::Kind k = L->forma.campos[static_cast<size_t>(j)].second;
+                    fast = k == Type::Kind::Int ? "    out.num(" + fld + ");\n"
+                         : k == Type::Kind::String ? (esc ? "    out.esc(" + fld + ");\n" : "    out.lit(" + fld + ".data(), " + fld + ".size());\n")
+                         : "    lux_tpl_write(lux_v(" + fld + "), " + (esc ? "true" : "false") + ", out);\n";
+                }
+                if (!fast.empty()) { body += fast; break; }
+                body += eval(in.a) + "    lux_tpl_write(*v, " + (esc ? "true" : "false") + ", out);\n";
+                break;
+            }
+            case Template::Op::JumpIfFalse:
+                if (auto rs = std::find_if(rec_slot.begin(), rec_slot.end(), [&](const auto& r) { return lee(t.exprs[in.a], r.first); });
+                    rs != rec_slot.end()) {
+                    body += "    if (a" + std::to_string(rs->second.first) + ".lux_len() == 0) goto t" + B + ";\n";
+                    break;
+                }
+                body += eval(in.a) + "    if (!v->truthy()) goto t" + B + ";\n";
+                break;
+            case Template::Op::Jump:
+                body += "    goto t" + B + ";\n";
+                break;
+            case Template::Op::LoopStart: {
+                if (auto rl = rec_loop.find(pc); rl != rec_loop.end()) {
+                    const RecLoop& L = rl->second;
+                    const std::string item = L.valor ? "    s[" + std::to_string(in.slot) + "] = lux_rec_value(*r" + P + ");\n" : "";
+                    locals += "    const std::vector<" + L.forma.nombre() + ">* rl" + P + " = nullptr; const " + L.forma.nombre() +
+                              "* r" + P + " = nullptr; size_t i" + P + " = 0;\n";
+                    body += "    rl" + P + " = &" + L.arg + ".lux_items();\n"
+                            "    if (rl" + P + "->empty()) goto t" + B + ";\n"
+                            "    i" + P + " = 0; r" + P + " = &(*rl" + P + ")[0];\n" + item +
+                            set_loop(in, "0", "rl" + P + "->size()");
+                    rec_open[pc] = &L;
+                    break;
+                }
+                locals += "    Value l" + P + "; size_t i" + P + " = 0; const Value* c" + P + " = nullptr;\n";
+                const std::string item = all_direct
+                    ? "    c" + P + " = &l" + P + ".as_list()[0];\n"
+                    : "    s[" + std::to_string(in.slot) + "] = l" + P + ".as_list()[0];\n";
+                body += eval(in.a) +
+                        "    if (!v->is_list()) lux_native_fail(std::string(\"{% for %} needs a list, not \") + v->type_name());\n"
+                        "    if (v->as_list().empty()) goto t" + B + ";\n"
+                        "    l" + P + " = *v; i" + P + " = 0;\n" + item +
+                        set_loop(in, "0", "l" + P + ".as_list().size()");
+                if (all_direct) item_ptr[in.slot] = "c" + P;
+                break;
+            }
+            case Template::Op::LoopNext: {
+                const std::string S = std::to_string(in.b - 1);   // its LoopStart
+                if (auto rl = rec_loop.find(in.b - 1); rl != rec_loop.end()) {
+                    const std::string item = rl->second.valor ? "    s[" + std::to_string(in.slot) + "] = lux_rec_value(*r" + S + ");\n" : "";
+                    body += "    if (++i" + S + " < rl" + S + "->size()) {\n    r" + S + " = &(*rl" + S + ")[i" + S + "];\n" + item +
+                            set_loop(in, "i" + S, "rl" + S + "->size()") + "    goto t" + B + ";\n    }\n";
+                    rec_open.erase(in.b - 1);
+                    break;
+                }
+                const std::string item = all_direct
+                    ? "    c" + S + " = &l" + S + ".as_list()[i" + S + "];\n"
+                    : "    s[" + std::to_string(in.slot) + "] = l" + S + ".as_list()[i" + S + "];\n";
+                body += "    if (++i" + S + " < l" + S + ".as_list().size()) {\n" + item +
+                        set_loop(in, "i" + S, "l" + S + ".as_list().size()") +
+                        "    goto t" + B + ";\n    }\n";
+                item_ptr.erase(in.slot);
+                break;
+            }
+        }
+    }
+    if (targets.count(static_cast<uint32_t>(t.code.size()))) body += "t" + std::to_string(t.code.size()) + ":\n";
+
+    return "// " + fnkey + "\n"
+           "static void " + native_template_fn(fnkey) +
+           "(lux_script::NativeCtx& ctx" + params + ") {\n"
+           "    static const size_t tpl = lux_template(" + literal_string(key) + ");\n"
+           "    Value s[" + std::to_string(std::max<size_t>(t.names.size(), 1)) + "];\n" + args +
+           "    static thread_local size_t hint = 0;\n"
+           "    LuxOut out(hint + hint / 8);\n"
+           "    Value tmp;\n    const Value* v = nullptr;\n    (void)tmp; (void)v; (void)tpl;\n" +
+           "    Value xv[" + std::to_string(depth) + "]; const Value* xp[" + std::to_string(depth) + "];\n    (void)xv; (void)xp;\n" + statics +
+           (n_hints ? "    size_t h0 = 0" + [&] { std::string h; for (int i = 1; i < n_hints; ++i) h += ", h" + std::to_string(i) + " = 0"; return h; }() + ";\n" : std::string()) +
+           locals + body +
+           "    ;\n    std::string html = out.done();\n    hint = html.size();\n"
+           "    ctx.res.header(\"Content-Type\", \"text/html; charset=utf-8\").send(std::move(html));\n"
+           "    ctx.response_written = true;\n}\n";
 }
 
 std::string generar_clase_runtime(const std::string& nombre_clase, const ClaseNativa& clase) {
@@ -3541,8 +4578,10 @@ void construir_clases(const Program& prog, const ClassSigs& clases_sig,
         // si alguna algun dia lo intenta, faltara en firmas_vacias/
         // clases_vacias y esta rama la rechazara limpio, no con un fallo a
         // medias.
-        if (!c.rules.empty() && cn.dinamica) cn.reglas_ok = false;   // not bound natively
-        if (!c.rules.empty() && !cn.dinamica) {
+        // A Dict class's rules too, over its fields as Values: its body is
+        // bound by bytecode's prepare_args(), its rules then run here
+        // instead of a VM per rule (generate_native_route).
+        if (!c.rules.empty()) {
             std::vector<TypedName> field_names;
             for (const auto& f : c.fields) field_names.push_back({f.name, f.type.name});
 
@@ -3632,6 +4671,17 @@ std::string string_runtime_prelude() {
     // Cada una calca, a proposito, la rama `string` de call_method() en
     // natives.cpp -- misma logica, tipos nativos en vez de Value.
     return
+        // A string literal as a Value, built once per literal (the
+        // template argument makes each its own static) and shared by
+        // every thread without touching its count (Value::immortal_str).
+        "template <size_t N> struct LuxLit {\n"
+        "    char s[N];\n"
+        "    constexpr LuxLit(const char (&a)[N]) { for (size_t i = 0; i < N; ++i) s[i] = a[i]; }\n"
+        "};\n"
+        "template <LuxLit L> inline const Value& lux_k() {\n"
+        "    static const Value v = Value::immortal_str(std::string(L.s, sizeof(L.s) - 1));\n"
+        "    return v;\n"
+        "}\n"
         "inline bool lux_truthy(bool b) { return b; }\n"
         "inline bool lux_truthy(int i) { return i != 0; }\n"
         "inline bool lux_truthy(int64_t i) { return i != 0; }\n"
@@ -3746,6 +4796,11 @@ std::string list_runtime_prelude() {
     // compilador deduce T de los elementos, asi que el generador no
     // necesita saber el tipo para construir el literal.
     return
+        // An element as the Value the VM would hold (first()/pop()/...).
+        "inline Value lux_v(int64_t v) { return Value::integer(v); }\n"
+        "inline Value lux_v(double v) { return Value::real(v); }\n"
+        "inline Value lux_v(bool v) { return Value::boolean(v); }\n"
+        "inline Value lux_v(const std::string& v) { return Value::str(v); }\n"
         "template <class T>\n"
         "struct LListBox { long rc; std::vector<T> v; LListBox() : rc(1) {} };\n"
         "template <class T>\n"
@@ -3784,6 +4839,73 @@ std::string list_runtime_prelude() {
         "        b_->v[(size_t)i] = std::move(x);\n"
         "    }\n"
         "    LList lux_add(T x) const { b_->v.push_back(std::move(x)); return *this; }\n"
+        "    const std::vector<T>& lux_items() const { return b_->v; }\n"
+        // The List methods of call_method() (natives.cpp), on the typed
+        // vector: same results, same order (stable_sort with <, the first
+        // of equal minimums), same Value where the VM returns Json.
+        "    bool lux_m_contains(const T& x) const { return lux_m_index_of(x) >= 0; }\n"
+        "    int64_t lux_m_index_of(const T& x) const {\n"
+        "        for (size_t i = 0; i < b_->v.size(); ++i) if (b_->v[i] == x) return (int64_t)i;\n"
+        "        return -1;\n"
+        "    }\n"
+        "    bool lux_m_remove_at(int64_t i) const {\n"
+        "        if (i < 0 || i >= (int64_t)b_->v.size()) return false;\n"
+        "        b_->v.erase(b_->v.begin() + i);\n"
+        "        return true;\n"
+        "    }\n"
+        "    LList lux_m_sort() const { std::stable_sort(b_->v.begin(), b_->v.end()); return *this; }\n"
+        "    LList lux_m_reverse() const { std::reverse(b_->v.begin(), b_->v.end()); return *this; }\n"
+        "    LList lux_m_slice(int64_t a) const { return lux_m_slice(a, (int64_t)b_->v.size()); }\n"
+        "    LList lux_m_slice(int64_t a, int64_t e) const {\n"
+        "        const int64_t n = (int64_t)b_->v.size();\n"
+        "        if (a < 0) a = std::max<int64_t>(0, n + a);\n"
+        "        if (e < 0) e = std::max<int64_t>(0, n + e);\n"
+        "        a = std::min(a, n); e = std::min(e, n); if (e < a) e = a;\n"
+        "        return LList(std::vector<T>(b_->v.begin() + a, b_->v.begin() + e));\n"
+        "    }\n"
+        "    LList lux_m_concat(const LList& o) const {\n"
+        "        std::vector<T> out = b_->v;\n"
+        "        out.insert(out.end(), o.b_->v.begin(), o.b_->v.end());\n"
+        "        return LList(std::move(out));\n"
+        "    }\n"
+        "    std::string lux_m_join(const std::string& sep) const {\n"
+        "        std::string out;\n"
+        "        for (size_t i = 0; i < b_->v.size(); ++i) { if (i) out += sep; out += b_->v[i]; }\n"
+        "        return out;\n"
+        "    }\n"
+        "    LList lux_m_insert(int64_t i, T x) const {\n"
+        "        const int64_t n = (int64_t)b_->v.size();\n"
+        "        if (i < 0) i += n;\n"
+        "        b_->v.insert(b_->v.begin() + std::clamp<int64_t>(i, 0, n), std::move(x));\n"
+        "        return *this;\n"
+        "    }\n"
+        "    Value lux_m_first() const { return b_->v.empty() ? Value::null() : lux_v(b_->v.front()); }\n"
+        "    Value lux_m_last() const { return b_->v.empty() ? Value::null() : lux_v(b_->v.back()); }\n"
+        "    Value lux_m_pop() const {\n"
+        "        if (b_->v.empty()) return Value::null();\n"
+        "        Value r = lux_v(b_->v.back());\n"
+        "        b_->v.pop_back();\n"
+        "        return r;\n"
+        "    }\n"
+        "    Value lux_m_min() const {\n"
+        "        auto it = std::min_element(b_->v.begin(), b_->v.end());\n"
+        "        return it == b_->v.end() ? Value::null() : lux_v(*it);\n"
+        "    }\n"
+        "    Value lux_m_max() const {\n"
+        "        auto it = std::max_element(b_->v.begin(), b_->v.end());\n"
+        "        return it == b_->v.end() ? Value::null() : lux_v(*it);\n"
+        "    }\n"
+        // An empty List sums to the int 0, floats or not, as in the VM.
+        "    Value lux_m_sum() const {\n"
+        "        if constexpr (std::is_same_v<T, double>) {\n"
+        "            if (b_->v.empty()) return Value::integer(0);\n"
+        "            double t = 0; for (double x : b_->v) t += x;\n"
+        "            return Value::real(t + 0.0);\n"
+        "        } else {\n"
+        "            long long t = 0; for (const T& x : b_->v) t += x;\n"
+        "            return Value::integer(t);\n"
+        "        }\n"
+        "    }\n"
         "private:\n"
         "    void rel() { if (b_ && --b_->rc == 0) delete b_; }\n"
         "    LListBox<T>* b_;\n"
@@ -3869,22 +4991,146 @@ std::string route_runtime_prelude() {
         "static decltype(lux_script::NativeCtx::functions) g_lux_functions = nullptr;\n"
         "static decltype(lux_script::NativeCtx::templates) g_lux_templates = nullptr;\n"
         "static const lux_script::AuthConfig* g_lux_auth = nullptr;\n"
-        "static const std::map<std::string, size_t>* g_lux_template_keys = nullptr;\n"
+        "static const std::map<std::string, size_t, std::less<>>* g_lux_template_keys = nullptr;\n"
         "static const void* g_lux_binds = nullptr;\n"
         "extern \"C\" void lux_native_bind(const void* f, const void* t, const void* a, const void* k, const void* b) {\n"
         "    g_lux_binds = b;\n"
         "    g_lux_functions = static_cast<decltype(g_lux_functions)>(f);\n"
         "    g_lux_templates = static_cast<decltype(g_lux_templates)>(t);\n"
         "    g_lux_auth = static_cast<const lux_script::AuthConfig*>(a);\n"
-        "    g_lux_template_keys = static_cast<const std::map<std::string, size_t>*>(k);\n"
+        "    g_lux_template_keys = static_cast<const std::map<std::string, size_t, std::less<>>*>(k);\n"
         "}\n"
         // render(): the template build_routes compiled for this call.
-        "inline Value lux_template(const char* key) {\n"
+        "inline size_t lux_template(const char* key) {\n"
         "    if (g_lux_template_keys) {\n"
         "        auto it = g_lux_template_keys->find(key);\n"
-        "        if (it != g_lux_template_keys->end()) return Value::integer(static_cast<long long>(it->second));\n"
+        "        if (it != g_lux_template_keys->end()) return it->second;\n"
         "    }\n"
         "    lux_native_fail(\"render(): template not compiled\");\n"
+        "}\n"
+        // generate_native_template: a field of a Dict in place (null if it is
+        // not there), or nullptr when the VM has to say why it cannot be read.
+        "static const Value lux_tpl_none;\n"
+        // `hint`: where this {{ }} found its key last time -- rows built from
+        // one literal keep their keys in the same order. The key's length is
+        // a constant, so the compare is a couple of loads, not a memcmp call.
+        "template <size_t N>\n"
+        "inline const Value* lux_tpl_field(const Value* v, const char (&k)[N], size_t& hint) {\n"
+        "    if (!v || !v->is_dict()) return nullptr;\n"
+        "    const auto& d = v->as_dict();\n"
+        "    if (hint < d.size()) {\n"
+        "        const auto& p = *(d.begin() + hint);\n"
+        "        if (p.first.size() == N - 1 && std::memcmp(p.first.data(), k, N - 1) == 0) return &p.second;\n"
+        "    }\n"
+        "    auto it = d.find(std::string_view(k, N - 1));\n"
+        "    if (it == d.end()) return &lux_tpl_none;\n"
+        "    hint = static_cast<size_t>(it - d.begin());\n"
+        "    return &it->second;\n"
+        "}\n"
+        // A template's output: a cursor into a string opened to its capacity
+        // (resize_and_overwrite: no zero fill), so a piece of text is a
+        // bounds check and a memcpy of a constant size -- inlined -- instead
+        // of a call to std::string::append.
+        "struct LuxOut {\n"
+        "    std::string s; char* w; char* e;\n"
+        "    explicit LuxOut(size_t n) { open(0, n < 512 ? 512 : n); }\n"
+        "    void open(size_t used, size_t cap) {\n"
+        "        s.resize_and_overwrite(cap, [](char*, size_t k) { return k; });\n"
+        "        w = s.data() + used; e = s.data() + s.size();\n"
+        "    }\n"
+        "    [[gnu::noinline]] void grow(size_t n) { const size_t u = w - s.data(); open(u, std::max(s.size() * 2, u + n)); }\n"
+        "    void need(size_t n) { if (static_cast<size_t>(e - w) < n) grow(n); }\n"
+        "    void lit(const char* p, size_t n) { need(n); std::memcpy(w, p, n); w += n; }\n"
+        "    void num(long long i) { need(20); w = std::to_chars(w, w + 20, i).ptr; }\n"
+        "    void esc(const std::string& x) {\n"
+        "        static constexpr const char* kEnt[] = {nullptr, \"&amp;\", \"&lt;\", \"&gt;\", \"&quot;\", \"&#39;\"};\n"
+        "        static constexpr unsigned char kLen[] = {0, 5, 4, 4, 6, 5};\n"
+        "        static constexpr auto kWhich = [] {\n"
+        "            std::array<unsigned char, 256> t{};\n"
+        "            t['&'] = 1; t['<'] = 2; t['>'] = 3; t['\"'] = 4; t['\\''] = 5;\n"
+        "            return t;\n"
+        "        }();\n"
+        "        const char* p = x.data(); const size_t n = x.size();\n"
+        "        need(n);\n"
+        "        size_t clean = 0;\n"
+        "        for (size_t i = 0; i < n; ++i) {\n"
+        "            const unsigned char c = kWhich[static_cast<unsigned char>(p[i])];\n"
+        "            if (!c) continue;\n"
+        "            std::memcpy(w, p + clean, i - clean); w += i - clean;\n"
+        "            need(6 + n - i);\n"
+        "            std::memcpy(w, kEnt[c], kLen[c]); w += kLen[c];\n"
+        "            clean = i + 1;\n"
+        "        }\n"
+        "        std::memcpy(w, p + clean, n - clean); w += n - clean;\n"
+        "    }\n"
+        // Floats, bools, null, containers: rare in a page, the VM's own writer.
+        "    [[gnu::noinline]] void other(const Value& v, bool escape) {\n"
+        "        s.resize(w - s.data());\n"
+        "        lux_script::write_template_value(v, escape, s);\n"
+        "        const size_t n = s.size();\n"
+        "        open(n, std::max(s.capacity(), n + 256));\n"
+        "    }\n"
+        "    std::string done() { s.resize(w - s.data()); return std::move(s); }\n"
+        "};\n"
+        "inline void lux_tpl_write(const Value& v, bool escape, LuxOut& out) {\n"
+        "    if (v.is_str()) { if (escape) out.esc(v.as_str()); else out.lit(v.as_str().data(), v.as_str().size()); }\n"
+        "    else if (v.is_int()) out.num(v.as_int());\n"
+        "    else out.other(v, escape);\n"
+        "}\n"
+        // A template expression compiled to C++ (tpl_expr): the VM's ops,
+        // same results, same messages.
+        "[[noreturn]] inline void lux_tpl_no_field(const Value& o, const char* k) {\n"
+        "    lux_native_fail(std::string(\"'\") + k + \"' on \" + o.type_name() + \", which has no fields\");\n"
+        "}\n"
+        "inline Value lux_tpl_add(const Value& a, const Value& b) {\n"
+        "    Value r; std::string e;\n"
+        "    if (!lux_script::add_values(a, b, r, e)) lux_native_fail(std::move(e));\n"
+        "    return r;\n"
+        "}\n"
+        "inline Value lux_tpl_concat(std::initializer_list<const Value*> vs) {\n"
+        "    size_t n = 0;\n"
+        "    for (const Value* v : vs) { if (!v->is_str()) goto fold; n += v->as_str().size(); }\n"
+        "    { std::string s; s.reserve(n); for (const Value* v : vs) s += v->as_str(); return Value::str(std::move(s)); }\n"
+        "fold:\n"
+        "    Value acc = **vs.begin();\n"
+        "    for (auto it = vs.begin() + 1; it != vs.end(); ++it) acc = lux_tpl_add(acc, **it);\n"
+        "    return acc;\n"
+        "}\n"
+        // op: 0 <, 1 <=, 2 >, 3 >= -- Value::less_than, as the VM derives them.
+        "inline Value lux_tpl_cmp(const Value& a, const Value& b, int op) {\n"
+        "    bool ok = false, r;\n"
+        "    switch (op) {\n"
+        "        case 0:  r = a.less_than(b, ok); break;\n"
+        "        case 1:  r = b.less_than(a, ok); r = ok && !r; break;\n"
+        "        case 2:  r = b.less_than(a, ok); break;\n"
+        "        default: r = a.less_than(b, ok); r = ok && !r; break;\n"
+        "    }\n"
+        "    if (!ok) lux_native_fail(std::string(\"cannot compare \") + a.type_name() + \" and \" + b.type_name());\n"
+        "    return Value::boolean(r);\n"
+        "}\n"
+        "inline Value lux_tpl_neg(const Value& a) {\n"
+        "    if (a.is_int()) return Value::integer(-a.as_int());\n"
+        "    if (a.is_float()) return Value::real(-a.as_float());\n"
+        "    lux_native_fail(std::string(\"cannot negate \") + a.type_name());\n"
+        "}\n"
+        "inline Value lux_tpl_method(lux_script::NativeCtx& c, const Value& recv, const std::string& name, std::vector<Value> args) {\n"
+        "    Value r = recv; std::string e;\n"
+        "    Value v = lux_script::call_method(c, r, name, args, e);\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    return v;\n"
+        "}\n"
+        "inline Value lux_tpl_module(lux_script::NativeCtx& c, int id, std::vector<Value> args) {\n"
+        "    std::string e;\n"
+        "    Value v = lux_script::builtin_module_function_at(id).call(c, args, e);\n"
+        "    if (!e.empty()) lux_native_fail(std::move(e));\n"
+        "    return v;\n"
+        "}\n"
+        "template <size_t N>\n"
+        "inline const Value& lux_tpl_eval(lux_script::NativeCtx& c, size_t tpl, uint32_t k,\n"
+        "                                 const Value (&s)[N], Value& tmp) {\n"
+        "    std::string e;\n"
+        "    if (!lux_script::eval_template_expr(c, tpl, k, std::vector<Value>(s, s + N), tmp, e)) lux_native_fail(std::move(e));\n"
+        "    return tmp;\n"
         "}\n"
         "inline lux_script::NativeCtx lux_route_ctx(lux::Request& req, lux::Response& res) {\n"
         "    lux_script::NativeCtx c{req, res};\n"
@@ -3944,15 +5190,26 @@ std::string route_runtime_prelude() {
         // ICE) one of them may co_await.
         "struct LuxL {\n"
         "    Value::List l;\n"
+        "    LuxL() = default;\n"
+        "    explicit LuxL(size_t n) { l.reserve(n); }\n"
         "    LuxL&& add(Value v) && { l.push_back(std::move(v)); return std::move(*this); }\n"
         "    Value done() && { return Value::list(std::move(l)); }\n"
         "    Value::List items() && { return std::move(l); }\n"
         "};\n"
         "struct LuxD {\n"
         "    Value::Dict d;\n"
-        "    LuxD&& add(const std::string& k, Value v) && { d[k] = std::move(v); return std::move(*this); }\n"
+        "    LuxD() = default;\n"
+        "    explicit LuxD(size_t n) { d.reserve(n); }\n"
+        "    LuxD&& add(std::string k, Value v) && { d.set(std::move(k), std::move(v)); return std::move(*this); }\n"
+        "    LuxD&& add_new(std::string k, Value v) && { d.append(std::move(k), std::move(v)); return std::move(*this); }\n"
         "    Value done() && { return Value::dict(std::move(d)); }\n"
         "};\n"
+        // A record's field into its JSON (FormaRegistro::texto): the bytes
+        // Value::write_json writes for the same value.
+        "inline void lux_rec_put(std::string& o, int64_t v) { char b[24]; o.append(b, std::to_chars(b, b + sizeof b, v).ptr); }\n"
+        "inline void lux_rec_put(std::string& o, double v) { lux_script::json_double(v, o); }\n"
+        "inline void lux_rec_put(std::string& o, bool v) { o += v ? \"true\" : \"false\"; }\n"
+        "inline void lux_rec_put(std::string& o, const std::string& v) { lux_script::json_string(v, o); }\n"
         // Op::GetMember.
         "inline Value lux_json_member(const Value& o, const char* name) {\n"
         "    if (!o.is_dict()) lux_native_fail(std::string(\"'\") + name + \"' on \" + o.type_name() + \", which has no fields\");\n"

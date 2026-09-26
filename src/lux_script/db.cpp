@@ -264,7 +264,12 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
                 if (!driver->last_insert_id(worker, n, err)) { errmsg = err; return; }
                 result = Value::integer(n);
             } else {
-                const char* stmt = (op == DbOp::Begin)  ? "BEGIN"
+                // SQLite: IMMEDIATE takes the write lock up front. A plain
+                // (deferred) BEGIN that reads and then writes fails outright
+                // with SQLITE_BUSY when another one did the same -- no
+                // busy_timeout wait can resolve two readers both wanting to
+                // write -- so read-then-update transactions broke under load.
+                const char* stmt = (op == DbOp::Begin)  ? (module == "sqlite" ? "BEGIN IMMEDIATE" : "BEGIN")
                                   : (op == DbOp::Commit) ? "COMMIT" : "ROLLBACK";
                 if (!driver->exec(worker, stmt, {}, n, err)) { errmsg = err; return; }
                 result = Value::boolean(true);

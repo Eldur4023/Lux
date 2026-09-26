@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <atomic>
 #include <memory>
+#include <mutex>
+#include <vector>
 #include <lux/core/event_loop.hpp>
 #include "../../include/lux/types.hpp"
 
@@ -10,6 +12,12 @@ namespace lux::core {
 
 class TcpServer {
 public:
+    // Every thread's server, so an accept can go to whichever holds the
+    // fewest connections: SO_REUSEPORT hashes them, and 50 keep-alive
+    // connections over 8 threads came out 11/9/6/6/5/5/5/3 -- the 11's
+    // requests waited twice as long, which was the whole p99.
+    struct Group { std::mutex m; std::vector<TcpServer*> servers; };
+
     // max_connections: maximum simultaneous open connections (default 10 000).
     // Excess connections are immediately closed with 503.
     //
@@ -19,7 +27,8 @@ public:
     TcpServer(const std::string& host, uint16_t port,
               EventLoop& loop, lux::DispatchFn dispatch,
               int max_connections = 10'000,
-              std::shared_ptr<std::atomic<int>> conn_count = nullptr);
+              std::shared_ptr<std::atomic<int>> conn_count = nullptr,
+              std::shared_ptr<Group> group = nullptr);
     ~TcpServer();
 
     // Stop accepting new connections without shutting down the event loop.
@@ -50,7 +59,12 @@ private:
     // the counter on close without holding a pointer back to TcpServer.
     std::shared_ptr<std::atomic<int>> conn_count_;
 
+    std::shared_ptr<Group>            group_;
+    // This loop's open connections (the HttpConnection lowers it on close).
+    std::shared_ptr<std::atomic<int>> live_ = std::make_shared<std::atomic<int>>(0);
+
     void on_accept();
+    void adopt(int client_fd);
     void register_listen_fd();
 };
 

@@ -80,6 +80,31 @@ Recycler<N>& recycler() {
     return r;
 }
 
+// std::allocator, except that arrays up to kSmall bytes come from the
+// thread's recycler: a Dict's pairs (3 keys: 144 bytes) are allocated and
+// freed once per row built, and glibc keeps only 7 blocks of a size per
+// thread before its slower paths -- a page of 50 rows went through them.
+template <class T>
+struct SmallAlloc {
+    using value_type = T;
+    static constexpr size_t kSmall = 192;
+    SmallAlloc() = default;
+    template <class U> SmallAlloc(const SmallAlloc<U>&) noexcept {}
+    T* allocate(size_t n) {
+#ifndef LUX_NO_RECYCLER
+        if (n * sizeof(T) <= kSmall) return static_cast<T*>(recycler<kSmall>().take());
+#endif
+        return static_cast<T*>(::operator new(n * sizeof(T)));
+    }
+    void deallocate(T* p, size_t n) noexcept {
+#ifndef LUX_NO_RECYCLER
+        if (n * sizeof(T) <= kSmall) { recycler<kSmall>().give_back(p); return; }
+#endif
+        ::operator delete(p);
+    }
+    template <class U> bool operator==(const SmallAlloc<U>&) const noexcept { return true; }
+};
+
 }  // namespace detail
 
 // Runtime value of the VM.
@@ -118,8 +143,9 @@ public:
     class Dict {
     public:
         using Pair           = std::pair<std::string, Value>;
-        using iterator       = std::vector<Pair>::iterator;
-        using const_iterator = std::vector<Pair>::const_iterator;
+        using Pairs          = std::vector<Pair, detail::SmallAlloc<Pair>>;
+        using iterator       = Pairs::iterator;
+        using const_iterator = Pairs::const_iterator;
 
         iterator       begin()       { return v_.begin(); }
         iterator       end()         { return v_.end();   }
@@ -128,7 +154,7 @@ public:
 
         size_t size()  const { return v_.size();  }
         bool   empty() const { return v_.empty(); }
-        void   clear()       { v_.clear(); idx_.clear(); }
+        void   clear()       { v_.clear(); idx_.reset(); }
 
         // Whoever knows how many keys they will insert —the VM's MakeDict has
         // them counted— keeps the vector from growing in steps: without this a
@@ -146,13 +172,17 @@ public:
             auto it = find(k);
             if (it == v_.end()) return false;
             v_.erase(it);
-            if (!idx_.empty()) build_index();
+            if (idx_) build_index();
             return true;
         }
 
         iterator       find(std::string_view k);
         const_iterator find(std::string_view k) const;
         Value&         operator[](std::string_view k);
+        // operator[] = v, keeping a key the caller already built.
+        void           set(std::string&& k, Value v);
+        // set() for a key known not to be there yet.
+        void           append(std::string&& k, Value v);
 
     private:
         // Heterogeneous lookup: without it, every find with a const char* or a
@@ -176,8 +206,22 @@ public:
 
         void build_index();
 
-        std::vector<Pair>                                    v_;
-        std::unordered_map<std::string, size_t, Hash, Equal> idx_;
+        Pairs                                                v_;
+        // Allocated only past the threshold: an empty hash map inline cost
+        // every small Dict (almost all of them) its construction, move and
+        // destruction.
+        using Index = std::unordered_map<std::string, size_t, Hash, Equal>;
+        std::unique_ptr<Index> idx_;
+
+    public:
+        Dict() = default;
+        Dict(Dict&&) noexcept = default;
+        Dict& operator=(Dict&&) noexcept = default;
+        Dict(const Dict& o) : v_(o.v_), idx_(o.idx_ ? std::make_unique<Index>(*o.idx_) : nullptr) {}
+        Dict& operator=(const Dict& o) {
+            if (this != &o) { v_ = o.v_; idx_ = o.idx_ ? std::make_unique<Index>(*o.idx_) : nullptr; }
+            return *this;
+        }
     };
 
     Value() = default;
@@ -212,6 +256,15 @@ public:
 
     static Value str(std::string s) {
         Value v; v.type_ = Type::Str;  v.o_ = new_box<CStr>(std::move(s));  return v;
+    }
+    // A string that is never freed and whose count is never touched: a
+    // literal --native builds once and every thread copies. Copying it
+    // reads the box's count, never writes it, so the cores do not fight
+    // over that cache line.
+    static Value immortal_str(std::string s) {
+        Value v = str(std::move(s));
+        v.o_->rc.store(kImmortal, std::memory_order_relaxed);
+        return v;
     }
     static Value list(List l = {}) {
         Value v; v.type_ = Type::List; v.o_ = new_box<CList>(std::move(l)); return v;
@@ -295,6 +348,7 @@ private:
     // database pool thread and be consumed on the event loop one: the handover
     // is synchronized, but the box can stay shared between the two.
     struct Box { std::atomic<unsigned> rc{1}; };
+    static constexpr unsigned kImmortal = 1u << 31;
     template <typename T>
     struct BoxOf : Box { T v; explicit BoxOf(T x) : v(std::move(x)) {} };
 
@@ -331,11 +385,16 @@ private:
     }
     void copy_payload(const Value& o) { std::memcpy(&i_, &o.i_, sizeof(i_)); }
     void retain() const {
-        if (on_heap()) o_->rc.fetch_add(1, std::memory_order_relaxed);
+        if (on_heap() && !(o_->rc.load(std::memory_order_relaxed) & kImmortal))
+            o_->rc.fetch_add(1, std::memory_order_relaxed);
     }
     void release() {
         if (!on_heap()) return;
-        if (o_->rc.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+        // rc == 1: no other owner exists to race with, so the last release
+        // (most of them: a row, its strings) skips the locked decrement.
+        const unsigned rc = o_->rc.load(std::memory_order_acquire);
+        if (rc & kImmortal) return;
+        if (rc != 1 && o_->rc.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
         switch (type_) {
             case Type::Str:  release_box<CStr>();  break;
             case Type::List: release_box<CList>(); break;
@@ -357,9 +416,10 @@ private:
 // Outside the class because they need Value to be complete.
 
 inline void Value::Dict::build_index() {
-    idx_.clear();
-    idx_.reserve(v_.size() * 2);
-    for (size_t i = 0; i < v_.size(); ++i) idx_.emplace(v_[i].first, i);
+    if (!idx_) idx_ = std::make_unique<Index>();
+    idx_->clear();
+    idx_->reserve(v_.size() * 2);
+    for (size_t i = 0; i < v_.size(); ++i) idx_->emplace(v_[i].first, i);
 }
 
 inline Value::Dict::iterator Value::Dict::find(std::string_view k) {
@@ -367,9 +427,9 @@ inline Value::Dict::iterator Value::Dict::find(std::string_view k) {
 }
 
 inline Value::Dict::const_iterator Value::Dict::find(std::string_view k) const {
-    if (!idx_.empty()) {
-        auto it = idx_.find(k);
-        return it == idx_.end() ? v_.end()
+    if (idx_) {
+        auto it = idx_->find(k);
+        return it == idx_->end() ? v_.end()
                                 : v_.begin() + static_cast<std::ptrdiff_t>(it->second);
     }
     for (auto it = v_.begin(); it != v_.end(); ++it)
@@ -377,11 +437,22 @@ inline Value::Dict::const_iterator Value::Dict::find(std::string_view k) const {
     return v_.end();
 }
 
+inline void Value::Dict::set(std::string&& k, Value v) {
+    if (auto it = find(k); it != v_.end()) { it->second = std::move(v); return; }
+    append(std::move(k), std::move(v));
+}
+
+inline void Value::Dict::append(std::string&& k, Value v) {
+    v_.emplace_back(std::move(k), std::move(v));
+    if (idx_)                     idx_->emplace(v_.back().first, v_.size() - 1);
+    else if (v_.size() > kIndexThreshold) build_index();
+}
+
 inline Value& Value::Dict::operator[](std::string_view k) {
     if (auto it = find(k); it != v_.end()) return it->second;
 
     v_.emplace_back(std::string(k), Value());
-    if (!idx_.empty())            idx_.emplace(v_.back().first, v_.size() - 1);
+    if (idx_)                     idx_->emplace(v_.back().first, v_.size() - 1);
     else if (v_.size() > kIndexThreshold) build_index();
     return v_.back().second;
 }
@@ -437,11 +508,13 @@ inline std::string trim_ascii_ws(const std::string& s) {
 // Counts codepoints, not bytes: a UTF-8 continuation byte always has its top
 // two bits as `10`, so skipping those and counting everything else counts
 // exactly one unit per codepoint regardless of how many bytes it takes.
-inline size_t utf8_length(const std::string& s) {
-    size_t n = 0;
-    for (unsigned char c : s) if ((c & 0xC0) != 0x80) ++n;
-    return n;
-}
+// Out of line: value.cpp builds it for AVX2 and for plain x86-64 and picks
+// one when the binary loads.
+size_t utf8_length(const std::string& s);
+
+// Value::write_json()'s writers for a string (quoted, escaped) and a float.
+void json_string(const std::string& in, std::string& out);
+void json_double(double d, std::string& out);
 
 // Decodes the codepoint starting at s[i] and advances i past it. Malformed
 // input (a truncated multi-byte sequence, a continuation byte with no

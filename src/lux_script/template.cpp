@@ -5,7 +5,12 @@
 #include <lux_script/parser.hpp>
 #include <lux_script/vm.hpp>
 
+#include <array>
+#include <charconv>
+#include <deque>
 #include <map>
+#include <mutex>
+#include <unordered_map>
 #include <memory>
 #include <filesystem>
 #include <fstream>
@@ -13,24 +18,31 @@
 namespace lux_script {
 
 void escape_html(const std::string& in, std::string& out) {
-    // What must not be touched is copied in one go, as in the JSON escaping:
-    // the text of a page almost never carries metacharacters.
+    // The characters that need it, looked up rather than switched on: a
+    // page's text almost never has one, and what is between them is copied
+    // in one go, as in the JSON escaping.
+    static constexpr auto kNeeds = [] {
+        std::array<bool, 256> t{};
+        for (unsigned char c : {'&', '<', '>', '"', '\''}) t[c] = true;
+        return t;
+    }();
+    const char* p = in.data();
+    const size_t n = in.size();
     size_t clean = 0;
-    for (size_t i = 0; i < in.size(); ++i) {
-        const char* rep = nullptr;
-        switch (in[i]) {
-            case '&':  rep = "&amp;";  break;
-            case '<':  rep = "&lt;";   break;
-            case '>':  rep = "&gt;";   break;
-            case '"':  rep = "&quot;"; break;
-            case '\'': rep = "&#39;";  break;
-            default: continue;
+    for (size_t i = 0; i < n; ++i) {
+        const unsigned char c = static_cast<unsigned char>(p[i]);
+        if (!kNeeds[c]) continue;
+        out.append(p + clean, i - clean);
+        switch (c) {
+            case '&':  out += "&amp;";  break;
+            case '<':  out += "&lt;";   break;
+            case '>':  out += "&gt;";   break;
+            case '"':  out += "&quot;"; break;
+            default:   out += "&#39;";  break;
         }
-        out.append(in, clean, i - clean);
-        out += rep;
         clean = i + 1;
     }
-    out.append(in, clean, in.size() - clean);
+    out.append(p + clean, n - clean);
 }
 
 namespace {
@@ -133,11 +145,17 @@ private:
         diags_.error(loc, std::move(msg));
     }
 
-    const std::string* intern_file_name(const std::string& f) {
-        for (const auto& sf : files_)
-            if (sf->path == f && sf->text.empty()) return &sf->path;
-        files_.push_back(std::make_unique<SourceFile>(SourceFile{f, {}}));
-        return &files_.back()->path;
+    // The diagnostics outlive this Compiler (main prints them once
+    // compile_template has returned), so the file names they point at live
+    // for the whole process: one per template file. Kept in files_, a
+    // template error printed freed memory, or crashed.
+    static const std::string* intern_file_name(const std::string& f) {
+        static std::mutex m;
+        static std::deque<std::string> names;   // a deque: addresses stay put
+        std::lock_guard<std::mutex> lk(m);
+        for (const auto& n : names)
+            if (n == f) return &n;
+        return &names.emplace_back(f);
     }
 
     size_t text(std::string t) {
@@ -447,8 +465,19 @@ void Compiler::body(const std::string& src, const std::string& file,
             }
             Open ob = std::move(open_.back());
             open_.pop_back();
+            auto& start_instr = out_.code[ob.start];
+            // The loop's own names go out of scope: renamed, not left beside
+            // the names they shadowed once those come back, which declared
+            // `loop` (or the variable) twice for anything after a nested loop.
+            out_.names[start_instr.slot].name      = " ended" + std::to_string(start_instr.slot);
+            out_.names[start_instr.slot_loop].name = " ended" + std::to_string(start_instr.slot_loop);
             for (const auto& [idx, old_name] : ob.shadowed) out_.names[idx].name = old_name;
-            const auto& start_instr = out_.code[ob.start];
+            // `loop` is a Dict built on every pass: only if the body reads it.
+            bool uses_loop = false;
+            for (size_t e = start_instr.a + 1; e < out_.exprs.size() && !uses_loop; ++e)
+                for (const auto& ins : out_.exprs[e].code)
+                    if (ins.op == Op::LoadLocal && ins.operand == start_instr.slot_loop) { uses_loop = true; break; }
+            if (!uses_loop) start_instr.slot_loop = kNoLoop;
             out_.code.push_back({Template::Op::LoopNext, 0,
                                  static_cast<uint32_t>(ob.start + 1),
                                  start_instr.slot, start_instr.slot_loop, loc});
@@ -521,6 +550,47 @@ bool compile_template(const std::string& source, const std::string& file,
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
+void write_template_value(const Value& v, bool escape, std::string& out) {
+    if (v.is_str()) {
+        if (escape) escape_html(v.as_str(), out);
+        else        out += v.as_str();
+    } else if (v.is_int()) {   // digits: nothing to escape
+        char buf[24];
+        out.append(buf, std::to_chars(buf, buf + sizeof buf, v.as_int()).ptr);
+    } else if (escape) {
+        escape_html(v.to_string(), out);
+    } else {
+        out += v.to_string();
+    }
+}
+
+Value template_loop_value(size_t i, size_t n) {
+    Value::Dict d;
+    d.reserve(5);
+    d["index"]  = Value::integer(static_cast<long long>(i + 1));
+    d["index0"] = Value::integer(static_cast<long long>(i));
+    d["first"]  = Value::boolean(i == 0);
+    d["last"]   = Value::boolean(i + 1 == n);
+    d["length"] = Value::integer(static_cast<long long>(n));
+    return Value::dict(std::move(d));
+}
+
+bool eval_template_expr(NativeCtx& ctx, size_t tpl, uint32_t k, const std::vector<Value>& slots,
+                        Value& out, std::string& error) {
+    if (!ctx.templates || tpl >= ctx.templates->size()) {
+        error = "render(): template not compiled";
+        return false;
+    }
+    thread_local VM vm;
+    VM::Result r = vm.start((*ctx.templates)[tpl].exprs[k], slots, ctx, ctx.functions);
+    if (r.status != VM::Status::Done) {
+        error = r.error;
+        return false;
+    }
+    out = std::move(r.value);
+    return true;
+}
+
 bool render_template(const Template& p, std::vector<Value> values,
                       NativeCtx& ctx, const FunctionTable* fns,
                       std::string& out, std::string& error) {
@@ -530,31 +600,56 @@ bool render_template(const Template& p, std::vector<Value> values,
 
     // Each loop's list is kept alive for as long as it lasts: the item of every
     // pass comes out of it.
-    struct Frame { std::shared_ptr<Value> list_; size_t i; };
+    struct Frame { Value list_; size_t i; };
     std::vector<Frame> loops;
 
     thread_local VM vm;
 
-    auto evaluate = [&](uint32_t idx, Value& out) -> bool {
+    // Sized once for what this template came to last time: a page grew the
+    // string through a dozen reallocations and copies otherwise.
+    thread_local std::unordered_map<const Template*, size_t> last_size;
+    size_t& hint = last_size[&p];
+    out.reserve(out.size() + hint + hint / 8);
+
+    // {{ x }} and {{ x.a.b }} -- most of a page -- read straight from the
+    // slots, without starting the VM for each. Anything else, and anything
+    // that would fail (a field of a non-Dict), goes through the VM, so the
+    // result and the error are the VM's own.
+    static const Value kNull;
+    auto direct = [&](const Chunk& c) -> const Value* {
+        const auto& code = c.code;
+        if (code.size() < 2 || code.front().op != Op::LoadLocal || code.back().op != Op::Return ||
+            code.front().operand >= values.size()) return nullptr;
+        const Value* v = &values[code.front().operand];
+        for (size_t i = 1; i + 1 < code.size(); ++i) {
+            if (code[i].op != Op::GetMember || !v->is_dict()) return nullptr;
+            const auto& d  = v->as_dict();
+            const auto  it = d.find(c.constants[code[i].operand].as_str());
+            v = it == d.end() ? &kNull : &it->second;
+        }
+        return v;
+    };
+
+    // The value, read in place when direct() can, else computed into `tmp`;
+    // null on an error.
+    auto evaluate = [&](uint32_t idx, Value& tmp) -> const Value* {
+        if (const Value* v = direct(p.exprs[idx])) return v;
         VM::Result r = vm.start(p.exprs[idx], values, ctx, fns);
         if (r.status != VM::Status::Done) {
             error = r.error;
-            return false;
+            return nullptr;
         }
-        out = std::move(r.value);
-        return true;
+        tmp = std::move(r.value);
+        return &tmp;
     };
 
     auto set_loop = [&](uint32_t slot_loop, size_t i, size_t n) {
-        Value::Dict d;
-        d.reserve(5);
-        d["index"]  = Value::integer(static_cast<long long>(i + 1));
-        d["index0"] = Value::integer(static_cast<long long>(i));
-        d["first"]  = Value::boolean(i == 0);
-        d["last"]   = Value::boolean(i + 1 == n);
-        d["length"] = Value::integer(static_cast<long long>(n));
-        values[slot_loop] = Value::dict(std::move(d));
+        if (slot_loop != kNoLoop) values[slot_loop] = template_loop_value(i, n);
     };
+
+    const size_t start = out.size();
+    struct Remember { std::string& out; size_t start; size_t& hint; ~Remember() { hint = out.size() - start; } }
+        remember{out, start, hint};
 
     size_t pc = 0;
     while (pc < p.code.size()) {
@@ -566,23 +661,26 @@ bool render_template(const Template& p, std::vector<Value> values,
                 break;
 
             case Template::Op::Write: {
-                Value v;
-                if (!evaluate(in.a, v)) return false;
-                escape_html(v.to_string(), out);
+                Value tmp;
+                const Value* v = evaluate(in.a, tmp);
+                if (!v) return false;
+                write_template_value(*v, true, out);
                 ++pc;
                 break;
             }
             case Template::Op::WriteRaw: {
-                Value v;
-                if (!evaluate(in.a, v)) return false;
-                out += v.to_string();
+                Value tmp;
+                const Value* v = evaluate(in.a, tmp);
+                if (!v) return false;
+                write_template_value(*v, false, out);
                 ++pc;
                 break;
             }
             case Template::Op::JumpIfFalse: {
-                Value v;
-                if (!evaluate(in.a, v)) return false;
-                pc = v.truthy() ? pc + 1 : in.b;
+                Value tmp;
+                const Value* v = evaluate(in.a, tmp);
+                if (!v) return false;
+                pc = v->truthy() ? pc + 1 : in.b;
                 break;
             }
             case Template::Op::Jump:
@@ -590,24 +688,25 @@ bool render_template(const Template& p, std::vector<Value> values,
                 break;
 
             case Template::Op::LoopStart: {
-                Value v;
-                if (!evaluate(in.a, v)) return false;
-                if (!v.is_list()) {
+                Value tmp;
+                const Value* v = evaluate(in.a, tmp);
+                if (!v) return false;
+                if (!v->is_list()) {
                     error = std::string("{% for %} needs a list, not ") +
-                            v.type_name();
+                            v->type_name();
                     return false;
                 }
-                auto list_ = std::make_shared<Value>(std::move(v));
-                if (list_->as_list().empty()) { pc = in.b; break; }
-                loops.push_back({list_, 0});
-                values[in.slot] = list_->as_list()[0];
-                set_loop(in.slot_loop, 0, list_->as_list().size());
+                if (v->as_list().empty()) { pc = in.b; break; }
+                loops.push_back({*v, 0});
+                const auto& l = loops.back().list_.as_list();
+                values[in.slot] = l[0];
+                set_loop(in.slot_loop, 0, l.size());
                 ++pc;
                 break;
             }
             case Template::Op::LoopNext: {
                 Frame& m = loops.back();
-                const auto& l = m.list_->as_list();
+                const auto& l = m.list_.as_list();
                 if (++m.i < l.size()) {
                     values[in.slot] = l[m.i];
                     set_loop(in.slot_loop, m.i, l.size());

@@ -1,3 +1,6 @@
+#ifdef __x86_64__
+#include <immintrin.h>
+#endif
 #include <charconv>
 #include <cstdint>
 #include <cstdio>
@@ -253,6 +256,11 @@ void write_double(double d, std::string& out) {
 
 } // namespace
 
+// write_json()'s own string and float writers, for --native's records
+// (native_gen.cpp): their JSON has to be these very bytes.
+void json_string(const std::string& in, std::string& out) { escape_json(in, out); }
+void json_double(double d, std::string& out) { write_double(d, out); }
+
 void Value::write_json(std::string& out) const {
     switch (type_) {
         case Type::Null:  out += "null";                   return;
@@ -345,5 +353,71 @@ bool Value::less_than(const Value& o, bool& ok) const {
     return false;
 }
 
+
+
+// ─── utf8_length ─────────────────────────────────────────────────────────────
+
+static size_t utf8_length_base(const std::string& s) {
+    // Eight bytes a step: a continuation byte has bit 7 set and bit 6 clear;
+    // (w << 1) lines each byte's bit 6 up under its bit 7, and the multiply
+    // sums the per-byte flags into the top byte. Byte at a time, len() of a
+    // file read into a string was most of what its route cost.
+    constexpr uint64_t kHigh = 0x8080808080808080ULL, kOnes = 0x0101010101010101ULL;
+    const char* p = s.data();
+    size_t n = s.size(), i = 0, cont = 0;
+#ifdef __SSE2__
+    // Sixteen at a time where SSE2 is there (every x86-64): as signed bytes,
+    // continuations are exactly the ones below -64. Each compare adds 1 per
+    // match to a byte counter, summed (sad) before a counter can wrap.
+    const __m128i below = _mm_set1_epi8(-64), zero = _mm_setzero_si128();
+    while (i + 16 <= n) {
+        __m128i acc = zero;
+        for (int k = 0; k < 255 && i + 16 <= n; ++k, i += 16) {
+            const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+            acc = _mm_sub_epi8(acc, _mm_cmplt_epi8(v, below));
+        }
+        const __m128i sums = _mm_sad_epu8(acc, zero);
+        cont += static_cast<size_t>(_mm_cvtsi128_si64(sums)) + static_cast<size_t>(_mm_extract_epi16(sums, 4));
+    }
+#endif
+    for (; i + 8 <= n; i += 8) {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        cont += (((w & ~(w << 1)) & kHigh) >> 7) * kOnes >> 56;
+    }
+    for (; i < n; ++i) cont += (static_cast<unsigned char>(p[i]) & 0xC0) == 0x80;
+    return n - cont;
+}
+
+#ifdef __x86_64__
+// The same count, 32 bytes a step.
+__attribute__((target("avx2")))
+static size_t utf8_length_avx2(const std::string& s) {
+    const char* p = s.data();
+    const size_t n = s.size();
+    size_t i = 0, cont = 0;
+    const __m256i below = _mm256_set1_epi8(-64), zero = _mm256_setzero_si256();
+    while (i + 32 <= n) {
+        __m256i acc = zero;
+        for (int k = 0; k < 255 && i + 32 <= n; ++k, i += 32) {
+            const __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
+            acc = _mm256_sub_epi8(acc, _mm256_cmpgt_epi8(below, v));
+        }
+        const __m256i sums = _mm256_sad_epu8(acc, zero);
+        cont += static_cast<size_t>(_mm256_extract_epi64(sums, 0) + _mm256_extract_epi64(sums, 1) +
+                                    _mm256_extract_epi64(sums, 2) + _mm256_extract_epi64(sums, 3));
+    }
+    for (; i < n; ++i) cont += (static_cast<unsigned char>(p[i]) & 0xC0) == 0x80;
+    return n - cont;
+}
+#endif
+
+size_t utf8_length(const std::string& s) {
+#ifdef __x86_64__
+    static const bool avx2 = __builtin_cpu_supports("avx2");
+    if (avx2) return utf8_length_avx2(s);
+#endif
+    return utf8_length_base(s);
+}
 
 } // namespace lux_script

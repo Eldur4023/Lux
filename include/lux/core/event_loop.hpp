@@ -56,7 +56,9 @@ private:
     std::unordered_map<int, Callback> callbacks_;
     std::vector<decltype(callbacks_)::node_type> graveyard_;   // removed mid-dispatch, freed after it
     std::vector<std::function<void()>> task_queue_;
+    std::vector<std::function<void()>> running_tasks_;   // swapped with task_queue_: both keep their capacity
     std::mutex queue_mutex_;
+    std::atomic<bool> has_tasks_{false};   // lets process_tasks() skip the lock when idle
 };
 
 } // namespace lux::core

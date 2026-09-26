@@ -268,6 +268,33 @@ get endpoint("/range_for_loop"):
 get endpoint("/range_bad_step"):
     return { "r": range(0, 5, 0) }
 
+# --native turns these into a counter loop instead of a List: the same
+# bounds read once, and a body that moves `i` does not move the loop.
+get endpoint("/range_for_shapes"):
+    List<int> down = []
+    for int i in range(5, 0, -2):
+        down.add(i)
+    int empty = 0
+    for int i in range(3, 3):
+        empty = empty + 1
+    int n = 0
+    for int i in range(3):
+        i = i + 10
+        n = n + i
+    return { "down": down, "empty": empty, "n": n }
+
+# len() counts codepoints eight bytes at a time: long enough to take that
+# path, with multi-byte ones straddling the 8-byte steps.
+get endpoint("/len_utf8"):
+    string s = "ñandú 🐻 ñandú ñandú añoñó 🐻 x"
+    return { "len": len(s), "long": len("añoñó 🐻 ".repeat(500)) }
+
+get endpoint("/range_for_bad_step"):
+    int s = 0
+    for int i in range(0, 5, s):
+        s = s + 1
+    return { "s": s }
+
 # switch: sugar for an if/elif chain (see parse_switch_into, parser.cpp) --
 # nothing downstream ever sees a switch, only an If.
 get endpoint("/switch_basic/:n", int n):

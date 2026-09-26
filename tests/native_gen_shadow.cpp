@@ -161,7 +161,7 @@ int main() {
         out << codigo;
     }
 
-    std::string cmd_compila = std::string("g++ -O2 -std=c++20 ") + src_path + " -o " + bin_path +
+    std::string cmd_compila = std::string("g++ -O2 -std=c++23 ") + src_path + " -o " + bin_path +
                               " 2>" + err_path;
     if (std::system(cmd_compila.c_str()) != 0) {
         std::printf("FALLA: el C++ generado no compilo -- ver %s\n", err_path);

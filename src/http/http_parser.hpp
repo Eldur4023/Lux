@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <unordered_map>
 #include <functional>
 #include <memory>
@@ -20,7 +21,7 @@ struct ParsedRequest {
     std::string path;
     std::string query;    // raw query string
     std::string version;  // "HTTP/1.1" or "HTTP/1.0"
-    std::unordered_map<std::string, std::string> headers;
+    std::vector<std::pair<std::string, std::string>> headers;   // lowercase keys
     std::string body;
 };
 

@@ -19,6 +19,8 @@
 #include <lux/blocking_pool.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -174,6 +176,33 @@ void responder_error(lux::Response& res, int code, const std::string& msg,
 }
 
 using Action = std::function<void(lux::Request&, lux::Response&)>;
+
+// What a handler with no `await` costs per call, as a moving average in
+// microseconds. Such a handler can run on the blocking pool so it does not
+// stall its event loop, but below kInlineUs the trip there and back costs
+// more than the work itself, and it runs inline. 500us, measured: a 500-row
+// template (~140us) inline kept its p99 at 1ms instead of 3.5ms through the
+// pool, while a 0.85ms CPU route still goes to the pool (inline at 1ms, its
+// p99 doubled: whole connections stuck behind it on one loop).
+// ponytail: a timing heuristic, not preemption -- native code has no step
+// cap, so a route that is usually cheap and then loops forever pins its loop
+// thread; a watchdog that moves it back is the upgrade.
+struct RunCost {
+    static constexpr uint32_t kInlineUs = 500;
+    std::atomic<uint32_t> us{UINT32_MAX};   // unknown until the pool times one
+
+    bool cheap() const { return us.load(std::memory_order_relaxed) < kInlineUs; }
+
+    template <class F> void timed(F&& f) {
+        const auto t0 = std::chrono::steady_clock::now();
+        f();
+        const auto took = static_cast<uint32_t>(std::min<long long>(UINT32_MAX - 1,
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()));
+        const uint32_t old = us.load(std::memory_order_relaxed);
+        us.store(old == UINT32_MAX ? took : static_cast<uint32_t>((uint64_t{old} * 7 + took) / 8),
+                 std::memory_order_relaxed);
+    }
+};
 
 // Translates the `return <expr>` of a declarative route into a native action.
 // Returns an empty Action and records the diagnostic if the expression needs
@@ -812,20 +841,22 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
 // class recurses through both cases at once: `type` is List<Episode>, so
 // each element goes through the Class branch below with the SAME
 // `nested_class` (the list's element class, not a different one).
-bool value_matches(const Value& v, const Type& type,
+// `v` is taken apart: it is a body just parsed, nobody else holds it, so its
+// values move into `out` instead of being copied.
+bool value_matches(Value& v, const Type& type,
                    const std::shared_ptr<ClassInfo>& nested_class, Value& out) {
     switch (type.kind()) {
         case Type::Kind::String:
             if (!v.is_str()) return false;
-            out = v;
+            out = std::move(v);
             return true;
         case Type::Kind::Bool:
             if (!v.is_bool()) return false;
-            out = v;
+            out = std::move(v);
             return true;
         case Type::Kind::Int:
             if (!v.is_int()) return false;
-            out = v;
+            out = std::move(v);
             return true;
         case Type::Kind::Float:
             if (!v.is_num()) return false;
@@ -835,7 +866,7 @@ bool value_matches(const Value& v, const Type& type,
             if (!v.is_list()) return false;
             Value::List result;
             result.reserve(v.as_list().size());
-            for (const auto& elem : v.as_list()) {
+            for (auto& elem : v.as_list()) {
                 Value ev;
                 if (!value_matches(elem, type.element(), nested_class, ev)) return false;
                 result.push_back(std::move(ev));
@@ -846,16 +877,17 @@ bool value_matches(const Value& v, const Type& type,
         case Type::Kind::Class: {
             if (!v.is_dict() || !nested_class) return false;
             Value::Dict result;
-            for (const auto& f : nested_class->fields) {
+            result.reserve(nested_class->fields.size());
+            for (const auto& f : nested_class->fields) {   // distinct names: appended
                 auto it = v.as_dict().find(f.name);
                 if (it == v.as_dict().end() || it->second.is_null()) {
                     if (!f.type.is_optional()) return false;
-                    result[f.name] = Value::null();
+                    result.append(std::string(f.name), Value::null());
                     continue;
                 }
                 Value fv;
                 if (!value_matches(it->second, f.type, f.nested_class, fv)) return false;
-                result[f.name] = std::move(fv);
+                result.append(std::string(f.name), std::move(fv));
             }
             out = Value::dict(std::move(result));
             return true;
@@ -1027,9 +1059,11 @@ Action try_declarative(const RouteDecl& r, const std::string& tpl_dir) {
 // A missing required field, or one with the wrong type, or a broken validate
 // rule, is a 422 with the complete list of reasons: they are all reported at
 // once, not just the first.  The handler never runs.
+// `rules` false: the caller checks the validate: rules itself (--native
+// compiles them).
 bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
                lux::Request& req, lux::Response& res,
-               NativeCtx& ctx, Value& out) {
+               NativeCtx& ctx, Value& out, bool rules = true) {
     Value body;
     if (!Value::parse_json(req.body, body)) {
         responder_error(res, 400, "invalid JSON");
@@ -1044,12 +1078,14 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
     std::vector<std::string> messages;
     Value::Dict              fields;
     std::vector<Value>       ordered;
+    fields.reserve(ci.fields.size());
+    ordered.reserve(ci.fields.size());
 
-    for (const auto& f : ci.fields) {
+    for (const auto& f : ci.fields) {   // distinct names: appended
         auto it = body.as_dict().find(f.name);
         if (it == body.as_dict().end() || it->second.is_null()) {
             if (!f.type.is_optional()) messages.push_back(f.name + ": required");
-            fields[f.name] = Value::null();
+            fields.append(std::string(f.name), Value::null());
             ordered.push_back(Value::null());
             continue;
         }
@@ -1065,17 +1101,17 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
             // with native_gen.cpp for the scalar/optional-scalar case,
             // which base_name() does exactly.
             messages.push_back(f.name + ": expected " + f.type.base_name());
-            fields[f.name] = Value::null();
+            fields.append(std::string(f.name), Value::null());
             ordered.push_back(Value::null());
             continue;
         }
-        fields[f.name] = v;
-        ordered.push_back(std::move(v));
+        if (rules && !ci.rules.empty()) ordered.push_back(v);
+        fields.append(std::string(f.name), std::move(v));
     }
 
     // The rules only run if the fields are sound: evaluating them over missing
     // values would give type errors instead of the useful message.
-    if (messages.empty()) {
+    if (messages.empty() && rules) {
         thread_local VM rule_vm;
         for (const auto& rule : ci.rules) {
             VM::Result r = rule_vm.start(*rule.chunk, ordered, ctx, fns);
@@ -1115,7 +1151,7 @@ Value make_file_value(const lux::MultipartPart& part, size_t index) {
 
 bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                   lux::Request& req, lux::Response& res,
-                  NativeCtx& ctx, std::vector<Value>& out) {
+                  NativeCtx& ctx, std::vector<Value>& out, bool rules = true) {
     // They are cleared on entry: a 422 the handler writes by hand must not
     // inherit the messages of an earlier validation on this thread.
     last_validation_messages().clear();
@@ -1152,7 +1188,7 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
 
         if (b.kind == BindKind::Body) {
             Value v;
-            if (!bind_body(*b.cls, fns, req, res, ctx, v)) return false;
+            if (!bind_body(*b.cls, fns, req, res, ctx, v, rules)) return false;
             out.push_back(std::move(v));
             continue;
         }
@@ -1997,22 +2033,21 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             auto fn = mod.native->rutas_por_indice[ridx];
             ++mod.vm_routes; // cuenta como ruta con logica, aunque no pase por el VM
             mod.route_report.push_back({r.method, r.pattern, "native"});
+            auto cost = std::make_shared<RunCost>();
             mod.router.add_internal(r.method, r.pattern,
-                [fn](lux::Request& req, lux::Response& res) -> lux::Task<void> {
+                [fn, cost](lux::Request& req, lux::Response& res) -> lux::Task<void> {
                     // No `await` anywhere in this route (that is exactly what
                     // landed it in rutas_por_indice instead of
                     // rutas_async_por_indice above): its whole body runs to
-                    // completion in one call, so it is safe to hand the
-                    // entire thing to the shared blocking pool instead of
-                    // running it inline and stalling this connection's event
-                    // loop -- and everyone else queued behind it -- for
-                    // however long it takes. See blocking_pool.hpp.
+                    // completion in one call, on the pool or, once known to
+                    // be cheap, inline. See RunCost and blocking_pool.hpp.
+                    if (cost->cheap()) { cost->timed([&] { fn(req, res); }); co_return; }
                     // The validation messages an `on error` handler reads are
                     // thread_local: filled on the pool thread, they are
                     // carried back to this one.
                     std::vector<std::string> messages;
                     co_await lux::BlockingAwaitable{req.loop, [&] {
-                        fn(req, res);
+                        cost->timed([&] { fn(req, res); });
                         messages = last_validation_messages();
                     }};
                     last_validation_messages() = std::move(messages);
@@ -2041,8 +2076,9 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
         mod.route_report.push_back({r.method, r.pattern,
             ridx < mod.native_why.rutas.size() && !mod.native_why.rutas[ridx].empty()
                 ? "bytecode (" + mod.native_why.rutas[ridx] + ")" : "bytecode"});
+        auto cost = std::make_shared<RunCost>();
         mod.router.add_internal(r.method, r.pattern,
-            [chunk, binds, where, auth, needs_upload, fn_table, native_table, tpl_table](lux::Request& req, lux::Response& res)
+            [chunk, binds, where, auth, needs_upload, fn_table, native_table, tpl_table, cost](lux::Request& req, lux::Response& res)
                 -> lux::Task<void> {
                 NativeCtx    ctx{req, res};
                 ctx.templates = tpl_table;
@@ -2089,9 +2125,11 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                     // worker" here rather than "one per event loop" -- same
                     // amortization, just relative to whichever thread pool
                     // actually runs it.
-                    co_await lux::BlockingAwaitable{req.loop, [&] {
-                        result = shared_vm.start(*chunk, std::move(args), ctx, fn_table, &native_table);
-                    }};
+                    auto run = [&] {
+                        cost->timed([&] { result = shared_vm.start(*chunk, std::move(args), ctx, fn_table, &native_table); });
+                    };
+                    if (cost->cheap()) run();   // see RunCost
+                    else co_await lux::BlockingAwaitable{req.loop, run};
                 }
 
                 // Only the has_await branch can suspend, so own_vm -- not
@@ -2136,9 +2174,9 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 } // namespace
 
 bool prepare_native_args(const void* binds, size_t route, lux::Request& req, lux::Response& res,
-                         NativeCtx& ctx, std::vector<Value>& out) {
+                         NativeCtx& ctx, std::vector<Value>& out, bool rules) {
     const auto& all = *static_cast<const std::vector<std::vector<ParamBind>>*>(binds);
-    return prepare_args(all.at(route), ctx.functions, req, res, ctx, out);
+    return prepare_args(all.at(route), ctx.functions, req, res, ctx, out, rules);
 }
 
 // ─── Compilation ─────────────────────────────────────────────────────────────

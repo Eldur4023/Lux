@@ -34,7 +34,7 @@ struct Module {
     // Every render() in the source has its own, compiled against the specific
     // keys that call passes it.
     std::vector<Template> templates;
-    std::map<std::string, size_t> template_keys;   // TemplateCtx::by_key
+    std::map<std::string, size_t, std::less<>> template_keys;   // TemplateCtx::by_key
     std::shared_ptr<void>         native_binds;    // each route's parameter binds, for prepare_native_args
 
     // Signatures of those same functions -- kept only so it can be offered

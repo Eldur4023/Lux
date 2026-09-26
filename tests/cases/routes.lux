@@ -4,6 +4,13 @@ app:
 get endpoint("/__ping__"):
     return { "ok": true }
 
+# Over 16 MB: a response that size used to be dropped unsent.
+get endpoint("/big"):
+    string s = "x"
+    while len(s) < 20000000:
+        s = s + s
+    return text(s)
+
 get endpoint("/echo/:id", int id):
     return { "id": id }
 

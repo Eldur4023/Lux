@@ -1,0 +1,2 @@
+{% if rows %}{% for r in rows %}{{ loop.index }}/{{ loop.length }}:{{ r.name }}|{{ r.name|safe }}|{{ r.price }}|{{ r.ok }}|{{ r.w }};{% endfor %}{% endif %}
+{% for r in rows %}[{{ r.price * 2 }}{{ r.missing }}]{% endfor %}

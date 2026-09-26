@@ -1,4 +1,5 @@
 // The Lux binary: it reads .lux files and serves.
+#include <malloc.h>
 #include <lux_script/schedule.hpp>
 #include <lux_script/project.hpp>
 #include <lux_script/vm.hpp>
@@ -36,14 +37,27 @@ void lanzar_autotest(std::shared_ptr<lux_script::Module> mod) {
     std::thread([mod] { lux_script::run_autotest(*mod, g_autotest); }).detach();
 }
 
-std::shared_ptr<lux_script::Module> current_module() {
-    std::lock_guard<std::mutex> lk(g_module_mutex);
-    return g_module;
+std::atomic<uint64_t>          g_module_gen{0};
+
+// Every request asks for the module: a copy per thread, refreshed only when a
+// reload bumps the generation, instead of a global mutex on every call. The
+// reference is good until this thread's next call; keep a copy to hold it
+// across a co_await.
+const std::shared_ptr<lux_script::Module>& current_module() {
+    thread_local std::shared_ptr<lux_script::Module> mine;
+    thread_local uint64_t mine_gen = UINT64_MAX;
+    if (const uint64_t g = g_module_gen.load(std::memory_order_acquire); g != mine_gen) {
+        std::lock_guard<std::mutex> lk(g_module_mutex);
+        mine = g_module;
+        mine_gen = g;
+    }
+    return mine;
 }
 
 void publish_module(std::shared_ptr<lux_script::Module> m) {
     std::lock_guard<std::mutex> lk(g_module_mutex);
     g_module = std::move(m);
+    g_module_gen.fetch_add(1, std::memory_order_release);
 }
 
 void usage() {
@@ -151,7 +165,7 @@ struct ScheduledTask : std::enable_shared_from_this<ScheduledTask> {
         loop.schedule_timer(wait, [self = shared_from_this(), &loop, due] {
             if (now() < due) { self->arm(loop, due); return; }
             self->run(loop);
-            self->arm(loop, self->spec.next(now()));
+            self->arm(loop, self->spec.after(due, now()));
         });
     }
 
@@ -185,6 +199,14 @@ struct ScheduledTask : std::enable_shared_from_this<ScheduledTask> {
 };
 
 int main(int argc, char** argv) {
+    // glibc mmaps every allocation past 128 KB and unmaps it when freed: a
+    // file read into a string or a big response paid a fresh zeroed mapping
+    // per request, and each unmap interrupted every other thread (a TLB
+    // shootdown). Up to 1 MB is served, and reused, from the heap.
+    // ponytail: each arena may keep up to 8 MB of freed memory; lower
+    // M_TRIM_THRESHOLD if resident size matters more than those faults.
+    mallopt(M_MMAP_THRESHOLD, 1 << 20);
+    mallopt(M_TRIM_THRESHOLD, 8 << 20);
     std::vector<std::string> args;
     bool check_only = false, watch = true, verbose = false, native = false, json_output = false;
     int  port_override = 0;
@@ -323,9 +345,13 @@ int main(int argc, char** argv) {
     //
     // Two patterns are needed: the radix tree wildcard covers one or more
     // segments, so the root "/" does not fit in "/*".
+    // Not a coroutine: it returns the route's own Task, and the request
+    // holds the module alive for as long as that runs (a reload may publish
+    // another meanwhile).
     auto dispatch = [](lux::Request& req, lux::Response& res) -> lux::Task<void> {
-        auto mod = current_module();
-        if (!mod) { res.status(503).json_text(R"({"error":"no module loaded"})"); co_return; }
+        static constexpr auto done = []() -> lux::Task<void> { co_return; };
+        const auto& mod = current_module();
+        if (!mod) { res.status(503).json_text(R"({"error":"no module loaded"})"); return done(); }
 
         auto match = mod->router.match(req.method, req.path);
         if (!match.found) {
@@ -333,10 +359,11 @@ int main(int argc, char** argv) {
             d["error"] = lux_script::Value::str("Not Found");
             d["path"]  = lux_script::Value::str(req.path);
             res.status(404).json_text(lux_script::Value::dict(std::move(d)).to_json_text());
-            co_return;
+            return done();
         }
         req.params = std::move(match.params);
-        co_await match.handler(req, res);
+        req._hold  = mod;
+        return (*match.handler)(req, res);
     };
     app.any("/",  dispatch);
     app.any("/*", dispatch);
@@ -369,7 +396,7 @@ int main(int argc, char** argv) {
     // `dispatch` above queries to answer the request itself, so a static
     // mount and a live route can never disagree about which of them wins.
     app.set_route_probe([](const std::string& method, const std::string& path) {
-        auto mod = current_module();
+        const auto& mod = current_module();
         return mod && mod->router.match(method, path).found;
     });
 
@@ -377,7 +404,7 @@ int main(int argc, char** argv) {
     // dispatch by code is done by the live module, just as with the routes, so
     // that a hot reload reaches them too.
     app.on_error([](int code, lux::Request& req, lux::Response& res) {
-        auto mod = current_module();
+        const auto& mod = current_module();
         if (!mod) return;
 
         auto it = mod->error_handlers.find(code);

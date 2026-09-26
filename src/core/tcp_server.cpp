@@ -18,12 +18,14 @@ namespace lux::core {
 TcpServer::TcpServer(const std::string& host, uint16_t port,
                      EventLoop& loop, lux::DispatchFn dispatch,
                      int max_connections,
-                     std::shared_ptr<std::atomic<int>> conn_count)
+                     std::shared_ptr<std::atomic<int>> conn_count,
+                     std::shared_ptr<Group> group)
     : loop_(loop)
     , dispatch_(std::move(dispatch))
     , max_connections_(max_connections)
     , conn_count_(conn_count ? std::move(conn_count)
                              : std::make_shared<std::atomic<int>>(0))
+    , group_(std::move(group))
 {
     // IPv4 is used when the host says so (0.0.0.0 or a v4 IP)
     // and IPv6 only when explicitly asked for (::)
@@ -69,6 +71,7 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
         throw std::runtime_error(std::string("listen: ") + strerror(errno));
 
     register_listen_fd();
+    if (group_) { std::lock_guard lk(group_->m); group_->servers.push_back(this); }
 }
 
 void TcpServer::register_listen_fd() {
@@ -76,6 +79,10 @@ void TcpServer::register_listen_fd() {
 }
 
 TcpServer::~TcpServer() {
+    if (group_) {
+        std::lock_guard lk(group_->m);
+        std::erase(group_->servers, this);
+    }
     stop_accepting();
 }
 
@@ -203,15 +210,39 @@ void TcpServer::on_accept() {
             continue;
         }
 
-        auto conn = std::make_shared<http::HttpConnection>(
-            client_fd, loop_, dispatch_, conn_count_);
-
-        conn->start();
-
-        loop_.add(client_fd, EPOLLIN, [conn](uint32_t events) {
-            conn->on_event(events);
-        });
+        // Counted where it goes before it gets there, so a burst of accepts
+        // spreads out instead of all seeing the same counts. The post runs
+        // on the target's own loop, which dies after its server; a server
+        // leaves the group (under this lock) before it dies.
+        if (group_) {
+            std::lock_guard lk(group_->m);
+            // Only past a difference of 2: within 1 is as even as it gets,
+            // and a handoff per accept is what churning connections pay.
+            TcpServer* to = this;
+            int least = live_->load(std::memory_order_relaxed) - 1;
+            for (TcpServer* s : group_->servers)
+                if (int n = s->live_->load(std::memory_order_relaxed); n < least) { least = n; to = s; }
+            to->live_->fetch_add(1, std::memory_order_relaxed);
+            if (to != this) {
+                to->loop_.post([to, client_fd] { to->adopt(client_fd); });
+                continue;
+            }
+        } else {
+            live_->fetch_add(1, std::memory_order_relaxed);
+        }
+        adopt(client_fd);
     }
+}
+
+void TcpServer::adopt(int client_fd) {
+    auto conn = std::make_shared<http::HttpConnection>(
+        client_fd, loop_, dispatch_, conn_count_, live_);
+
+    conn->start();
+
+    loop_.add(client_fd, EPOLLIN | EPOLLET, [conn](uint32_t events) {
+        conn->on_event(events);
+    });
 }
 
 } // namespace lux::core

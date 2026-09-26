@@ -63,7 +63,12 @@ class BlockingPool {
 public:
     ~BlockingPool();
 
-    void start(size_t core_workers, size_t max_workers = 0);
+    // stall > 0: grow only once no worker has taken a job for that long -- the
+    // workers are stuck, not just busy. A CPU-saturated pool finishing jobs
+    // steadily gains nothing from more threads but time-slicing: 50
+    // connections of /cpu kept 16 threads on 8 cores and doubled the p99.
+    void start(size_t core_workers, size_t max_workers = 0,
+               std::chrono::milliseconds stall = {});
     void submit(std::function<void()> job);
     void stop();
 
@@ -86,6 +91,8 @@ private:
     size_t                             max_workers_  = 0;
     size_t                             live_workers_ = 0;  // core + overflow, mutex-guarded
     size_t                             idle_workers_ = 0;  // currently waiting for a job
+    std::chrono::milliseconds             stall_{};
+    std::chrono::steady_clock::time_point last_taken_;      // mutex-guarded
 };
 
 // One pool for the whole process -- every event loop's synchronous routes
@@ -162,8 +169,7 @@ struct BlockingAwaitable {
 
     void await_suspend(std::coroutine_handle<> h) {
         auto* l = loop;
-        auto  w = work;
-        target().submit([l, h, w]() mutable {
+        target().submit([l, h, w = std::move(work)]() mutable {
             w();
             l->post([h]() mutable { h.resume(); });
         });

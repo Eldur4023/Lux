@@ -1,8 +1,12 @@
 #pragma once
 #include <string>
+#include <cctype>
+#include <vector>
+#include <string_view>
 #include <unordered_map>
 #include <optional>
 #include <memory>
+#include <utility>
 #include <algorithm>
 #include <cstdlib>
 #include <lux/core/event_loop.hpp>
@@ -20,8 +24,9 @@ public:
     std::string body;
     std::string remote_ip;  // IPv4/IPv6 of the connected peer
 
-    // Headers stored with lowercase keys
-    std::unordered_map<std::string, std::string> headers;
+    // Headers stored with lowercase keys, in arrival order. A flat vector:
+    // a request carries a handful, and a hash map paid a node per header.
+    std::vector<std::pair<std::string, std::string>> headers;
 
     // Path params extracted by the router (e.g. /users/:id → params["id"])
     std::unordered_map<std::string, std::string> params;
@@ -70,6 +75,20 @@ public:
     // calls onto an already-corrupted stream.
     std::function<void()> _force_close;
 
+    // Fills _raw_write, _ws_queue_write, _cancel_request_timeout and
+    // _force_close, bound to `_conn`: only a response that turns into a
+    // stream (SSE, WebSocket) needs them, and building them for every
+    // request cost four allocations. Set by HttpConnection::dispatch().
+    void (*_bind_stream)(Request&) = nullptr;
+    std::shared_ptr<void> _conn;
+
+    // Whatever the handler running this request needs kept alive (the Lux
+    // Script engine's module, across a hot reload), for as long as it runs.
+    std::shared_ptr<void> _hold;
+    void bind_stream() {
+        if (auto f = std::exchange(_bind_stream, nullptr)) f(*this);
+    }
+
     // Cancellation token — shared with the HttpConnection.
     // Cancelled when the connection closes (timeout, disconnect, write error).
     // Check in long-running handlers to exit early.
@@ -80,18 +99,15 @@ public:
         return cancel_token && cancel_token->is_cancelled();
     }
 
-    // Convenience: get a header by name (case-insensitive)
-    std::optional<std::string> header(std::string name) const {
-        std::transform(name.begin(), name.end(), name.begin(), ::tolower);
-        auto it = headers.find(name);
-        if (it == headers.end()) return std::nullopt;
-        return it->second;
-    }
-
-    // Convenience: get a query param with a default
-    std::string query_param(const std::string& key, const std::string& def = "") const {
-        auto it = query.find(key);
-        return (it != query.end()) ? it->second : def;
+    // A header by name (case-insensitive), or null: no copy of either.
+    const std::string* header(std::string_view name) const {
+        for (const auto& [k, v] : headers) {
+            if (k.size() != name.size()) continue;
+            size_t i = 0;
+            while (i < k.size() && k[i] == std::tolower(static_cast<unsigned char>(name[i]))) ++i;
+            if (i == k.size()) return &v;
+        }
+        return nullptr;
     }
 
     // Convenience: get a cookie value by name. Parses the Cookie header lazily;

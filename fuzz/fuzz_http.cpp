@@ -54,8 +54,8 @@ int main(int argc, char** argv) {
                             [](const std::string& case_) {
                                 Request req;
                                 req.method = "POST";
-                                req.headers["content-type"] =
-                                    "multipart/form-data; boundary=----limite123";
+                                req.headers.emplace_back("content-type",
+                                    "multipart/form-data; boundary=----limite123");
                                 req.body = case_;
                                 auto parts = parse_multipart(req);
                                 (void)parts;

@@ -162,6 +162,9 @@ check "range with step"       GET /range 200 '"step":[0,2,4,6,8]'
 check "range with negative step" GET /range 200 '"negative_step":[5,4,3,2,1]'
 check "range() in a for loop" GET /range_for_loop 200 '"total":10'
 check "range() rejects step 0" GET /range_bad_step 500 'step cannot be 0'
+check "for over range(): shapes" GET /range_for_shapes 200 '"down":[5,3,1],"empty":0,"n":33'
+check "len() counts codepoints" GET /len_utf8 200 '"len":29,"long":4000'
+check "for over range(): step 0" GET /range_for_bad_step 500 'step cannot be 0'
 
 check "switch basic case"      GET /switch_basic/1 200 '"r":"one"'
 check "switch else fallback"   GET /switch_basic/99 200 '"r":"many"'
@@ -181,6 +184,7 @@ check "path parameter"   GET /echo/42           200 '"id":42'
 check "query with default"   GET /pagina           200 '"page":1'
 check "query explicita"     GET '/pagina?page=7'  200 '"page":7'
 check "invalid type"       GET /echo/abc          400 'invalid parameter'
+check "a response over 16 MB" GET /big             200 'xxxxxxxx'
 check "path inexistente"    GET /nada             404 'not found'
 check "group with prefix"   GET /api/v1/hello      200 '"v":1'
 check "guard denies"      GET /admin/panel      403
@@ -362,6 +366,9 @@ sleep 2.3
 ticks=$(curl -sS "http://127.0.0.1:$PORT/every/ticks" | python3 -c "import json,sys; print(json.load(sys.stdin)['ticks'])")
 if [ "$ticks" -ge 2 ] 2>/dev/null; then ok "every \"1s\" runs on its own ($ticks runs)"
 else fail "every \"1s\" runs on its own" ">= 2 runs" "$ticks"; fi
+fast=$(curl -sS "http://127.0.0.1:$PORT/every/ticks" | python3 -c "import json,sys; print(json.load(sys.stdin)['fast'])")
+if [ "$fast" -ge $((ticks * 3)) ] 2>/dev/null; then ok "every \"200ms\" runs at its own pace ($fast runs)"
+else fail "every \"200ms\" runs at its own pace" ">= $((ticks * 3)) runs" "$fast"; fi
 kill -0 "$SRV" 2>/dev/null && ok "a failing task does not take the server down" \
                            || fail "a failing task does not take the server down" "alive" "dead"
 check "every is not reachable over HTTP" GET /__every/0 404 'Not Found'
@@ -448,11 +455,14 @@ check "regex rejects an invalid pattern" GET /regex/bad_pattern 500 'invalid reg
 
 check "rooms.count on an unknown room is 0, not an error" GET /rooms/count_empty     200 '"n":0'
 check "rooms.broadcast to an unknown room reaches nobody" GET /rooms/broadcast_empty 200 '"reached":0'
-check "rooms.join outside a ws route is rejected"         GET /rooms/join_outside_ws 500 'can only be called from a ws route'
+check "rooms.join outside a ws route is rejected"         GET /rooms/join_outside_ws 500 'can only be called from a ws or sse route'
 
 rooms_out=$(python3 "$HERE/ws_rooms_check.py" "$PORT" 2>&1 | tail -1)
 if [ "$rooms_out" = "ok" ]; then ok "rooms: join, broadcast_others (JSON), count, leave on close"
 else fail "rooms: join, broadcast_others (JSON), count, leave on close" "ok" "$rooms_out"; fi
+sse_rooms_out=$(python3 "$HERE/sse_rooms_check.py" "$PORT" 2>&1 | tail -1)
+if [ "$sse_rooms_out" = "ok" ]; then ok "rooms: sse streams in a room get broadcasts"
+else fail "rooms: sse streams in a room get broadcasts" "ok" "$sse_rooms_out"; fi
 check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
 check "proc.start with a bad command is a hard error"  GET /proc/missing_command  500 'proc.start(): could not start'
 check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
@@ -517,17 +527,36 @@ next_server "$HERE/cases/render.lux" || exit 1
 check "render() fills a template"   GET /greet 200 '<h1>Hi</h1>'
 check "render() escapes its values" GET /greet 200 '<li>Ana &lt;b&gt;</li><li>Bob</li>'
 check "render() evaluates in it"    GET /greet 200 '<p>2 names</p>'
+check "template: nested loops and loop" GET /shapes 200 '<section n="2/3">g&lt;1&gt;&amp;&quot;&#39;'
+check "template: loop.first/last, if/else" GET /shapes 200 '[0,1,2]'
+check "template: elif, arithmetic, missing field, list" GET /shapes 200 'small 21 null [&quot;a&quot;,&quot;b&quot;]'
+check "template: |safe and include" GET /shapes 200 '<footer>HI &lt;YOU&gt; (3)</footer>'
+check "template: a field of a non-Dict" GET /shapes_bad 500 "'name' on int, which has no fields"
+check "template: plain reads, nested loops" GET /direct 200 'a:1,2,a;b&lt;:b&lt;;'
+check "template: plain reads, a non-Dict item" GET /direct_bad 500 "'name' on int, which has no fields"
+check "template: and/or, arithmetic, concatenation" GET /exprs 200 '1<1/2:1><2/2:3>|true|false|-2|#2!|0.5|'
+check "template: loop by field and whole" GET /exprs 200 '2<1/1:5>|false|true|-5|#5!|1.25|{&quot;index&quot;:3,&quot;index0&quot;:2,'
+check "template: an expression's error" GET /exprs_bad 500 'cannot compare string and int'
+check "records: a list of one shape, as JSON" GET /records 200 '[{"name":"a\u003c0\u003e\"é\n","price":0.5,"ok":true,"w":0},{"name":"a\u003c1\u003e\"é\n","price":1.0,"ok":false,"w":1},'
+check "records: read inside a return"        GET /records_nested 200 '{"rows":[{"id":0,"tag":"t0"},{"id":1,"tag":"t1"}],"n":2,"first":{"id":0,"tag":"t0"}}'
+check "records: fields and loop in a template" GET /records_tpl 200 '1/3:n&lt;0&gt;|n<0>|0|false|0.5;2/3:n&lt;1&gt;|n<1>|2|true|0.5;3/3:n&lt;2&gt;|n<2>|4|false|0.5;'
+check "records: a row read as a whole"       GET /records_tpl 200 '[0null][4null][8null]'
+check "records: two shapes stay Dicts"       GET /records_mixed 200 '[{"a":1},{"b":2}]'
+check "records: a reused slot is not one"   GET /records_slot 200 '{"x":1}'
+check "records: ...and its own branch is"    GET '/records_slot?c=1' 200 '[{"a":1}]'
 
 echo "== --native semantics (native_edges.lux) =="
 next_server "$HERE/cases/native_edges.lux" /mixed || exit 1
 check "a list shared by two variables"      GET /values 200 '"b":[1,2,3]'
-check "sort() on a local held as a Value"   GET /values 200 '"c":[1,4,5]'
+check "sort() on a typed list"              GET /values 200 '"c":[1,4,5]'
 check "an int summed with range() elements" GET /values 200 '"total":6'
 check "int / int: exact or not"             GET /values 200 '"div":3.5,"exact":2'
 check "and/or give the winning operand"     GET /values 200 '"and":0,"or":5,"null":null'
 check "a function that awaits, with and without await" GET /awaits 200 '"x":4,"y":6'
 check "a catch whose body awaits"           GET /awaits 200 '"caught":"division by zero"'
 check "a null result is a 204"              GET /nothing 204
+check "List methods on typed lists"         GET /list_methods 200 '{"had":true,"at":1,"missing":-1,"gone":true,"out":false,"xs":[3,3,7,9],"ys":[3,3,7,9],"words":["c","b","a"],"part":[3,7,9],"tail":[9,1],"both":[3,7,9,9,1],"joined":"c-b-a","first":3,"last":1,"popped":1,"lo":3,"hi":"c","isum":22,"fsum":4.0,"esum":0,"emin":null,"epop":null}'
+check "moves only what is not read again"   GET /moves 200 '{"s":"01234","rows":[{"k":1},{"k":1},{"k":1}],"parts":["ab","ab"],"piece":"ab","b":{"x":1},"a2":{"y":2},"d":{"y":2},"xs":[1,2,3],"pair":[{"k":1},{"k":1}],"caught":"{\"z\":3}","rep":"xyxyxy"}'
 
 echo "== compile errors =="
 compiles    "the repo examples compile" "$HERE/cases/language.lux"
@@ -540,7 +569,7 @@ native_compiles "--native survives its edge cases"    "$HERE/cases/native_edges.
 native_compiles "--native compiles the class suite"   "$HERE/cases/classes.lux"  13
 native_compiles "--native compiles File/List<File> parameters" "$HERE/cases/params.lux" 8
 native_compiles "--native compiles session and jwt" "$HERE/cases/session.lux" 5
-native_compiles "--native compiles render()"          "$HERE/cases/render.lux"   2
+native_compiles "--native compiles render()"          "$HERE/cases/render.lux"   12
 native_compiles "--native compiles the language suite" "$HERE/cases/language.lux" 49
 fails_to_compile "pattern without a parameter"  "$HERE/cases/bad/pattern.lux"   "no parameter binds it"
 fails_to_compile "missing await"       "$HERE/cases/bad/await.lux"    "is asynchronous"

@@ -185,3 +185,32 @@ check `node->find_wildcard_child()` when `index == segments.size()` before givin
 If it's decided NOT to support it (reasonable: it's consistent with a wildcard always
 capturing "the rest of the path," never "nothing"), a note in GUIDE.md next to the
 routes section is enough.
+
+---
+
+## A JSON body is parsed to a generic tree before it is bound to its class
+
+**Found:** 2026-09-27, benchmarking `POST /orders` (a body bound to a class with a
+`List<Item>` field and `validate:` rules) against Actix, Axum and Gin.
+
+**What happens:** it works and answers the same bytes as bytecode, but it is still ~3%
+behind Actix in req/s (445k vs 460k; Lux's p99 is better). `Value::parse_json()` builds a
+generic tree first — a `Dict` per object, every key a `std::string` — and
+`bind_body()`/`value_matches()` (`src/lux_script/project.cpp`) then walk it to check the
+types and build the instance. The parse is now the biggest piece of that route (~7% of
+CPU; the kernel's `write` is ~54%). serde, what Actix uses, parses straight into the
+struct.
+
+**Already done:** a Dict class's `validate:` rules run as C++ on `--native`
+(`construir_clases()`/`generate_native_route()` in `src/lux_script/native_gen.cpp`,
+`prepare_native_args(..., rules=false)`), not a VM per rule, and `value_matches()` moves
+values out of the parsed tree instead of copying them (×0.91 → ×0.97 vs Actix).
+
+**Where to look to fix it:** a parser generated per class (`--native`) or driven by the
+`ClassInfo` field list (bytecode) that reads each field as it arrives — known keys,
+declared types, nested classes and `List<Class>` — and fills the instance directly,
+skipping the tree. It has to keep today's answers byte for byte: `400 invalid JSON`,
+`422` with every `"field: required"` / `"field: expected T"` at once, the rules only
+when the fields are sound, unknown keys ignored, `float` fields normalized to
+`Value::real`. `tests/run_tests.sh` and the `native_route_shadow` suite already check
+those messages.

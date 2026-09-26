@@ -1,5 +1,8 @@
 #pragma once
 #include <atomic>
+#include <memory>
+#include <mutex>
+#include <vector>
 #include <chrono>
 #include <string>
 #include <sstream>
@@ -29,10 +32,11 @@ public:
 
     // Called from finish_dispatch() for every completed HTTP request.
     void record(int status) noexcept {
-        requests_total_.fetch_add(1, std::memory_order_relaxed);
-        if      (status >= 500) requests_5xx_.fetch_add(1, std::memory_order_relaxed);
-        else if (status >= 400) requests_4xx_.fetch_add(1, std::memory_order_relaxed);
-        else if (status >= 200) requests_2xx_.fetch_add(1, std::memory_order_relaxed);
+        Counters& c = mine();
+        bump(c.total);
+        if      (status >= 500) bump(c.r5xx);
+        else if (status >= 400) bump(c.r4xx);
+        else if (status >= 200) bump(c.r2xx);
     }
 
     // Prometheus exposition format (text/plain; version=0.0.4).
@@ -43,10 +47,10 @@ public:
                         ? active_connections_->load(std::memory_order_relaxed)
                         : 0;
 
-        uint64_t total = requests_total_.load(std::memory_order_relaxed);
-        uint64_t r2xx  = requests_2xx_.load(std::memory_order_relaxed);
-        uint64_t r4xx  = requests_4xx_.load(std::memory_order_relaxed);
-        uint64_t r5xx  = requests_5xx_.load(std::memory_order_relaxed);
+        uint64_t total = sum(&Counters::total);
+        uint64_t r2xx  = sum(&Counters::r2xx);
+        uint64_t r4xx  = sum(&Counters::r4xx);
+        uint64_t r5xx  = sum(&Counters::r5xx);
 
         std::ostringstream ss;
         ss << std::fixed << std::setprecision(3);
@@ -84,7 +88,7 @@ public:
         std::ostringstream ss;
         ss << "{\"status\":\"ok\",\"uptime_seconds\":" << uptime
            << ",\"active_connections\":" << conns
-           << ",\"requests_total\":" << requests_total_.load(std::memory_order_relaxed)
+           << ",\"requests_total\":" << sum(&Counters::total)
            << "}";
         return ss.str();
     }
@@ -97,10 +101,28 @@ public:
 private:
     Metrics() = default;
 
-    std::atomic<uint64_t>                  requests_total_{0};
-    std::atomic<uint64_t>                  requests_2xx_{0};
-    std::atomic<uint64_t>                  requests_4xx_{0};
-    std::atomic<uint64_t>                  requests_5xx_{0};
+    // One set per thread, summed when read: a single set written by every
+    // event loop on every request kept its cache line bouncing between cores.
+    // Only the owning thread writes, so a plain load+store is enough.
+    struct Counters { std::atomic<uint64_t> total{0}, r2xx{0}, r4xx{0}, r5xx{0}; };
+    static void bump(std::atomic<uint64_t>& a) noexcept {
+        a.store(a.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+    Counters& mine() {
+        thread_local Counters* c = [this] {
+            std::lock_guard<std::mutex> lk(all_mutex_);
+            return all_.emplace_back(std::make_unique<Counters>()).get();   // kept after the thread ends
+        }();
+        return *c;
+    }
+    uint64_t sum(std::atomic<uint64_t> Counters::* f) const {
+        std::lock_guard<std::mutex> lk(all_mutex_);
+        uint64_t n = 0;
+        for (const auto& c : all_) n += ((*c).*f).load(std::memory_order_relaxed);
+        return n;
+    }
+    mutable std::mutex                     all_mutex_;
+    std::vector<std::unique_ptr<Counters>> all_;
     std::chrono::steady_clock::time_point  started_at_ = std::chrono::steady_clock::now();
 };
 

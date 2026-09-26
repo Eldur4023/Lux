@@ -57,8 +57,7 @@ Value de_nativevalue(const NativeValue& n) {
 
 } // namespace
 
-VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx,
-                     const FunctionTable* functions, const NativeDispatch* native) {
+void VM::begin(const Chunk& chunk, const FunctionTable* functions, const NativeDispatch* native) {
     functions_ = functions;
     native_    = native;
     frames_.clear();
@@ -71,16 +70,28 @@ VM::Result VM::start(const Chunk& chunk, std::vector<Value> params, NativeCtx& c
     // normal case when this same VM is reused between requests via
     // project.cpp's thread_local shared_vm), so this doesn't change
     // observable behavior: it just avoids the repeated reallocations of
-    // std::vector::push_back/resize that showed up in the CPU profile
-    // (Value::emplace_back, see bench/RESULTS.md).
+    // std::vector::push_back/resize that showed up in the CPU profile.
     frames_.reserve(kMaxFrames);
     stack_.reserve(256);
     locals_.reserve(256);
 
     locals_.assign(static_cast<size_t>(chunk.num_locals), Value::null());
+}
+
+VM::Result VM::start(const Chunk& chunk, std::vector<Value>&& params, NativeCtx& ctx,
+                     const FunctionTable* functions, const NativeDispatch* native) {
+    begin(chunk, functions, native);
     for (size_t i = 0; i < params.size() && i < locals_.size(); ++i)
         locals_[i] = std::move(params[i]);
+    frames_.push_back(Frame{&chunk, 0, 0, 0});
+    return execute(ctx);
+}
 
+VM::Result VM::start(const Chunk& chunk, const std::vector<Value>& params, NativeCtx& ctx,
+                     const FunctionTable* functions, const NativeDispatch* native) {
+    begin(chunk, functions, native);
+    for (size_t i = 0; i < params.size() && i < locals_.size(); ++i)
+        locals_[i] = params[i];
     frames_.push_back(Frame{&chunk, 0, 0, 0});
     return execute(ctx);
 }
@@ -156,7 +167,7 @@ VM::Result VM::unwind(Result r, NativeCtx& ctx) {
 // 1 + "1" is an error, not "11": operating across different types is exactly
 // what Lux Script does not want to inherit from JavaScript.  To join a number
 // to a string you have to say so: "n = " + str(n).
-static bool add_values(const Value& a, const Value& b, Value& out, std::string& err) {
+bool add_values(const Value& a, const Value& b, Value& out, std::string& err) {
     if (a.is_str() && b.is_str()) {
         out = Value::str(a.as_str() + b.as_str());
         return true;

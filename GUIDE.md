@@ -39,7 +39,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-Requires Linux (epoll, `sendfile(2)`, `SO_REUSEPORT`), CMake 3.20+ and C++20. The first
+Requires Linux (epoll, `sendfile(2)`, `SO_REUSEPORT`), CMake 3.20+ and C++23. The first
 `configure` needs no network: nothing is downloaded.
 
 Optional but recommended: `sudo apt install libjemalloc-dev`. With several event loops and a
@@ -279,7 +279,7 @@ every "03:00":                      # daily, 03:00 UTC
         await mail.send({ "to": r["email"], "subject": "Your digest", "text": "..." })
 ```
 
-The schedule is an interval (`"30s"`, `"5m"`, `"2h"`, `"1d"`) or a daily UTC time (`"HH:MM"`);
+The schedule is an interval (`"100ms"`, `"30s"`, `"5m"`, `"2h"`, `"1d"`) or a daily UTC time (`"HH:MM"`);
 anything else is a compile error. An interval's first run is one interval after startup. A run
 that is still going when the next one is due makes that one skip, with a warning. A task that
 fails is logged and runs again next time; it never takes the server down. A task has no
@@ -898,6 +898,9 @@ sse endpoint("/metrics/:every", int every):
 The stream is opened before the handler runs and closed when it ends. There is no final
 response to return.
 
+To send one event to many streams at once (a news feed, live notifications), put them in a
+room: see [Broadcasting to a room](#broadcasting-to-a-room).
+
 ---
 
 ## 14. WebSockets
@@ -955,16 +958,33 @@ get endpoint("/watch/:id/viewers", string id):
 
 | | |
 |---|---|
-| `rooms.join(name)` | Adds the current connection to room `name`. `ws` route only. |
-| `rooms.leave(name)` | Removes it. `ws` route only. |
-| `rooms.leave_all()` | Removes it from every room it is in. `ws` route only. |
+| `rooms.join(name)` | Adds the current connection to room `name`. `ws` or `sse` route only. |
+| `rooms.leave(name)` | Removes it. `ws` or `sse` route only. |
+| `rooms.leave_all()` | Removes it from every room it is in. `ws` or `sse` route only. |
 | `rooms.broadcast(name, message)` | Sends `message` to everyone currently in `name`, sender included. |
 | `rooms.broadcast_others(name, message)` | Same, minus the calling connection — the usual "echo to everyone else" shape. |
 | `rooms.count(name)` | How many connections are currently in `name`. |
 
 A room is just a string you make up — there is nothing to declare or configure. `broadcast`/
 `broadcast_others`/`count` work from any route, `ws` or not; `join`/`leave`/`leave_all` need an
-actual connection to add or remove, so they only work inside a `ws` route.
+actual connection to add or remove, so they only work inside a `ws` or `sse` route.
+
+An `sse` stream can be in a room too, and a broadcast reaches it as a `data:` event (a `Dict`
+or `List` as its JSON, like a WebSocket member gets it). One event to every subscriber, sent
+from wherever it happens:
+
+```lux
+sse endpoint("/news"):
+    rooms.join("news")
+    while sse.open:
+        await sleep(15000)
+        sse.ping("keepalive")
+
+post endpoint("/news", Headline h):
+    return { "reached": rooms.broadcast("news", { "title": h.title }) }
+```
+
+A room can mix both kinds: `broadcast` sends each member the form its connection speaks.
 
 A connection that disconnects without calling `leave()` (closing the tab, losing the network)
 is not removed immediately — it is noticed and dropped the next time that room is joined,

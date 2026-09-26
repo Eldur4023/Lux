@@ -31,10 +31,7 @@ struct WSMessage {
     Opcode      opcode = Opcode::Text;
     std::string data;
 
-    bool is_text()   const { return opcode == Opcode::Text; }
-    bool is_binary() const { return opcode == Opcode::Binary; }
     bool is_close()  const { return opcode == Opcode::Close; }
-    bool is_ping()   const { return opcode == Opcode::Ping; }
     bool is_pong()   const { return opcode == Opcode::Pong; }
 };
 
@@ -411,7 +408,7 @@ struct WSState {
 //       while (ws.is_open()) {
 //           auto msg = co_await ws.recv();
 //           if (!msg) break;           // connection closed
-//           if (msg->is_text()) ws.send("echo: " + msg->data);
+//           ws.send("echo: " + msg->data);
 //       }
 //   });
 
@@ -456,15 +453,6 @@ public:
         return write_frame(text, 0x1);
     }
 
-    bool send_binary(const void* data, size_t len) {
-        return write_frame(std::string_view(static_cast<const char*>(data), len), 0x2);
-    }
-
-    // Send a Ping frame.  The remote end should reply with Pong automatically.
-    bool ping(std::string_view payload = "") {
-        return write_frame(payload, 0x9);
-    }
-
     // Send a Close frame and mark the connection as closed.
     void close(uint16_t code = 1000) {
         if (!s_ || s_->closed) return;
@@ -503,7 +491,7 @@ private:
 };
 
 // Posts `text` onto `target`'s own event-loop thread and sends it there as
-// a text frame -- unlike WSConnection::send()/send_binary()/ping()/close(),
+// a text frame -- unlike WSConnection::send()/close(),
 // which all assume the CALLING thread already owns this connection (the
 // normal case: called from inside that connection's own ws() handler),
 // this is safe to call from ANY thread. That is exactly what a

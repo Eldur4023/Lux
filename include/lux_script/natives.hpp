@@ -141,6 +141,15 @@ struct NativeCtx {
     bool response_written = false;
 };
 
+// Templates compiled to C++ under --native (native_gen.cpp) share these with
+// the interpreter (template.cpp), so both write the same bytes and fail the
+// same way. `tpl` indexes ctx.templates.
+bool  eval_template_expr(NativeCtx& ctx, size_t tpl, uint32_t k, const std::vector<Value>& slots,
+                         Value& out, std::string& error);
+void  write_template_value(const Value& v, bool escape, std::string& out);
+void  escape_html(const std::string& in, std::string& out);
+Value template_loop_value(size_t i, size_t n);
+
 // A builtin returns a Value and, if it fails, writes the reason into `error`.
 using NativeFn = Value (*)(NativeCtx& ctx, std::vector<Value>& args,
                            std::string& error);
@@ -165,6 +174,9 @@ int              native_id(const std::string& name);
 // builtin implementing it, or -1 if that combination does not exist.  The
 // mapping lives next to the table so adding a member is touching one place.
 int              member_native_id(const std::string& object, const std::string& member);
+
+// The language's '+' (vm.cpp): Op::Add, and compiled templates' '+'.
+bool add_values(const Value& a, const Value& b, Value& out, std::string& err);
 
 // Method on a value: "hi".starts_with(...), list.add(...), file.save(...).
 // Unlike the reserved objects, the receiver is known at runtime, so the
@@ -210,9 +222,10 @@ NativeCtx*& current_native_ctx();
 // A --native route whose parameters its own code does not bind (File, `?`,
 // a Dict class body) binds them with bytecode's prepare_args(): `binds` is
 // what NativeModule::bind handed it (Module::native_binds), `route` its
-// index. False when it already answered (a 422/400).
+// index. False when it already answered (a 422/400). `rules` false: the
+// body class's validate: rules are left to the caller (compiled to C++).
 bool prepare_native_args(const void* binds, size_t route, lux::Request& req, lux::Response& res,
-                         NativeCtx& ctx, std::vector<Value>& out);
+                         NativeCtx& ctx, std::vector<Value>& out, bool rules = true);
 
 // The real message of the last runtime error (division by zero, index out
 // of range, ...) on this thread -- same idea and same one-request lifetime

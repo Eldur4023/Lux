@@ -10,7 +10,10 @@
 
 #include "spawn.hpp"
 
+#include <fcntl.h>
 #include <fnmatch.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/wait.h>
@@ -89,16 +92,41 @@ Value fn_mtime_ms(NativeCtx&, std::vector<Value>& a, std::string&) {
 
 // ─── Files ──────────────────────────────────────────────────────────────────
 
-// A missing file is null, not an error.
+// A missing file is null, not an error. One open, one fstat and reads
+// straight into a string of the file's size: no stream, no copies.
 Value fn_read_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const std::string& path = a[0].as_str();
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) return Value::null();
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return Value::null();
-    std::ostringstream ss;
-    ss << f.rdbuf();
-    return f.bad() ? fail(error, "read_file", "could not read '" + path + "'") : Value::str(ss.str());
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return Value::null();
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { ::close(fd); return Value::null(); }
+    // Read straight into the string, without zero-filling it first.
+    std::string out;
+    size_t got = 0;
+    bool failed = false;
+    out.resize_and_overwrite(static_cast<size_t>(st.st_size), [&](char* buf, size_t cap) {
+        while (got < cap) {
+            const ssize_t n = ::read(fd, buf + got, cap - got);
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0) { failed = true; break; }
+            if (n == 0) break;
+            got += static_cast<size_t>(n);
+        }
+        return got;
+    });
+    char more[16384];   // what it grew by since the fstat (or a /proc file's size 0)
+    while (!failed && got == out.size()) {
+        const ssize_t n = ::read(fd, more, sizeof more);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) failed = true;
+        if (n <= 0) break;
+        out.append(more, static_cast<size_t>(n));
+        got += static_cast<size_t>(n);
+    }
+    if (failed) { ::close(fd); return fail(error, "read_file", "could not read '" + path + "'"); }
+    ::close(fd);
+    out.resize(got);
+    return Value::str(std::move(out));
 }
 
 Value write(std::vector<Value>& a, std::string& error, bool append) {

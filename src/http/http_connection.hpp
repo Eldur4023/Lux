@@ -2,6 +2,8 @@
 #include <string>
 #include <memory>
 #include <atomic>
+#include <sys/epoll.h>
+#include <chrono>
 #include <cstdint>
 #include "http_parser.hpp"
 #include <lux/core/event_loop.hpp>
@@ -13,7 +15,8 @@ namespace lux::http {
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
     HttpConnection(int fd, core::EventLoop& loop, lux::DispatchFn dispatch,
-                   std::shared_ptr<std::atomic<int>> conn_count = nullptr);
+                   std::shared_ptr<std::atomic<int>> conn_count = nullptr,
+                   std::shared_ptr<std::atomic<int>> loop_count = nullptr);
     ~HttpConnection();
 
     void start();
@@ -24,17 +27,26 @@ private:
     core::EventLoop&   loop_;
     lux::DispatchFn dispatch_;
     std::shared_ptr<std::atomic<int>>          conn_count_;   // decremented on close()
+    std::shared_ptr<std::atomic<int>>          loop_count_;   // this loop's share, too
     std::shared_ptr<lux::CancellationToken> cancel_token_; // one per request
     HttpParser         parser_;
     bool               closed_         = false;
+    // What epoll is watching: re-arming the same thing after every response
+    // was an epoll_ctl per request for nothing.
+    uint32_t           armed_          = EPOLLIN;   // as tcp_server adds it
+    void arm(uint32_t events) {
+        if (events == armed_) return;
+        armed_ = events;
+        loop_.modify(fd_, events | EPOLLET);
+    }
 
     // Weak reference to the current request — used in WebSocket mode to route
     // do_read() bytes into the WS frame parser instead of the HTTP parser.
     std::weak_ptr<lux::Request> current_req_;
 
-    // ── Response buffer limit ─────────────────────────────────────────────────
-    // Hard cap on the size of a single response.  Connections that exceed this
-    // are closed to prevent unbounded RAM growth from slow-reading clients.
+    // ── WebSocket send queue limit ────────────────────────────────────────────
+    // Frames queued for a peer that is not draining them: past this the
+    // connection is closed instead of growing without bound.
     static constexpr size_t kMaxResponseBytes = 16 * 1024 * 1024; // 16 MB
 
     // ── Write buffer ─────────────────────────────────────────────────────────
@@ -95,10 +107,19 @@ private:
     //   the request timeout does not apply to them past that point; leaving
     //   it armed would 408 a healthy SSE/WS stream mid-flight regardless of
     //   how much data was flowing.
+    //
+    // The two never run at once, so they share one deadline and one timer:
+    // arming moves the deadline, and the timer, firing before it, sleeps again
+    // (never more than kHeaderTimeoutMs, so no deadline lands before it).
+    // Scheduling and cancelling a timer per request cost an allocation and
+    // two map updates each, four times over.
     static constexpr int kHeaderTimeoutMs  = 5'000;
     static constexpr int kRequestTimeoutMs = 30'000;
-    int header_tfd_  = -1;
-    int timeout_tfd_ = -1;
+    static constexpr const char* kHeaderTimeoutMsg  = "Request Header Timeout";
+    static constexpr const char* kRequestTimeoutMsg = "Request Timeout";
+    std::chrono::steady_clock::time_point deadline_{};
+    const char* deadline_msg_ = nullptr;   // null: no deadline
+    int         timer_        = -1;
 
     // Peer address, resolved on the first request: it cannot change for the
     // life of the socket, and keep-alive would otherwise pay getpeername +
@@ -138,12 +159,12 @@ private:
     void do_sendfile();
     void on_write_complete();
     void on_headers_complete();
-    void arm_request_timeout();
     void refresh_request_timeout();
     void cancel_request_timeout();
-    // Arms a one-shot timer into `this->*tfd` that answers 408 `msg` and closes.
-    void arm_408(int HttpConnection::*tfd, int ms, const char* msg);
-    void drop_timer(int& tfd) { loop_.cancel_timer(tfd); tfd = -1; }
+    // 408 `msg` and close once `ms` pass without being moved or cleared.
+    void set_deadline(int ms, const char* msg);
+    void schedule_deadline(int ms);
+    void on_deadline();
 
     // Feeds bytes to the HTTP parser and stashes any unconsumed tail (the
     // next pipelined request, or a WS client's first frame). False = closed.
@@ -154,13 +175,14 @@ private:
     void finish_cycle();
 
     // Begin writing `data`; buffers any unsent remainder and arms EPOLLOUT.
-    void send_response(std::string data);
+    void send_response(std::string data, const std::string* body = nullptr);
     void send_error(int code, const char* msg);
     // Sends `r` with "Connection: close" and drops keep-alive.
     void send_and_close(lux::Response& r);
     void close();
 
     void dispatch(ParsedRequest req);
+    static void bind_stream(lux::Request& req);
     void finish_dispatch(lux::Request& request, lux::Response& response);
 };
 

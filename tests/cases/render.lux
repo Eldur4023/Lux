@@ -10,3 +10,75 @@ get endpoint("/__ping__"):
 get endpoint("/greet", string who = "Ana <b>"):
     List<string> names = [who, "Bob"]
     return render("greet.html", title="Hi", names=names, count=len(names))
+
+# Every template shape --native compiles to C++ (generate_native_template):
+# nested loops and `loop`, if/elif/else, |safe, an expression the VM
+# evaluates, a missing field, an empty loop, an include -- and an expression
+# after a nested loop, which used to not compile at all.
+get endpoint("/shapes"):
+    List<Json> groups = []
+    for int i in range(3):
+        groups.add({ "name": "g<" + str(i) + ">&\"'", "n": i * 2, "items": range(i + 1), "tags": ["a", "b"] })
+    List<Json> empty = []
+    return render("shapes.html", title="Hi <you>", raw="<b>raw</b>", groups=groups, empty=empty, count=len(groups))
+
+# A field of something that is not a Dict: the VM's own error.
+get endpoint("/shapes_bad"):
+    return render("shapes.html", title="x", raw="y", groups=[1], empty=[], count=0)
+
+# Only names and fields: --native reads each loop item in place.
+get endpoint("/direct"):
+    List<Json> groups = [{ "name": "a", "items": [1, 2] }, { "name": "b<", "items": [] }]
+    return render("direct.html", groups=groups)
+
+get endpoint("/direct_bad"):
+    return render("direct.html", groups=[{ "name": "a", "items": [1] }, 7])
+
+# Expressions --native compiles to C++ (not the VM): and/or, arithmetic,
+# negation, concatenation, a builtin, loop read by field and whole.
+get endpoint("/exprs"):
+    List<Json> groups = [{ "n": 0, "items": [] }, { "n": 2, "items": [1, 2] }, { "n": 5, "items": [3] }]
+    return render("exprs.html", groups=groups)
+
+get endpoint("/exprs_bad"):
+    return render("exprs.html", groups=[{ "n": "x", "items": [] }])
+
+# Rows built from one dict literal shape: --native holds them as structs
+# (records). The same bytes as the VM's Dicts, JSON and template alike.
+get endpoint("/records"):
+    List<Json> rows = []
+    float p = 0.25
+    for int i in range(3):
+        p = p * 2
+        rows.add({ "name": "a<" + str(i) + ">\"é\n", "price": p, "ok": i % 2 == 0, "w": i })
+    return rows
+
+get endpoint("/records_nested"):
+    List<Json> rows = []
+    for int i in range(2):
+        rows.add({ "id": i, "tag": "t" + str(i) })
+    return { "rows": rows, "n": len(rows), "first": rows[0] }
+
+get endpoint("/records_tpl"):
+    List<Json> rows = []
+    float w = 0.5
+    for int i in range(3):
+        rows.add({ "name": "n<" + str(i) + ">", "price": i * 2, "ok": i == 1, "w": w })
+    return render("records.html", rows=rows)
+
+# Two shapes: a Value, as ever.
+get endpoint("/records_mixed"):
+    List<Json> rows = []
+    rows.add({ "a": 1 })
+    rows.add({ "b": 2 })
+    return rows
+
+# A block's slot is reused by the next block's local: `b` below shares
+# `rows`'s slot, and must not become a record.
+get endpoint("/records_slot", int c = 0):
+    if c == 1:
+        List<Json> rows = []
+        rows.add({ "a": 1 })
+        return rows
+    Json b = { "x": 1 }
+    return b

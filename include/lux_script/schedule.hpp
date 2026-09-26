@@ -1,6 +1,6 @@
 #pragma once
 // `every "<spec>":` blocks -- scheduled tasks. A spec is an interval
-// ("30s", "5m", "2h", "1d") or a daily UTC time ("03:00"). Shared by the
+// ("100ms", "30s", "5m", "2h", "1d") or a daily UTC time ("03:00"). Shared by the
 // parser, which rejects a bad spec at compile time, and the scheduler.
 #include <cstdlib>
 #include <string>
@@ -18,6 +18,16 @@ struct EverySpec {
         const long long today = now_ms - now_ms % day + at;
         return today > now_ms ? today : today + day;
     }
+
+    // The run after the one due at `due_ms`: an interval keeps its own beat
+    // (due + period, not "period after this run ended", which drifted by
+    // however long each run took), skipping any beat already missed.
+    long long after(long long due_ms, long long now_ms) const {
+        if (period_ms <= 0) return next(now_ms);
+        long long n = due_ms + period_ms;
+        if (n <= now_ms) n += (now_ms - n) / period_ms * period_ms + period_ms;
+        return n;
+    }
 };
 
 inline bool parse_every_spec(const std::string& s, EverySpec& out) {
@@ -29,7 +39,9 @@ inline bool parse_every_spec(const std::string& s, EverySpec& out) {
     }
     char* end = nullptr;
     const long long n = std::strtoll(s.c_str(), &end, 10);
-    if (end == s.c_str() || n < 1 || end[0] == '\0' || end[1] != '\0') return false;
+    if (end == s.c_str() || n < 1 || end[0] == '\0') return false;
+    if (std::string(end) == "ms") { out.period_ms = n; return true; }
+    if (end[1] != '\0') return false;
     const long long unit = *end == 's' ? 1'000 : *end == 'm' ? 60'000 : *end == 'h' ? 3'600'000 : *end == 'd' ? 86'400'000 : 0;
     out.period_ms = n * unit;
     return unit > 0;

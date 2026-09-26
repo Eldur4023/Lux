@@ -114,6 +114,17 @@ ws endpoint("/room/:id", string id) origins("http://localhost"):
             rooms.broadcast_others("room-" + id, { "from": msg })
     rooms.leave_all()
 
+# An sse stream in a room: a broadcast arrives as a `data:` event
+# (sse_rooms_check.py).
+sse endpoint("/news/:id", string id):
+    rooms.join("news-" + id)
+    sse.send("joined")
+    while sse.open:
+        await sleep(20)
+
+get endpoint("/news/:id/publish", string id):
+    return { "reached": rooms.broadcast("news-" + id, { "headline": "hello " + id }), "count": rooms.count("news-" + id) }
+
 get endpoint("/os/run_options"):
     Json piped = await os.run("cat", [], { "input": "fed through stdin" })
     Json where = await os.run("pwd", [], { "cwd": "/tmp" })
@@ -178,8 +189,11 @@ every "1s":
     List<Json> none = []
     Json boom = none[5]
 
+every "200ms":
+    state.incr("every_fast")
+
 get endpoint("/every/ticks"):
-    return { "ticks": state.get("every_ticks", 0) }
+    return { "ticks": state.get("every_ticks", 0), "fast": state.get("every_fast", 0) }
 
 get endpoint("/handles"):
     int a = csv.parse("x\n1\n")
@@ -446,8 +460,8 @@ get endpoint("/regex/bad_pattern"):
 # does not have -- verified by hand instead (see the module's own comment
 # in modules/base_modules/rooms.cpp). What a plain GET *can* check: an
 # empty/unknown room behaves like "nobody home" rather than an error, and
-# join()/leave()/leave_all() refuse to run outside a ws route instead of
-# dereferencing a null connection.
+# join()/leave()/leave_all() refuse to run outside a ws or sse route instead
+# of dereferencing a null connection.
 get endpoint("/rooms/count_empty"):
     return { "n": rooms.count("nobody-here") }
 

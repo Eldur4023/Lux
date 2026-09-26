@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <string_view>
 #include <vector>
 #include <unordered_map>
 #include <memory>
@@ -11,7 +12,7 @@ namespace lux {
 
 struct RouteMatch {
     bool    found   = false;
-    Handler handler = nullptr;
+    const Handler* handler = nullptr;   // lives as long as the Router
     std::unordered_map<std::string, std::string> params;
     // True when `handler` was reached only through a CATCH-ALL, not
     // something that specifically named this request's own (method, path):
@@ -83,7 +84,7 @@ private:
         bool no_head_alias = false;
         std::vector<std::unique_ptr<Node>> children;
 
-        Node* find_child(NodeType t, const std::string& seg = {}) const;
+        Node* find_child(NodeType t, std::string_view seg = {}) const;
     };
 
     std::unique_ptr<Node> root_;
@@ -92,11 +93,11 @@ private:
 
     bool match_recursive(
         const Node* node,
-        const std::vector<std::string>& segments,
+        const std::vector<std::string_view>& segments,
         size_t index,
         const std::string& method,
         std::unordered_map<std::string, std::string>& params,
-        Handler& out_handler,
+        const Handler*& out_handler,
         bool& out_via_wildcard) const;
 };
 

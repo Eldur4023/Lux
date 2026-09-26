@@ -185,7 +185,7 @@ private:
 //
 // Must be the first I/O operation on the response for this request.
 
-inline SSEWriter make_sse(Response& res, const Request& req) {
+inline SSEWriter make_sse(Response& res, Request& req) {
     // Set SSE-specific headers (user may override Content-Type before calling)
     res.status(200)
        .header("Content-Type",     "text/event-stream")
@@ -197,6 +197,7 @@ inline SSEWriter make_sse(Response& res, const Request& req) {
     // Write the headers straight to the socket, bypassing write_buf_, so they
     // go out before the first event is produced.
     std::string headers = res.build_sse_headers();
+    req.bind_stream();
     if (req._raw_write) {
         size_t written = 0;
         while (written < headers.size()) {

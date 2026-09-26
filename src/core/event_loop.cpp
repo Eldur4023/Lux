@@ -71,6 +71,7 @@ void EpollLoop::post(std::function<void()> cb) {
         // queue at once.
         wake = task_queue_.empty();
         task_queue_.push_back(std::move(cb));
+        has_tasks_.store(true, std::memory_order_release);
     }
     if (!wake) return;
     uint64_t val = 1;
@@ -78,14 +79,16 @@ void EpollLoop::post(std::function<void()> cb) {
 }
 
 void EpollLoop::process_tasks() {
-    std::vector<std::function<void()>> current_tasks;
+    if (!has_tasks_.load(std::memory_order_acquire)) return;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        current_tasks.swap(task_queue_);
+        running_tasks_.swap(task_queue_);
+        has_tasks_.store(false, std::memory_order_relaxed);
     }
-    for (auto& task : current_tasks) {
+    for (auto& task : running_tasks_) {
         if (task) task();
     }
+    running_tasks_.clear();
 }
 
 void EpollLoop::run() {

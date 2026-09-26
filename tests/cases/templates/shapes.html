@@ -1,0 +1,6 @@
+<h1>{{ title }}</h1>{{ raw|safe }}
+{% for g in groups %}<section n="{{ loop.index }}/{{ loop.length }}">{{ g.name }}
+  {% for it in g.items %}{% if loop.first %}[{% endif %}{{ it }}{% if loop.last %}]{% else %},{% endif %}{% endfor %}
+  {% if g.n > 2 %}big{% elif g.n > 0 %}small{% else %}none{% endif %} {{ g.n * 10 + 1 }} {{ g.missing }} {{ g.tags }}
+{% endfor %}{% for x in empty %}never{% endfor %}
+{% include "shapes_part.html" %}

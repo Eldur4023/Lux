@@ -52,7 +52,13 @@ public:
     // May be null (the normal case, without --native) or shorter than
     // `functions` (functions with no entry were never compiled to native):
     // an out-of-range index is treated the same as an empty slot.
-    Result start(const Chunk& chunk, std::vector<Value> params, NativeCtx& ctx,
+    Result start(const Chunk& chunk, std::vector<Value>&& params, NativeCtx& ctx,
+                 const FunctionTable* functions = nullptr,
+                 const NativeDispatch* native = nullptr);
+    // The same, copying `params` straight into the locals: a template runs
+    // one chunk per {{ }} over the same values, and copying the whole vector
+    // for each was most of what a page cost.
+    Result start(const Chunk& chunk, const std::vector<Value>& params, NativeCtx& ctx,
                  const FunctionTable* functions = nullptr,
                  const NativeDispatch* native = nullptr);
 
@@ -91,6 +97,7 @@ private:
     const FunctionTable*  functions_ = nullptr;
     const NativeDispatch* native_    = nullptr;
 
+    void begin(const Chunk& chunk, const FunctionTable* functions, const NativeDispatch* native);
     Result execute(NativeCtx& ctx);
     Result unwind(Result r, NativeCtx& ctx);   // delivers an error to the nearest catch
     Result run_until_error(NativeCtx& ctx);

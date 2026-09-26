@@ -47,12 +47,13 @@ static int cb_on_url(llhttp_t* p, const char* at, size_t len) {
 
 static void commit_header(HttpParser::ParseContext* c) {
     if (!c->value_pending) return;
-    std::string key = c->last_field;
+    std::string& key = c->last_field;
     std::transform(key.begin(), key.end(), key.begin(),
                    [](unsigned char ch) { return std::tolower(ch); });
 
-    auto it = c->current.headers.find(key);
-    if (it != c->current.headers.end()) {
+    auto& hs = c->current.headers;
+    auto it = std::find_if(hs.begin(), hs.end(), [&](const auto& h) { return h.first == key; });
+    if (it != hs.end()) {
         // RFC 7230 §3.2.2: duplicate headers may be combined with ", ".
         // Two exceptions:
         //  - set-cookie: each value must stay on its own line (in practice
@@ -75,7 +76,8 @@ static void commit_header(HttpParser::ParseContext* c) {
         it->second += sep;
         it->second += c->last_value;
     } else {
-        c->current.headers[key] = std::move(c->last_value);
+        if (hs.empty()) hs.reserve(16);
+        hs.emplace_back(std::move(key), std::move(c->last_value));
     }
 
     c->last_field.clear();

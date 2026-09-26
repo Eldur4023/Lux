@@ -18,17 +18,19 @@
 #include <memory>
 #include <filesystem>
 #include <thread>
+#include <charconv>
 #include <chrono>
 #include <algorithm>
 #include <vector>
 #include <mutex>
 #include <functional>
-#include <sstream>
 #include <string_view>
 #include <utility>
-#include <iomanip>
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <linux/openat2.h>
 
 #include <lux/mime.hpp>
 
@@ -40,11 +42,18 @@ namespace {
 // Weak ETag from mtime + size: "mtime-size" hex-encoded.
 static std::string make_etag(const std::filesystem::file_time_type& mtime,
                               std::uintmax_t size) {
-    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                  mtime.time_since_epoch()).count();
-    std::ostringstream ss;
-    ss << '"' << std::hex << ns << '-' << size << '"';
-    return ss.str();
+    // Hex of the bits, as the ostream this replaced printed them: libstdc++'s
+    // file_clock counts from 2174, so today's times are negative.
+    const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        mtime.time_since_epoch()).count());
+    char buf[48];
+    char* p = buf;
+    *p++ = '"';
+    p = std::to_chars(p, buf + sizeof buf, ns, 16).ptr;
+    *p++ = '-';
+    p = std::to_chars(p, buf + sizeof buf, static_cast<uint64_t>(size), 16).ptr;
+    *p++ = '"';
+    return std::string(buf, p);
 }
 
 // True if `candidate` lives inside `root` (root is a component-wise prefix
@@ -57,20 +66,12 @@ static bool path_is_within(const std::filesystem::path& root,
                          candidate.begin(), candidate.end()).first == root.end();
 }
 
-// Returns true and fills res if a static mount covers this path.
-// Sets ETag, Cache-Control, and honours If-None-Match for 304 responses.
-static bool try_serve_static(
-    const std::vector<App::StaticMount>& mounts,
-    const Request& req,
-    Response& res)
-{
-    namespace fs = std::filesystem;
-    auto fail = [&](int code, const char* body) {
-        res.status(code).json_text(body);
-        return true;
-    };
+// The mount covering `path`: the longest prefix (prepare() sorts them) that
+// ends on a path-segment boundary.
+static const App::StaticMount* mount_for(const std::vector<App::StaticMount>& mounts,
+                                         const std::string& path) {
     for (const auto& m : mounts) {
-        if (req.path.rfind(m.prefix, 0) != 0) continue;
+        if (path.rfind(m.prefix, 0) != 0) continue;
         const size_t plen = m.prefix.size();
         // A prefix ending in '/' (almost always the root mount, "/") already
         // consumes the separator itself, so anything after it is fair game
@@ -84,8 +85,118 @@ static bool try_serve_static(
         // through to 404, since m.prefix[1] never lines up with req.path[1]
         // for any longer path.
         if (m.prefix.back() != '/' &&
-            req.path.size() > plen && req.path[plen] != '/') continue;
+            path.size() > plen && path[plen] != '/') continue;
+        return &m;
+    }
+    return nullptr;
+}
 
+// root/rel resolved by the kernel without leaving root: openat2's
+// RESOLVE_BENEATH refuses any "..", absolute path or symlink that would
+// (EXDEV). One call where canonical() + weakly_canonical() + prefix checks
+// took ~30 (a readlink per component, three times over).
+// 0 with `st` filled and the file open in `fd` (O_NONBLOCK: a FIFO must not
+// hang the loop), 403 (escapes root), 404, or -1: no openat2 here (Linux <
+// 5.6, or a seccomp profile that predates it).
+static int open_beneath(int root_fd, const std::string& rel, struct stat& st, int& fd) {
+    open_how how{};
+    how.flags   = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
+    how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
+    fd = static_cast<int>(::syscall(SYS_openat2, root_fd, rel.empty() ? "." : rel.c_str(),
+                                    &how, sizeof how));
+    if (fd < 0) return errno == ENOSYS || errno == EPERM ? -1 : errno == EXDEV ? 403 : 404;
+    if (::fstat(fd, &st) == 0) return 0;
+    ::close(fd);
+    fd = -1;
+    return 404;
+}
+
+// The mount's root, open, per thread. Re-opened once a second, so a deploy
+// that swaps a symlink in its path (current -> releases/N) is followed
+// within one: opening it per request walked the whole path every time.
+static int root_fd_for(const App::StaticMount& m) {
+    struct Cached { const App::StaticMount* m; int fd; std::chrono::steady_clock::time_point at; };
+    thread_local std::vector<Cached> cache;
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& c : cache) {
+        if (c.m != &m) continue;
+        if (now - c.at < std::chrono::seconds(1) && c.fd >= 0) return c.fd;
+        if (c.fd >= 0) ::close(c.fd);
+        c.fd = ::open(m.root.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC);
+        c.at = now;
+        return c.fd;
+    }
+    cache.push_back({&m, ::open(m.root.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC), now});
+    return cache.back().fd;
+}
+
+// Cache-Control, Content-Type, ETag and the 304, then the file itself.
+// `fd`, if not -1, is the file already open, and is taken over.
+static void send_static(const Request& req, Response& res, std::string file,
+                        const std::string& etag, std::uintmax_t filesize, int fd = -1) {
+    // Hashed filenames (e.g. app.abc123ef.js) → immutable for 1 year.
+    // Detects a hash segment: last component after '.' or '-' is ≥8 hex chars.
+    // Everything else → must-revalidate with short max-age.
+    // Name, extension and stem by hand: std::filesystem split the whole
+    // path into components for each.
+    const std::string& full = file;
+    const std::string_view name = std::string_view(full).substr(full.rfind('/') + 1);
+    const size_t dot = name.rfind('.');
+    const std::string_view ext  = dot == std::string_view::npos || dot == 0 ? std::string_view() : name.substr(dot);
+    const std::string stem(name.substr(0, name.size() - ext.size()));
+    auto is_hex_hash = [](const std::string& s) -> bool {
+        auto pos = s.find_last_of(".-");
+        if (pos == std::string::npos) return false;
+        const auto seg = s.substr(pos + 1);
+        if (seg.size() < 8) return false;
+        return std::all_of(seg.begin(), seg.end(),
+                           [](unsigned char c){ return std::isxdigit(c); });
+    };
+    // An index.html — whether requested directly, served for a bare
+    // directory, or reached through the `spa` fallback — is the one
+    // static file whose CONTENT changes on every deploy without its
+    // NAME changing (that is exactly what the hashed-asset names it
+    // references are for), so it needs the opposite of the two rules
+    // above: revalidate on every load, not just once an hour. Without
+    // this, a client could keep the OLD index.html — pointing at
+    // hashed bundles a deploy already deleted — for up to an hour
+    // after a release. `no-cache` (which, despite the name, still lets
+    // the browser cache the file — it just forces the ETag
+    // revalidation below on every load instead of skipping it for
+    // max-age) costs one cheap 304 round trip per navigation, not a
+    // full re-download.
+    const char* cache_ctrl = name == "index.html"
+        ? "no-cache"
+        : is_hex_hash(stem)
+            ? "public, max-age=31536000, immutable"
+            : "public, max-age=3600, must-revalidate";
+
+    res.header("ETag",          etag);
+    res.header("Cache-Control", cache_ctrl);
+    res.header("Content-Type",  mime_for_ext(ext));  // lux/mime.hpp
+
+    // ── 304 Not Modified ──────────────────────────────────────────────────
+    auto inm = req.header("if-none-match");
+    if (inm && *inm == etag) {
+        if (fd >= 0) ::close(fd);
+        res.status(304).send("");
+        return;
+    }
+
+    // ── Serve via sendfile(2) — zero-copy ─────────────────────────────────
+    if (fd >= 0) res.send_file_fd(fd, std::move(file), filesize);
+    else         res.send_file(file, filesize);
+}
+
+// Serves `req` from mount `m`: the file, a 304, or the error.
+// Sets ETag, Cache-Control, and honours If-None-Match for 304 responses.
+static void serve_from_mount(const App::StaticMount& m, const Request& req, Response& res) {
+    namespace fs = std::filesystem;
+    auto fail = [&](int code, const char* body) {
+        res.status(code).json_text(body);
+    };
+    {
+        const size_t plen = m.prefix.size();
         std::string rel = lux::percent_decode(req.path.substr(plen), false);
         if (rel.empty() || rel.front() != '/') rel = '/' + rel;
 
@@ -102,12 +213,49 @@ static bool try_serve_static(
         // something an app route can be written for ahead of time.
         // Blocking every dotfile unconditionally left no way to pass that
         // validation through Lux at all.
+        // A decoded %00 would cut the path the kernel sees short of the name
+        // the MIME type is taken from.
+        if (rel.find('\0') != std::string::npos) return fail(404, R"({"error":"Not Found"})");
         static const std::string kWellKnown = "/.well-known/";
         bool is_well_known = rel.compare(0, kWellKnown.size(), kWellKnown) == 0;
         if (!is_well_known) {
             for (size_t i = 0; i < rel.size(); ++i) {
                 if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') return fail(404, R"({"error":"Not Found"})");
             }
+        }
+
+        if (const int root_fd = root_fd_for(m); root_fd >= 0) {
+            struct stat st{};
+            int fd = -1;
+            std::string file = rel.substr(1);
+            int r = open_beneath(root_fd, file, st, fd);
+            if (r == 0 && S_ISDIR(st.st_mode)) {
+                struct stat ist{};
+                int ifd = -1;
+                std::string index = file.empty() ? "index.html" : file + "/index.html";
+                if (open_beneath(root_fd, index, ist, ifd) == 0) {
+                    if (S_ISREG(ist.st_mode)) { ::close(fd); fd = ifd; file = std::move(index); st = ist; }
+                    else ::close(ifd);
+                }
+            }
+            if (r > 0 || (r == 0 && !S_ISREG(st.st_mode))) {
+                if (fd >= 0) { ::close(fd); fd = -1; }
+                if (r == 403 || !m.spa) return fail(r == 403 ? 403 : 404, r == 403 ? R"({"error":"Forbidden"})" : R"({"error":"Not Found"})");
+                // SPA fallback: index.html for unknown paths, so client-side
+                // routers (React Router, Vue Router...) can handle the URL.
+                r = open_beneath(root_fd, "index.html", st, fd);
+                if (r == 0 && !S_ISREG(st.st_mode)) { ::close(fd); fd = -1; r = 404; }
+                if (r > 0) return fail(r, r == 403 ? R"({"error":"Forbidden"})" : R"({"error":"Not Found"})");
+                file = "index.html";
+            }
+            if (r == 0) {
+                const auto mtime = std::chrono::file_clock::from_sys(
+                    std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(
+                        std::chrono::seconds(st.st_mtim.tv_sec) + std::chrono::nanoseconds(st.st_mtim.tv_nsec))));
+                const auto size = static_cast<std::uintmax_t>(st.st_size);
+                return send_static(req, res, m.root + '/' + file, make_etag(mtime, size), size, fd);
+            }
+            // r == -1: no openat2, resolved the portable way below.
         }
 
         // canonical() for the root resolves any symlinks inside the serve root
@@ -170,63 +318,12 @@ static bool try_serve_static(
             if (!path_is_within(canonical_root, canonical_file)) return fail(403, R"({"error":"Forbidden"})");
         }
 
-        // ── ETag ──────────────────────────────────────────────────────────────
         std::error_code mtime_ec, size_ec;
         auto mtime    = fs::last_write_time(canonical_file, mtime_ec);
         auto filesize = fs::file_size(canonical_file, size_ec);
         if (mtime_ec || size_ec) return fail(500, R"({"error":"Cannot stat file"})");
-        std::string etag = make_etag(mtime, filesize);
-
-        // ── Cache-Control ─────────────────────────────────────────────────────
-        // Hashed filenames (e.g. app.abc123ef.js) → immutable for 1 year.
-        // Detects a hash segment: last component after '.' or '-' is ≥8 hex chars.
-        // Everything else → must-revalidate with short max-age.
-        const std::string& ext  = canonical_file.extension().string();
-        const std::string  stem = canonical_file.stem().string();
-        auto is_hex_hash = [](const std::string& s) -> bool {
-            auto pos = s.find_last_of(".-");
-            if (pos == std::string::npos) return false;
-            const auto seg = s.substr(pos + 1);
-            if (seg.size() < 8) return false;
-            return std::all_of(seg.begin(), seg.end(),
-                               [](unsigned char c){ return std::isxdigit(c); });
-        };
-        // An index.html — whether requested directly, served for a bare
-        // directory, or reached through the `spa` fallback — is the one
-        // static file whose CONTENT changes on every deploy without its
-        // NAME changing (that is exactly what the hashed-asset names it
-        // references are for), so it needs the opposite of the two rules
-        // above: revalidate on every load, not just once an hour. Without
-        // this, a client could keep the OLD index.html — pointing at
-        // hashed bundles a deploy already deleted — for up to an hour
-        // after a release. `no-cache` (which, despite the name, still lets
-        // the browser cache the file — it just forces the ETag
-        // revalidation below on every load instead of skipping it for
-        // max-age) costs one cheap 304 round trip per navigation, not a
-        // full re-download.
-        const char* cache_ctrl = canonical_file.filename() == "index.html"
-            ? "no-cache"
-            : is_hex_hash(stem)
-                ? "public, max-age=31536000, immutable"
-                : "public, max-age=3600, must-revalidate";
-
-        const char* mime = mime_for_ext(ext);  // lux/mime.hpp
-        res.header("ETag",          etag);
-        res.header("Cache-Control", cache_ctrl);
-        res.header("Content-Type",  mime);
-
-        // ── 304 Not Modified ──────────────────────────────────────────────────
-        auto inm = req.header("if-none-match");
-        if (inm && *inm == etag) {
-            res.status(304).send("");
-            return true;
-        }
-
-        // ── Serve via sendfile(2) — zero-copy ─────────────────────────────────
-        res.send_file(canonical_file, filesize);
-        return true;
+        send_static(req, res, canonical_file.native(), make_etag(mtime, filesize), filesize);
     }
-    return false;
 }
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────
@@ -241,7 +338,8 @@ static std::function<void()> g_initiate_drain;
 static volatile sig_atomic_t g_signal_count   = 0;
 
 static void signal_handler(int) {
-    if (++g_signal_count >= 2) {
+    g_signal_count = g_signal_count + 1;
+    if (g_signal_count >= 2) {
         static const char msg[] = "\nForced exit.\n";
         (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
         std::_Exit(1);
@@ -308,12 +406,25 @@ Task<void> App::handle_request(Request& req, Response& res) {
         // confirmed against the real binary: a root SPA mount answered
         // /health, /docs and /openapi.json with index.html instead of
         // reaching any of them.
-        auto rmatch = router_.match(req.method, req.path);
-        bool route_exists = rmatch.found && !rmatch.via_wildcard;
-        if (!route_exists && route_probe_) route_exists = route_probe_(req.method, req.path);
-        if (!route_exists && try_serve_static(static_mounts_, req, res)) co_return;
+        if (const StaticMount* m = mount_for(static_mounts_, req.path)) {
+            auto rmatch = router_.match(req.method, req.path);
+            bool route_exists = rmatch.found && !rmatch.via_wildcard;
+            if (!route_exists && route_probe_) route_exists = route_probe_(req.method, req.path);
+            if (!route_exists) { serve_from_mount(*m, req, res); co_return; }
+        }
     }
 
+    // No middleware (the Lux Script engine without --verbose): straight to
+    // the route, without the chain's shared_ptr, std::function and frames.
+    if (middlewares_.empty()) {
+        auto match = router_.match(req.method, req.path);
+        if (match.found) {
+            req.params = std::move(match.params);
+            co_await (*match.handler)(req, res);
+        } else {
+            res.status(404).json_text(R"({"error":"Not Found"})");
+        }
+    } else {
     // ── Async middleware chain ─────────────────────────────────────────────
     // call_next lives in a shared_ptr so NextFn closures that outlive this
     // coroutine frame (e.g. during shutdown) don't dangle on the function
@@ -341,13 +452,14 @@ Task<void> App::handle_request(Request& req, Response& res) {
             auto match = router_.match(req.method, req.path);
             if (match.found) {
                 req.params = std::move(match.params);
-                co_await match.handler(req, res);
+                co_await (*match.handler)(req, res);
             } else {
                 res.status(404).json_text(R"({"error":"Not Found"})");
             }
         }
     };
     co_await (*call_next)(0);
+    }
 
     // Error handlers run after the full chain, while we still own req/res.
     // Async handlers take precedence over sync handlers for the same code.
@@ -423,7 +535,7 @@ void App::run(const std::string& host, uint16_t port) {
     // default, core+8) -- see blocking_pool.hpp for the actual numbers this
     // was picked from: it is the knee of a real variance-vs-typical-case-cost
     // curve, not a round number.
-    blocking_pool().start(num_threads);
+    blocking_pool().start(num_threads, 0, std::chrono::milliseconds(10));
 
     // Separate pool for is_async native module calls (os.run(), http.*,
     // read_file()/write_file()) -- see io_blocking_pool()'s comment
@@ -522,15 +634,16 @@ void App::run(const std::string& host, uint16_t port) {
     std::signal(SIGTERM, signal_handler);
 
     // ── Worker threads (cores 1..N-1) ─────────────────────────────────────────
-    // Each thread runs its own EventLoop + TcpServer.  SO_REUSEPORT lets the
-    // kernel distribute incoming connections evenly across all workers.
+    // Each thread runs its own EventLoop + TcpServer.  SO_REUSEPORT spreads
+    // the accepts; the group then evens out the connections themselves.
+    auto group = std::make_shared<core::TcpServer::Group>();
     std::vector<std::thread> threads;
     threads.reserve(num_threads - 1);
     for (unsigned i = 1; i < num_threads; ++i) {
         threads.emplace_back([&]() {
             core::EventLoop loop;
             core::TcpServer server(host, port, loop, dispatch,
-                                   max_connections_, shared_conn_count);
+                                   max_connections_, shared_conn_count, group);
             {
                 std::lock_guard<std::mutex> lk(all_mutex);
                 all_loops.push_back(&loop);
@@ -549,7 +662,7 @@ void App::run(const std::string& host, uint16_t port) {
 
     // ── Main thread (core 0) ──────────────────────────────────────────────────
     core::TcpServer main_server(host, port, main_loop, dispatch,
-                                max_connections_, shared_conn_count);
+                                max_connections_, shared_conn_count, group);
     {
         std::lock_guard<std::mutex> lk(all_mutex);
         all_servers.push_back(&main_server);

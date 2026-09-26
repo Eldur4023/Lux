@@ -15,7 +15,7 @@ namespace lux {
 
 // A STATIC child must also match `seg`; there is at most one PARAM and one
 // WILDCARD child per node, so for those the type alone identifies it.
-Router::Node* Router::Node::find_child(NodeType t, const std::string& seg) const {
+Router::Node* Router::Node::find_child(NodeType t, std::string_view seg) const {
     for (auto& child : children)
         if (child->type == t && (t != NodeType::STATIC || child->segment == seg))
             return child.get();
@@ -101,12 +101,20 @@ void Router::add_internal(std::string method, std::string pattern, Handler handl
 }
 
 RouteMatch Router::match(const std::string& method, const std::string& path) const {
-    std::string clean_path = path;
-    if (clean_path.size() > 1 && clean_path.back() == '/') clean_path.pop_back();
-
-    auto segments = split_path(clean_path);
+    // Segments are views into `path`: no copy of it, no stream. A trailing
+    // '/' is an empty last segment, dropped like every other empty one.
+    thread_local std::vector<std::string_view> segments;   // reused: match never re-enters
+    segments.clear();
+    std::string_view rest = path;
+    while (!rest.empty()) {
+        const size_t slash = rest.find('/');
+        std::string_view seg = rest.substr(0, slash);
+        if (!seg.empty()) segments.push_back(seg);
+        if (slash == std::string_view::npos) break;
+        rest.remove_prefix(slash + 1);
+    }
     std::unordered_map<std::string, std::string> params;
-    Handler handler = nullptr;
+    const Handler* handler = nullptr;
     bool    via_wildcard = false;
 
     if (match_recursive(root_.get(), segments, 0, method, params, handler, via_wildcard)) {
@@ -117,18 +125,18 @@ RouteMatch Router::match(const std::string& method, const std::string& path) con
 
 bool Router::match_recursive(
     const Node* node,
-    const std::vector<std::string>& segments,
+    const std::vector<std::string_view>& segments,
     size_t index,
     const std::string& method,
     std::unordered_map<std::string, std::string>& params,
-    Handler& out_handler,
+    const Handler*& out_handler,
     bool& out_via_wildcard) const
 {
     // Terminal case
     if (index == segments.size()) {
         auto it = node->handlers.find(method);
         if (it != node->handlers.end()) {
-            out_handler = it->second;
+            out_handler = &it->second;
             return true;
         }
         // RFC 9110 §9.3.2: HEAD is defined identically to GET, minus the
@@ -141,14 +149,14 @@ bool Router::match_recursive(
         if (method == "HEAD" && !node->no_head_alias) {
             auto git = node->handlers.find("GET");
             if (git != node->handlers.end()) {
-                out_handler = git->second;
+                out_handler = &git->second;
                 return true;
             }
         }
         // Check wildcard handle anyway (*)
         it = node->handlers.find("*");
         if (it != node->handlers.end()) {
-            out_handler = it->second;
+            out_handler = &it->second;
             // This is an ANY-METHOD fallback (app.any(path, ...)), not a
             // match against the method the caller actually asked for --
             // the same "this claims the path only because nothing more
@@ -171,7 +179,7 @@ bool Router::match_recursive(
         return false;
     }
 
-    const std::string& seg = segments[index];
+    const std::string_view seg = segments[index];
 
     // 1. Try static
     Node* next = node->find_child(NodeType::STATIC, seg);
@@ -184,7 +192,7 @@ bool Router::match_recursive(
     if (next) {
         // Decode only the bound value (static segments match literally); no '+'
         // folding in a path, so GET /echo/%34%32 binds "42".
-        params[next->segment] = lux::percent_decode(seg, false);
+        params[next->segment] = lux::percent_decode(std::string(seg), false);
         if (match_recursive(next, segments, index + 1, method, params, out_handler, out_via_wildcard)) {
             return true;
         }
@@ -199,7 +207,7 @@ bool Router::match_recursive(
         if (it == next->handlers.end()) it = next->handlers.find("*");
 
         if (it != next->handlers.end()) {
-            out_handler = it->second;
+            out_handler = &it->second;
             out_via_wildcard = true;
             return true;
         }

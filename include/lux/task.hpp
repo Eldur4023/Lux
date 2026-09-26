@@ -50,8 +50,9 @@ struct Task {
 
                 // No continuation — schedule destruction on the event loop
                 if (h.promise().loop) {
-                    auto raw = std::coroutine_handle<>(h);
-                    h.promise().loop->post([raw]() mutable { raw.destroy(); });
+                    // Suspended here, so it may be destroyed here: posting it
+                    // cost an eventfd write and a loop wakeup per request.
+                    h.destroy();
                 }
                 return std::noop_coroutine();
             }
@@ -89,11 +90,6 @@ struct Task {
     }
 
     bool done() const { return handle && handle.done(); }
-
-    T get_result() {
-        if (handle.promise().exception) std::rethrow_exception(handle.promise().exception);
-        return std::move(handle.promise().result);
-    }
 
     // ── Awaiter interface (for co_await Task<T> inside another coroutine) ────
     bool await_ready() const noexcept { return false; }
@@ -135,8 +131,9 @@ struct Task<void> {
                 if (auto c = h.promise().continuation) return c;
 
                 if (h.promise().loop) {
-                    auto raw = std::coroutine_handle<>(h);
-                    h.promise().loop->post([raw]() mutable { raw.destroy(); });
+                    // Suspended here, so it may be destroyed here: posting it
+                    // cost an eventfd write and a loop wakeup per request.
+                    h.destroy();
                 }
                 return std::noop_coroutine();
             }

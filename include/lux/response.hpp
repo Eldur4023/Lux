@@ -23,7 +23,9 @@ class Response {
     struct State {
         int         status_code = 200;
         std::string body;
-        std::unordered_map<std::string, std::string> headers;
+        // In the order they were set; a flat vector, since a response has a
+        // handful and a hash map paid a node for each.
+        std::vector<std::pair<std::string, std::string>> headers;
         // Set-Cookie is the one HTTP response header that legally appears
         // multiple times — keep them in a separate list so they survive the
         // map serialisation.
@@ -32,6 +34,13 @@ class Response {
         // uses sendfile(2) to stream the file body directly to the socket.
         std::string     sendfile_path;
         std::uintmax_t  sendfile_size = 0;
+        // Already open (the static mounts resolve it with openat2): the
+        // connection sends this one instead of opening the path again.
+        // Owned: closed here unless the connection takes it.
+        int             sendfile_fd   = -1;
+        State() = default;
+        State(const State&) = delete;
+        ~State() { if (sendfile_fd >= 0) ::close(sendfile_fd); }
         // 0 = no active range (serve the whole file). Set only by
         // partial_content(), once http_connection.cpp has already validated
         // a Range header against this exact file's size.
@@ -73,6 +82,7 @@ public:
         state_->body.clear();
         state_->sendfile_path.clear();
         state_->sendfile_size = 0;
+        if (state_->sendfile_fd >= 0) { ::close(state_->sendfile_fd); state_->sendfile_fd = -1; }
         state_->sendfile_range_length = 0;
         state_->body_committed = false;
         return old;
@@ -106,17 +116,20 @@ public:
         // proxy in front of Lux that resolves the resulting ambiguity
         // differently than the framework's own client does is exactly the
         // setup a request-smuggling attack needs.
-        std::string lower = key;
-        std::transform(lower.begin(), lower.end(), lower.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
-        if (lower == "content-length" || lower == "transfer-encoding") {
+        if (iequals(key, "content-length") || iequals(key, "transfer-encoding")) {
             std::cerr << "[lux] Response.header(\"" << key << "\", ...) ignored -- "
                          "this header is controlled by the framework, not a handler\n";
             return *this;
         }
 
-        state_->headers[std::move(key)] = std::move(value);
+        set_header(std::move(key), std::move(value));
         return *this;
+    }
+
+    // The value set under exactly `key`, or null.
+    const std::string* header_value(std::string_view key) const {
+        for (const auto& [k, v] : state_->headers) if (k == key) return &v;
+        return nullptr;
     }
 
     // Set a cookie.  Multiple cookies can be set on one response — each emits
@@ -175,7 +188,7 @@ public:
     // instead — it enforces a root directory and resolves symlinks safely.
     Response& send_file(const std::filesystem::path& path) {
         // Reject paths with ".." components to prevent directory traversal.
-        // Internal callers (serve_file_from, try_serve_static) pass canonical
+        // Internal callers (serve_file_from, serve_from_mount) pass canonical
         // paths so this check is a no-op for them.
         for (const auto& comp : path) {
             if (comp == "..") return fail(403, "Forbidden");
@@ -200,6 +213,19 @@ public:
         header("Accept-Ranges", "bytes");
         return *this;
     }
+
+    // send_file() for a file the caller already has open: `fd` is taken over.
+    // The caller has set Content-Type.
+    Response& send_file_fd(int fd, std::string path, std::uintmax_t size) {
+        state_->sendfile_path  = std::move(path);
+        state_->sendfile_size  = size;
+        state_->body_committed = true;
+        header("Accept-Ranges", "bytes");
+        if (state_->sendfile_fd >= 0) ::close(state_->sendfile_fd);
+        state_->sendfile_fd = fd;
+        return *this;
+    }
+    int take_sendfile_fd() { return std::exchange(state_->sendfile_fd, -1); }
 
     // Marks this sendfile response as a 206 for a range ALREADY VALIDATED
     // by the caller (http_connection.cpp's finish_dispatch() is the only
@@ -248,8 +274,6 @@ public:
 
     int                    status_code()    const { return state_->status_code; }
     const std::string&     body()           const { return state_->body; }
-    const std::unordered_map<std::string, std::string>&
-                           headers_map()    const { return state_->headers; }
     const std::vector<std::string>&
                            cookies()        const { return state_->cookies; }
     const std::string&     sendfile_path()  const { return state_->sendfile_path; }
@@ -260,19 +284,27 @@ public:
     bool                   ws_started()     const { return state_->ws_started; }
     void                   mark_ws_started()     { state_->ws_started  = true; }
     std::string            content_type()   const {
-        auto it = state_->headers.find("Content-Type");
-        return (it != state_->headers.end()) ? it->second : "";
+        const std::string* v = header_value("Content-Type");
+        return v ? *v : "";
     }
 
     // Headers-only build for SSE: no Content-Length (streaming, length unknown).
     std::string build_sse_headers() const {
-        std::string out = status_line();
+        std::string out;
+        append_status_line(out);
         emit_headers(out);
         out += "\r\n";
         return out;
     }
 
     std::string build() const {
+        std::string out = build_head();
+        if (state_->sendfile_path.empty()) { out.reserve(out.size() + state_->body.size()); out += state_->body; }
+        return out;
+    }
+
+    // build() without the body, which the connection sends from where it is.
+    std::string build_head() const {
         // Content-Length: use file size when sendfile is in play, or the
         // range's length instead when partial_content() set one -- a 206
         // sends fewer bytes than the file's own size, and Content-Length
@@ -283,15 +315,14 @@ public:
                     : static_cast<std::size_t>(state_->sendfile_range_length
                                                 ? state_->sendfile_range_length
                                                 : state_->sendfile_size);
-        std::string out = status_line();
-        out.reserve(256 + (inline_body ? state_->body.size() : 0));
+        std::string out;
+        out.reserve(256);
+        append_status_line(out);
         out += "Content-Length: ";
         out += std::to_string(clen);
         out += "\r\n";
         emit_headers(out);
         out += "\r\n";
-        // Body only for normal (non-sendfile) responses
-        if (inline_body) out += state_->body;
         return out;
     }
 
@@ -312,32 +343,38 @@ private:
     Response& fail(int code, const char* error) {
         state_->status_code = code;
         state_->body = std::string(R"({"error":")") + error + "\"}";
-        state_->headers["Content-Type"] = "application/json; charset=utf-8";
+        set_header("Content-Type", "application/json; charset=utf-8");
         return *this;
     }
 
     // HTTP header field names are case-insensitive (RFC 7230 §3.2), but
     // state_->headers is keyed by whatever exact case a handler passed to
-    // header() — needed so headers_map() still hands back what the caller
+    // header() — needed so header_value() still hands back what the caller
     // set (native_route_shadow.cpp's own test looks up "Location" by that
     // exact case). A handler that sets "x-frame-options" (all lowercase)
     // is, semantically, setting the SAME header as kDefaults'
     // "X-Frame-Options" below, but an exact-case map lookup does not know
     // that: both ended up on the wire as two separate, contradictory
     // header lines instead of the handler's value winning outright.
+    static bool iequals(std::string_view a, std::string_view b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        return true;
+    }
     static bool has_header_ci(
-        const std::unordered_map<std::string, std::string>& headers,
+        const std::vector<std::pair<std::string, std::string>>& headers,
         const char* name) {
-        for (const auto& [k, v] : headers) {
-            if (k.size() != std::strlen(name)) continue;
-            bool eq = true;
-            for (size_t i = 0; i < k.size(); ++i) {
-                if (std::tolower(static_cast<unsigned char>(k[i])) !=
-                    std::tolower(static_cast<unsigned char>(name[i]))) { eq = false; break; }
-            }
-            if (eq) return true;
-        }
+        for (const auto& [k, v] : headers) if (iequals(k, name)) return true;
         return false;
+    }
+    // Replaces the value under exactly `key` (the map it used to be did the same).
+    void set_header(std::string key, std::string value) {
+        for (auto& [k, v] : state_->headers)
+            if (k == key) { v = std::move(value); return; }
+        if (state_->headers.empty()) state_->headers.reserve(8);
+        state_->headers.emplace_back(std::move(key), std::move(value));
     }
 
     // Every response the framework sends gets this baseline of hardening
@@ -348,13 +385,12 @@ private:
     // is deliberately NOT defaulted: it is inline-script/style dependent per
     // app, and a wrong default would silently break pages rather than
     // protect them.
-    std::string status_line() const {
-        std::string out = "HTTP/1.1 ";
+    void append_status_line(std::string& out) const {
+        out += "HTTP/1.1 ";
         out += std::to_string(state_->status_code);
         out += ' ';
         out += reason_phrase(state_->status_code);
         out += "\r\n";
-        return out;
     }
 
     // Headers plus Set-Cookie lines.

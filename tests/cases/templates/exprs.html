@@ -1,0 +1,2 @@
+{% for g in groups %}{{ loop.index0 }}{% for x in g.items %}<{{ loop.index }}/{{ loop.length }}:{{ x * 2 - 1 }}>{% endfor %}|{{ g.n > 0 and g.n < 4 }}|{{ g.n == 0 or g.n > 3 }}|{{ -g.n }}|{{ "#" + str(g.n) + "!" }}|{{ g.n / 4 }}|{{ loop }}
+{% endfor %}
