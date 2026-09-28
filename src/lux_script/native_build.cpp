@@ -332,6 +332,9 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // dependency that would have pulled value.hpp in first.
     codigo += "#include <lux_script/natives.hpp>\n\n";
     codigo += "#include <lux_script/value.hpp>\nusing lux_script::Value;\n\n";
+    // bind_json_flat/JsonFieldSpec/JsonBound: el binder de cuerpos que
+    // codigo_bind_cuerpo() llama en cada ruta con parametro de clase.
+    codigo += "#include <lux_script/json_bind.hpp>\n\n";
     codigo +=
         abi_prelude() + "\n" + error_runtime_prelude() + "\n" + list_runtime_prelude() + "\n" +
         dict_runtime_prelude() + "\n" + string_runtime_prelude() + "\n";

@@ -3407,19 +3407,45 @@ std::optional<FuncionNativa> generar_metodo_nativo(const std::string& clase, con
 // se sabe que no hara falta el 422.
 std::string codigo_bind_cuerpo(const std::string& nombre_param, const std::string& nombre_clase,
                                const ClaseNativa& clase, const Generador& gen) {
-    const std::string cuerpo_var = "__cuerpo_" + nombre_param;
+    const std::string bound_var = "__bind_" + nombre_param;
+    const std::string spec_var  = "__spec_" + nombre_param;
     const std::string msgs_var   = "__msgs_" + nombre_param;
     std::string s;
 
-    s += "    Value " + cuerpo_var + ";\n";
-    s += "    if (!Value::parse_json(req.body, " + cuerpo_var + ")) {\n";
+    // El cuerpo se enlaza DIRECTO contra los campos de la clase
+    // (bind_json_flat, json_bind.hpp): cada clave se coteja con los campos
+    // declarados segun llega, las claves que nadie declara se validan y se
+    // saltan sin construir nada, y nunca llega a existir el arbol generico
+    // que Value::parse_json() levantaba entero para despues recorrerlo y
+    // desmontarlo campo a campo. La misma gramatica, el mismo limite de
+    // anidacion y el mismo veredicto por campo que el camino del arbol, asi
+    // que las respuestas (400/422, mensajes, orden) salen identicas.
+    //
+    // Las clases que llegan aqui son plano de escalares (con `?`
+    // opcionales): una clase con List/campos-clase es `dinamica` y su ruta
+    // pide el enlace por bytecode (prepare_native_args), que pasa por
+    // bind_body() (project.cpp) y su ClassShapeTable.
+    s += "    static const lux_script::JsonFieldSpec " + spec_var + "[] = {\n";
+    for (const auto& c : clase.campos) {
+        const std::string kind = c.kind_escalar == Type::Kind::Int    ? "Int"
+                               : c.kind_escalar == Type::Kind::Float  ? "Float"
+                               : c.kind_escalar == Type::Kind::Bool   ? "Bool"
+                                                                      : "Str";
+        s += "        { " + literal_string(c.nombre) + ", lux_script::JsonScalar::" + kind +
+             ", " + (c.opcional ? "true" : "false") + ", false, lux_script::kJsonNoNested },\n";
+    }
+    s += "    };\n";
+    s += "    lux_script::JsonBound " + bound_var + ";\n";
+    s += "    switch (lux_script::bind_json_flat(req.body, " + spec_var + ", " +
+         std::to_string(clase.campos.size()) + ", " + bound_var + ")) {\n";
+    s += "    case lux_script::JsonBindError::InvalidJson: {\n";
     s += "        Value::Dict __d;\n";
     s += "        __d[\"error\"] = Value::str(\"invalid JSON\");\n";
     s += "        res.status(400).header(\"Content-Type\", \"application/json; charset=utf-8\")"
          ".send(Value::dict(std::move(__d)).to_json_text());\n";
     s += "        " + gen.ret_vacio() + "\n";
     s += "    }\n";
-    s += "    if (!" + cuerpo_var + ".is_dict()) {\n";
+    s += "    case lux_script::JsonBindError::NotAnObject: {\n";
     s += "        Value::Dict __d;\n";
     s += "        __d[\"error\"] = Value::str(\"Validation failed\");\n";
     s += "        Value::List __l;\n";
@@ -3429,52 +3455,53 @@ std::string codigo_bind_cuerpo(const std::string& nombre_param, const std::strin
          ".send(Value::dict(std::move(__d)).to_json_text());\n";
     s += "        " + gen.ret_vacio() + "\n";
     s += "    }\n";
+    s += "    default: break;\n";
+    s += "    }\n";
     s += "    std::vector<std::string> " + msgs_var + ";\n";
 
     // Nombres de las variables C++ de cada campo, en el orden EXACTO de
     // clase.campos -- el mismo orden que espera el (unico) constructor de
-    // L<Clase> (generar_clase_runtime).
+    // L<Clase> (generar_clase_runtime), y el mismo orden en que el binder
+    // dejo status[]/values[].
     std::vector<std::string> campo_vars;
+    size_t                   slot = 0;
     for (const auto& c : clase.campos) {
-        const std::string var = "__c_" + nombre_param + "_" + c.nombre;
+        const std::string var    = "__c_" + nombre_param + "_" + c.nombre;
+        const std::string indice = std::to_string(slot++);
         campo_vars.push_back(var);
 
-        const std::string chequeo = c.kind_escalar == Type::Kind::Int    ? "is_int"
-                                   : c.kind_escalar == Type::Kind::Float ? "is_num"
-                                   : c.kind_escalar == Type::Kind::Bool  ? "is_bool"
-                                                                          : "is_str";
         s += "    " + tipo_cpp(c.tipo) + " " + var +
              (c.opcional ? std::string() :
               " = " + std::string(c.kind_escalar == Type::Kind::String ? "std::string()"
                                   : c.kind_escalar == Type::Kind::Bool   ? "false"
                                   : c.kind_escalar == Type::Kind::Float  ? "0.0" : "0")) +
              ";\n";
-        s += "    {\n";
-        s += "        auto it = " + cuerpo_var + ".as_dict().find(" + literal_string(c.nombre) + ");\n";
-        s += "        if (it == " + cuerpo_var + ".as_dict().end() || it->second.is_null()) {\n";
+        s += "    switch (" + bound_var + ".status[" + indice + "]) {\n";
+        s += "    case lux_script::JsonBindStatus::Missing:\n";
         if (!c.opcional)
-            s += "            " + msgs_var + ".push_back(" +
+            s += "        " + msgs_var + ".push_back(" +
                  literal_string(c.nombre + ": required") + ");\n";
-        s += "        } else if (!it->second." + chequeo + "()) {\n";
-        s += "            " + msgs_var + ".push_back(" +
+        s += "        break;\n";
+        s += "    case lux_script::JsonBindStatus::BadType:\n";
+        s += "        " + msgs_var + ".push_back(" +
              literal_string(c.nombre + ": expected " + c.ortografia) + ");\n";
-        s += "        } else {\n";
+        s += "        break;\n";
+        s += "    default:\n";
+        // Ok: el binder ya valido el tipo y, para un campo double, ya dejo
+        // el valor como Value::real -- la normalizacion que el camino del
+        // arbol hacia en valor_encaja()/value_matches(): un entero JSON en
+        // un campo double tiene que guardarse como Value::Float, no como el
+        // Value::Int que trajo el body.
         if (c.opcional) {
-            // valor_encaja() (project.cpp): float/double SIEMPRE se
-            // normaliza con Value::real(as_float()) -- un entero JSON en
-            // un campo double? tiene que guardarse como Value::Float, no
-            // como el Value::Int que trajo el body.
-            s += "            " + var + " = " +
-                 (c.kind_escalar == Type::Kind::Float ? "Value::real(it->second.as_float());\n"
-                                                       : "it->second;\n");
+            s += "        " + var + " = " + bound_var + ".values[" + indice + "];\n";
         } else {
             const std::string accesor = c.kind_escalar == Type::Kind::Int    ? "as_int"
                                        : c.kind_escalar == Type::Kind::Float ? "as_float"
                                        : c.kind_escalar == Type::Kind::Bool  ? "as_bool"
-                                                                              : "as_str";
-            s += "            " + var + " = it->second." + accesor + "();\n";
+                                                                             : "as_str";
+            s += "        " + var + " = " + bound_var + ".values[" + indice + "]." + accesor + "();\n";
         }
-        s += "        }\n";
+        s += "        break;\n";
         s += "    }\n";
     }
 

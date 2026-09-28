@@ -1,3 +1,4 @@
+#include <lux_script/json_bind.hpp>
 #include <lux_script/value.hpp>
 
 #include <algorithm>
@@ -248,6 +249,365 @@ private:
         out = Value::real(d);
         return true;
     }
+
+    // ── schema-aware binding (see json_bind.hpp) ─────────────────────────────
+    //
+    // The same scanner as above, driven by the class's fields instead of
+    // building the whole generic tree. Declared scalars are read straight
+    // into Values; unknown keys are validated and skipped, nothing built;
+    // nested classes and List<Class> recurse through the same path. The
+    // grammar, the nesting cap and every rejection are the ones `value()`
+    // has always enforced: what fits and what doesn't is decided per token
+    // exactly like value_matches() (project.cpp) decided it over the tree,
+    // so the answers stay byte for byte.
+
+    // What `class_object` decided. Err means invalid JSON (the input could
+    // not be consumed); No means valid JSON that just doesn't fit the class.
+    enum class Fit { Err, No, Yes };
+
+    // Consumes a string without building it: keys of objects nobody declared.
+    // Validates the exact same escapes `string_value` does.
+    bool string_skip() {
+        ++i_;                                   // opening quote
+        while (i_ < t_.size()) {
+            const char c = t_[i_];
+            if (c == '"') { ++i_; return true; }
+            if (static_cast<unsigned char>(c) < 0x20) return false;  // unescaped control character
+            if (c != '\\') { ++i_; continue; }
+
+            ++i_;
+            if (i_ >= t_.size()) return false;
+            const char e = t_[i_++];
+            switch (e) {
+                case '"': case '\\': case '/':
+                case 'b': case 'f': case 'n': case 'r': case 't':
+                    break;
+                case 'u': {
+                    uint32_t cp = 0;
+                    if (!hex4(cp)) return false;
+                    // A high surrogate has to be followed by its low one; a
+                    // stray one represents nothing and is rejected.
+                    if (cp >= 0xD800 && cp <= 0xDBFF) {
+                        if (i_ + 1 >= t_.size() || t_[i_] != '\\' || t_[i_ + 1] != 'u')
+                            return false;
+                        i_ += 2;
+                        uint32_t low = 0;
+                        if (!hex4(low)) return false;
+                        if (low < 0xDC00 || low > 0xDFFF) return false;
+                    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                        return false;
+                    }
+                    break;
+                }
+                default: return false;
+            }
+        }
+        return false;
+    }
+
+    // Consumes one JSON value of any shape, building nothing.
+    bool skip_value(int depth) {
+        if (depth > kMaxDepth || i_ >= t_.size()) return false;
+        switch (t_[i_]) {
+            case 'n': return literal("null");
+            case 't': return literal("true");
+            case 'f': return literal("false");
+            case '"': return string_skip();
+            case '[':
+                ++i_;
+                skip_ws();
+                if (i_ < t_.size() && t_[i_] == ']') { ++i_; return true; }
+                for (;;) {
+                    skip_ws();
+                    if (!skip_value(depth + 1)) return false;
+                    skip_ws();
+                    if (i_ >= t_.size()) return false;
+                    if (t_[i_] == ',') { ++i_; continue; }
+                    if (t_[i_] == ']') { ++i_; return true; }
+                    return false;
+                }
+            case '{':
+                ++i_;
+                skip_ws();
+                if (i_ < t_.size() && t_[i_] == '}') { ++i_; return true; }
+                for (;;) {
+                    skip_ws();
+                    if (i_ >= t_.size() || t_[i_] != '"') return false;
+                    if (!string_skip()) return false;
+                    skip_ws();
+                    if (i_ >= t_.size() || t_[i_] != ':') return false;
+                    ++i_;
+                    skip_ws();
+                    if (!skip_value(depth + 1)) return false;
+                    skip_ws();
+                    if (i_ >= t_.size()) return false;
+                    if (t_[i_] == ',') { ++i_; continue; }
+                    if (t_[i_] == '}') { ++i_; return true; }
+                    return false;
+                }
+            default: {
+                Value scratch;
+                return number(scratch);
+            }
+        }
+    }
+
+    // Parses one value against a field spec. Consumes the value whatever the
+    // verdict — a field with the wrong type is the CALLER's 422, never a
+    // reason to leave the input half-read. False ONLY for invalid JSON.
+    // `out` is meaningful only when it comes back with st == Ok.
+    bool typed_value(int depth, const JsonFieldSpec& spec, const JsonShapeTable& shapes,
+                     Value& out, JsonBindStatus& st) {
+        if (depth > kMaxDepth || i_ >= t_.size()) return false;
+        switch (t_[i_]) {
+            case 'n':
+                if (!literal("null")) return false;
+                st = JsonBindStatus::Missing;
+                return true;
+            case '"': {
+                std::string s;
+                if (!string_value(s)) return false;
+                if (!spec.is_list && spec.kind == JsonScalar::Str) {
+                    out = Value::str(std::move(s));
+                    st = JsonBindStatus::Ok;
+                } else {
+                    st = JsonBindStatus::BadType;
+                }
+                return true;
+            }
+            case 't':
+                if (!literal("true")) return false;
+                if (!spec.is_list && spec.kind == JsonScalar::Bool) {
+                    out = Value::boolean(true);
+                    st = JsonBindStatus::Ok;
+                } else {
+                    st = JsonBindStatus::BadType;
+                }
+                return true;
+            case 'f':
+                if (!literal("false")) return false;
+                if (!spec.is_list && spec.kind == JsonScalar::Bool) {
+                    out = Value::boolean(false);
+                    st = JsonBindStatus::Ok;
+                } else {
+                    st = JsonBindStatus::BadType;
+                }
+                return true;
+            case '[': {
+                if (!spec.is_list) {
+                    Value scratch;
+                    if (!list_(scratch, depth)) return false;
+                    st = JsonBindStatus::BadType;
+                    return true;
+                }
+                // The element is the same scalar (or the same nested class),
+                // never a list of its own, and null is just a wrong element:
+                // value_matches() would have refused it the same way.
+                JsonFieldSpec el;
+                el.kind     = spec.kind;
+                el.optional = false;
+                el.is_list  = false;
+                el.nested   = spec.nested;
+                Value::List result;
+                bool ok = true;
+                ++i_;
+                skip_ws();
+                if (i_ < t_.size() && t_[i_] == ']') {
+                    ++i_;
+                } else {
+                    for (;;) {
+                        skip_ws();
+                        Value ev;
+                        JsonBindStatus est;
+                        if (!typed_value(depth + 1, el, shapes, ev, est)) return false;
+                        if (est == JsonBindStatus::Ok) result.push_back(std::move(ev));
+                        else ok = false;    // keep consuming: one bad element fails the field
+                        skip_ws();
+                        if (i_ >= t_.size()) return false;
+                        if (t_[i_] == ',') { ++i_; continue; }
+                        if (t_[i_] == ']') { ++i_; break; }
+                        return false;
+                    }
+                }
+                if (ok) {
+                    out = Value::list(std::move(result));
+                    st = JsonBindStatus::Ok;
+                } else {
+                    st = JsonBindStatus::BadType;
+                }
+                return true;
+            }
+            case '{': {
+                if (!spec.is_list && spec.nested != kJsonNoNested) {
+                    st = class_object(depth + 1, spec.nested, shapes, out) == Fit::Yes
+                             ? JsonBindStatus::Ok : JsonBindStatus::BadType;
+                    return true;
+                }
+                Value scratch;
+                if (!object(scratch, depth)) return false;
+                st = JsonBindStatus::BadType;
+                return true;
+            }
+            default: {
+                if (!number(out)) return false;     // Int, or Real when it had to be
+                if (!spec.is_list) {
+                    switch (spec.kind) {
+                        case JsonScalar::Int:
+                            // "30.0" is a Real here: not an int, same answer
+                            // value_matches() gave a tree with a Real in it.
+                            st = out.is_int() ? JsonBindStatus::Ok : JsonBindStatus::BadType;
+                            return true;
+                        case JsonScalar::Float:
+                            // An integer JSON in a double field is stored as a
+                            // Real either way -- the normalization the tree
+                            // path did in value_matches().
+                            out = Value::real(out.as_float());
+                            st = JsonBindStatus::Ok;
+                            return true;
+                        default:
+                            break;
+                    }
+                }
+                st = JsonBindStatus::BadType;
+                return true;
+            }
+        }
+    }
+
+    // A JSON object bound against a nested class: the recursive half of
+    // value_matches()'s Class branch, reading the fields as they arrive.
+    // Fit::Yes → `out` is the instance (declared field order, optional nulls).
+    // Fit::No  → valid JSON that doesn't fit; `out` untouched, input consumed.
+    Fit class_object(int depth, uint32_t cls, const JsonShapeTable& shapes, Value& out) {
+        if (depth > kMaxDepth) return Fit::Err;
+        ++i_;                                   // '{'
+        const size_t n = shapes.field_count(cls);
+        Value::Dict result;
+        result.reserve(n);
+        std::vector<char> seen(n, 0);
+        bool ok = true;
+        skip_ws();
+        if (i_ < t_.size() && t_[i_] == '}') {
+            ++i_;
+        } else {
+            for (;;) {
+                skip_ws();
+                if (i_ >= t_.size() || t_[i_] != '"') return Fit::Err;
+                std::string k;
+                if (!string_value(k)) return Fit::Err;
+                const JsonFieldSpec* spec = nullptr;
+                for (size_t i = 0; i < n; ++i) {
+                    const JsonFieldSpec& f = shapes.field(cls, i);
+                    if (f.name == k) { spec = &f; seen[i] = 1; break; }
+                }
+                skip_ws();
+                if (i_ >= t_.size() || t_[i_] != ':') return Fit::Err;
+                ++i_;
+                skip_ws();
+                if (!spec) {
+                    if (!skip_value(depth + 1)) return Fit::Err;
+                } else {
+                    Value fv;
+                    JsonBindStatus st;
+                    if (!typed_value(depth + 1, *spec, shapes, fv, st)) return Fit::Err;
+                    if (ok) {
+                        if (st == JsonBindStatus::Ok) {
+                            result.set(std::string(spec->name), std::move(fv));
+                        } else if (st == JsonBindStatus::Missing) {
+                            if (spec->optional) result.set(std::string(spec->name), Value::null());
+                            else ok = false;
+                        } else {
+                            ok = false;
+                        }
+                    }
+                }
+                skip_ws();
+                if (i_ >= t_.size()) return Fit::Err;
+                if (t_[i_] == ',') { ++i_; continue; }
+                if (t_[i_] == '}') { ++i_; break; }
+                return Fit::Err;
+            }
+        }
+        // The keys the body never mentioned: an optional field is still a
+        // null in the instance (the tree walk appended it), a required one
+        // fails the whole field.
+        if (ok) {
+            for (size_t i = 0; i < n; ++i) {
+                if (seen[i]) continue;
+                const JsonFieldSpec& f = shapes.field(cls, i);
+                if (f.optional) result.set(std::string(f.name), Value::null());
+                else ok = false;
+            }
+        }
+        if (!ok) return Fit::No;
+        out = Value::dict(std::move(result));
+        return Fit::Yes;
+    }
+
+    // The whole document bound to one class. NotAnObject is decided the same
+    // way the tree path decided it: the body parsed fine, it just was not a
+    // dict.
+public:
+    JsonBindError bind_document(const JsonShapeTable& shapes, uint32_t cls,
+                                JsonBound& out, bool build_instance) {
+        const size_t n = shapes.field_count(cls);
+        out.status.assign(n, JsonBindStatus::Missing);
+        out.values.assign(n, Value::null());
+        skip_ws();
+        if (i_ >= t_.size()) return JsonBindError::InvalidJson;
+        if (t_[i_] != '{') {
+            Value scratch;
+            return document(scratch) ? JsonBindError::NotAnObject : JsonBindError::InvalidJson;
+        }
+        ++i_;
+        Value::Dict instance;
+        if (build_instance) instance.reserve(n);
+        skip_ws();
+        bool empty = i_ < t_.size() && t_[i_] == '}';
+        if (empty) {
+            ++i_;
+        } else {
+            for (;;) {
+                skip_ws();
+                if (i_ >= t_.size() || t_[i_] != '"') return JsonBindError::InvalidJson;
+                std::string k;
+                if (!string_value(k)) return JsonBindError::InvalidJson;
+                size_t slot = n;
+                for (size_t i = 0; i < n; ++i) {
+                    if (shapes.field(cls, i).name == k) { slot = i; break; }
+                }
+                skip_ws();
+                if (i_ >= t_.size() || t_[i_] != ':') return JsonBindError::InvalidJson;
+                ++i_;
+                skip_ws();
+                if (slot == n) {
+                    if (!skip_value(1)) return JsonBindError::InvalidJson;
+                } else {
+                    Value v;
+                    JsonBindStatus st;
+                    if (!typed_value(1, shapes.field(cls, slot), shapes, v, st)) return JsonBindError::InvalidJson;
+                    out.status[slot] = st;
+                    out.values[slot] = st == JsonBindStatus::Ok ? std::move(v) : Value::null();
+                }
+                skip_ws();
+                if (i_ >= t_.size()) return JsonBindError::InvalidJson;
+                if (t_[i_] == ',') { ++i_; continue; }
+                if (t_[i_] == '}') { ++i_; break; }
+                return JsonBindError::InvalidJson;
+            }
+        }
+        skip_ws();
+        if (i_ != t_.size()) return JsonBindError::InvalidJson;   // garbage after the document
+        if (build_instance) {
+            for (size_t i = 0; i < n; ++i) {
+                const JsonFieldSpec& spec = shapes.field(cls, i);
+                instance.set(std::string(spec.name), std::move(out.values[i]));
+            }
+            out.values.clear();                 // moved into the instance
+            out.instance = Value::dict(std::move(instance));
+        }
+        return JsonBindError::None;
+    }
 };
 
 } // namespace
@@ -255,6 +615,36 @@ private:
 bool Value::parse_json(std::string_view text, Value& out) {
     Parser p(text);
     return p.document(out);
+}
+
+namespace {
+
+// The one-class table `bind_json_flat` serves: the --native route binder
+// only ever binds scalar/optional-scalar classes, so a plain pointer pair
+// is the whole table.
+struct FlatTable final : JsonShapeTable {
+    const JsonFieldSpec* fields;
+    size_t               count;
+
+    FlatTable(const JsonFieldSpec* f, size_t c) : fields(f), count(c) {}
+
+    size_t               field_count(uint32_t) const override   { return count; }
+    const JsonFieldSpec& field(uint32_t, size_t i) const override { return fields[i]; }
+};
+
+} // namespace
+
+JsonBindError bind_json_class(std::string_view text, const JsonShapeTable& shapes,
+                              uint32_t cls, JsonBound& out, bool build_instance) {
+    Parser p(text);
+    return p.bind_document(shapes, cls, out, build_instance);
+}
+
+JsonBindError bind_json_flat(std::string_view text, const JsonFieldSpec* fields,
+                             size_t count, JsonBound& out, bool build_instance) {
+    FlatTable table{fields, count};
+    Parser    p(text);
+    return p.bind_document(table, 0, out, build_instance);
 }
 
 } // namespace lux_script

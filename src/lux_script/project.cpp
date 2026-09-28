@@ -7,6 +7,7 @@
 #include <lux_script/auth.hpp>
 #include <lux_script/db.hpp>
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/json_bind.hpp>
 
 #include <lux/request.hpp>
 #include <lux/response.hpp>
@@ -825,77 +826,71 @@ bool coerce(const std::string& text, const std::string& type, Value& out) {
     return false;
 }
 
-// Checks that a JSON value fits the field's declared type.
-// There is no conversion between families: a string in an int field is an
-// error, not an attempt to parse.
+// The class shapes the JSON body binder binds against, in the form
+// json_bind.hpp asks for: the fields of `ci` and of every class its fields
+// can reach, interned by address (index 0 is whichever class was asked for
+// first). A class that — through `?` and List fields — ends up holding
+// itself terminates the same way the tree walk always did: the recursion
+// happens while the body is being read, never while the shapes are built.
 //
-// It is deliberately strict: a "30" is not good enough where an int was
-// declared.  The body saying one thing and the class another is exactly what
-// validation exists to catch.
-//
-// Recursive for a List field (checked element by element) and for a nested
-// class field (checked field by field, against THAT class's own fields --
-// `nested_class` is the same shared_ptr ClassField::nested_class already
-// carries, resolved once in build_classes(), so this never has to look a
-// class name back up in a ClassTable it was not even given). A List of a
-// class recurses through both cases at once: `type` is List<Episode>, so
-// each element goes through the Class branch below with the SAME
-// `nested_class` (the list's element class, not a different one).
-// `v` is taken apart: it is a body just parsed, nobody else holds it, so its
-// values move into `out` instead of being copied.
-bool value_matches(Value& v, const Type& type,
-                   const std::shared_ptr<ClassInfo>& nested_class, Value& out) {
-    switch (type.kind()) {
-        case Type::Kind::String:
-            if (!v.is_str()) return false;
-            out = std::move(v);
-            return true;
-        case Type::Kind::Bool:
-            if (!v.is_bool()) return false;
-            out = std::move(v);
-            return true;
-        case Type::Kind::Int:
-            if (!v.is_int()) return false;
-            out = std::move(v);
-            return true;
-        case Type::Kind::Float:
-            if (!v.is_num()) return false;
-            out = Value::real(v.as_float());
-            return true;
-        case Type::Kind::List: {
-            if (!v.is_list()) return false;
-            Value::List result;
-            result.reserve(v.as_list().size());
-            for (auto& elem : v.as_list()) {
-                Value ev;
-                if (!value_matches(elem, type.element(), nested_class, ev)) return false;
-                result.push_back(std::move(ev));
+// It is interned per request, on purpose, and never cached: a hot reload
+// swaps the whole ClassTable out under this function, and a cache keyed on
+// addresses would eventually hand a recycled ClassInfo's shape to a
+// different class. The whole thing is a handful of string_views and enums
+// per field — the parse dwarfs it.
+class ClassShapeTable final : public JsonShapeTable {
+public:
+    uint32_t intern(const ClassInfo& ci) {
+        auto [it, inserted] = index_.emplace(&ci, 0);
+        if (!inserted) return it->second;
+
+        // Claimed and RESERVED before the fields are walked: a self-reference
+        // re-enters intern() above and finds its own index waiting, and any
+        // nested class interned along the way grows the vector around the
+        // placeholder this class left at its own index.
+        const uint32_t idx = static_cast<uint32_t>(shapes_.size());
+        it->second = idx;
+        shapes_.emplace_back();
+
+        std::vector<JsonFieldSpec> fields;
+        fields.reserve(ci.fields.size());
+        for (const auto& f : ci.fields) {
+            JsonFieldSpec s;
+            s.name     = f.name;
+            s.optional = f.type.is_optional();
+            if (f.type.kind() == Type::Kind::List) {
+                s.is_list = true;
+                const Type& el = f.type.element();
+                s.kind = scalar_kind(el.kind());
+                if (el.kind() == Type::Kind::Class && f.nested_class)
+                    s.nested = intern(*f.nested_class);
+            } else {
+                s.kind = scalar_kind(f.type.kind());
+                if (f.type.kind() == Type::Kind::Class && f.nested_class)
+                    s.nested = intern(*f.nested_class);
             }
-            out = Value::list(std::move(result));
-            return true;
+            fields.push_back(std::move(s));
         }
-        case Type::Kind::Class: {
-            if (!v.is_dict() || !nested_class) return false;
-            Value::Dict result;
-            result.reserve(nested_class->fields.size());
-            for (const auto& f : nested_class->fields) {   // distinct names: appended
-                auto it = v.as_dict().find(f.name);
-                if (it == v.as_dict().end() || it->second.is_null()) {
-                    if (!f.type.is_optional()) return false;
-                    result.append(std::string(f.name), Value::null());
-                    continue;
-                }
-                Value fv;
-                if (!value_matches(it->second, f.type, f.nested_class, fv)) return false;
-                result.append(std::string(f.name), std::move(fv));
-            }
-            out = Value::dict(std::move(result));
-            return true;
-        }
-        default:
-            return false;
+        shapes_[idx] = std::move(fields);
+        return idx;
     }
-}
+
+    size_t               field_count(uint32_t cls) const override   { return shapes_[cls].size(); }
+    const JsonFieldSpec& field(uint32_t cls, size_t i) const override { return shapes_[cls][i]; }
+
+private:
+    static JsonScalar scalar_kind(Type::Kind k) {
+        switch (k) {
+            case Type::Kind::Bool:  return JsonScalar::Bool;
+            case Type::Kind::Int:   return JsonScalar::Int;
+            case Type::Kind::Float: return JsonScalar::Float;
+            default:                return JsonScalar::Str;
+        }
+    }
+
+    std::vector<std::vector<JsonFieldSpec>>        shapes_;
+    std::unordered_map<const ClassInfo*, uint32_t> index_;
+};
 
 // Validates the parameters against the pattern and produces the binding plan.
 bool bind_params(const RouteDecl& r, const ClassTable& classes,
@@ -1056,6 +1051,15 @@ Action try_declarative(const RouteDecl& r, const std::string& tpl_dir) {
 
 // Builds the instance from the JSON body.
 //
+// The body is parsed straight into the class's shape (ClassShapeTable +
+// bind_json_class): each key is matched against the declared fields as it
+// arrives, unknown keys are skipped without building anything, and no
+// generic tree is ever built — that used to be a Dict per object and a
+// string per key, all of it walked and taken apart again right after.
+// The binder is deliberately as strict as the tree walk it replaced — no
+// conversion between families, a "30" is not an int — so every answer is
+// byte for byte the one the tree path gave.
+//
 // A missing required field, or one with the wrong type, or a broken validate
 // rule, is a 422 with the complete list of reasons: they are all reported at
 // once, not just the first.  The handler never runs.
@@ -1064,49 +1068,44 @@ Action try_declarative(const RouteDecl& r, const std::string& tpl_dir) {
 bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
                lux::Request& req, lux::Response& res,
                NativeCtx& ctx, Value& out, bool rules = true) {
-    Value body;
-    if (!Value::parse_json(req.body, body)) {
-        responder_error(res, 400, "invalid JSON");
-        return false;
-    }
-    if (!body.is_dict()) {
-        responder_error(res, 422, "Validation failed",
-                        {"the body must be a JSON object"});
-        return false;
+    ClassShapeTable shapes;
+    const uint32_t  root = shapes.intern(ci);
+
+    JsonBound bound;
+    switch (bind_json_class(req.body, shapes, root, bound, /*build_instance=*/true)) {
+        case JsonBindError::InvalidJson:
+            responder_error(res, 400, "invalid JSON");
+            return false;
+        case JsonBindError::NotAnObject:
+            responder_error(res, 422, "Validation failed",
+                            {"the body must be a JSON object"});
+            return false;
+        default:
+            break;
     }
 
     std::vector<std::string> messages;
-    Value::Dict              fields;
-    std::vector<Value>       ordered;
-    fields.reserve(ci.fields.size());
-    ordered.reserve(ci.fields.size());
-
-    for (const auto& f : ci.fields) {   // distinct names: appended
-        auto it = body.as_dict().find(f.name);
-        if (it == body.as_dict().end() || it->second.is_null()) {
-            if (!f.type.is_optional()) messages.push_back(f.name + ": required");
-            fields.append(std::string(f.name), Value::null());
-            ordered.push_back(Value::null());
-            continue;
-        }
-        Value v;
-        if (!value_matches(it->second, f.type, f.nested_class, v)) {
+    for (size_t i = 0; i < ci.fields.size(); ++i) {
+        if (bound.status[i] == JsonBindStatus::Missing) {
+            if (!ci.fields[i].type.is_optional())
+                messages.push_back(ci.fields[i].name + ": required");
+        } else if (bound.status[i] == JsonBindStatus::BadType) {
             // base_name(), not to_string(): --native's own equivalent
-            // message (native_gen.cpp's construir_clases(), CampoNativo::
-            // ortografia) has always used the bare spelling with no `?`
-            // suffix, and the native_route_shadow suite compares the two
-            // byte for byte -- a class with a List<X>/nested-class field
-            // never reaches --native's version of this message at all (see
-            // class_field_type_ok()'s comment), so this only has to agree
-            // with native_gen.cpp for the scalar/optional-scalar case,
-            // which base_name() does exactly.
-            messages.push_back(f.name + ": expected " + f.type.base_name());
-            fields.append(std::string(f.name), Value::null());
-            ordered.push_back(Value::null());
-            continue;
+            // message (native_gen.cpp's codigo_bind_cuerpo) has always used
+            // the bare spelling with no `?` suffix, and the
+            // native_route_shadow suite compares the two byte for byte.
+            messages.push_back(ci.fields[i].name + ": expected " +
+                               ci.fields[i].type.base_name());
         }
-        if (rules && !ci.rules.empty()) ordered.push_back(v);
-        fields.append(std::string(f.name), std::move(v));
+    }
+
+    // The values for the rules, in declaration order -- the same values the
+    // instance carries, and the same order the rule chunks expect their
+    // locals in.
+    std::vector<Value> ordered;
+    if (messages.empty() && rules && !ci.rules.empty()) {
+        ordered.reserve(ci.fields.size());
+        for (const auto& field : bound.instance.as_dict()) ordered.push_back(field.second);
     }
 
     // The rules only run if the fields are sound: evaluating them over missing
@@ -1131,7 +1130,7 @@ bool bind_body(const ClassInfo& ci, const FunctionTable* fns,
         return false;
     }
 
-    out = Value::dict(std::move(fields));
+    out = std::move(bound.instance);
     return true;
 }
 

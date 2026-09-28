@@ -630,8 +630,9 @@ private:
     // PUT/POST (also fine, it is real Value::boolean() JSON on the wire by
     // then) -- but read the row again with a raw, schemaless query() and
     // hand THAT dict back as a request body, and the once-real bool is now
-    // a 1/0 int, which value_matches() (project.cpp/native_gen.cpp)
-    // correctly refuses for a `bool` field ("expected bool"), because
+    // a 1/0 int, which the strict body binder (json_bind.hpp, driven by
+    // bind_body()/codigo_bind_cuerpo) correctly refuses for a `bool` field
+    // ("expected bool"), because
     // letting an int through there silently would blur every other
     // int/bool mismatch the strict body validator exists to catch.
     // sqlite3_column_decltype() gives the column's declared type from the

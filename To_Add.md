@@ -188,7 +188,7 @@ routes section is enough.
 
 ---
 
-## A JSON body is parsed to a generic tree before it is bound to its class
+## A JSON body is parsed to a generic tree before it is bound to its class — FIXED
 
 **Found:** 2026-09-27, benchmarking `POST /orders` (a body bound to a class with a
 `List<Item>` field and `validate:` rules) against Actix, Axum and Gin.
@@ -206,11 +206,106 @@ struct.
 `prepare_native_args(..., rules=false)`), not a VM per rule, and `value_matches()` moves
 values out of the parsed tree instead of copying them (×0.91 → ×0.97 vs Actix).
 
-**Where to look to fix it:** a parser generated per class (`--native`) or driven by the
-`ClassInfo` field list (bytecode) that reads each field as it arrives — known keys,
-declared types, nested classes and `List<Class>` — and fills the instance directly,
-skipping the tree. It has to keep today's answers byte for byte: `400 invalid JSON`,
-`422` with every `"field: required"` / `"field: expected T"` at once, the rules only
-when the fields are sound, unknown keys ignored, `float` fields normalized to
-`Value::real`. `tests/run_tests.sh` and the `native_route_shadow` suite already check
-those messages.
+**Fixed:** 2026-09-27. The body is parsed straight into the class's shape, with no
+generic tree in between:
+
+- `include/lux_script/json_bind.hpp` (new) + `src/lux_script/json_parse.cpp`: the same
+  strict scanner, driven by the class's fields (`bind_json_class()`/`bind_json_flat()`).
+  Each key is matched against the declared fields as it arrives; declared scalars are
+  read straight into `Value`s; unknown keys are validated and skipped without building
+  anything; nested classes and `List<Class>` recurse through the same path. The binder
+  never words a message — it reports, per declared field, `Ok`/`Missing`/`BadType`, plus
+  `InvalidJson` (400) and `NotAnObject` (422) apart, so every caller keeps its exact
+  responses. Same grammar, same nesting cap, same verdicts as the tree walk: `5.0` in an
+  int field is `expected int`, `float` fields normalize to `Value::real`, duplicate keys
+  are last-wins, trailing garbage is 400.
+- `bind_body()` (project.cpp) binds through a `ClassShapeTable` (ClassInfo → shapes,
+  interned per request — never cached, so a hot reload can't hand a recycled ClassInfo's
+  shape to a different class). `value_matches()` is gone; the message walk and the
+  validate:-rules path are untouched. This also covers, via `prepare_native_args()`,
+  every `--native` route whose body class is `dinamica` (List/class fields), which is
+  exactly the case `codigo_bind_cuerpo()` never handled.
+- `codigo_bind_cuerpo()` (native_gen.cpp) emits a static flat `JsonFieldSpec` array and
+  one `bind_json_flat()` call instead of `Value::parse_json()` + per-field `find()`s;
+  the 400/422 blocks, the messages and the `L<Clase>` construction are unchanged.
+
+`tests/run_tests.sh` and the `native_route_shadow` suite already checked those messages:
+335/335 and ctest 16/16, byte for byte. Two bugs caught on the way, both by the suites:
+the shape interning claimed its index before recursing into nested classes (a nested
+class took the claimed slot, and every key of the outer class went unmatched), and the
+nested-object path only judged the keys the body DID carry, so a nested element missing
+a required field slipped through as a valid instance instead of `expected List`.
+
+**Measured** (quiet machine, pristine dev binary vs this one, back to back; k6
+closed-loop 50 VUs, 45s): the win is real but small — binding was never the big share
+of these routes' latency (the kernel's `write` is). Pure-bind routes (no DB):
++1.8% req/s bytecode, p90 −1.1..−1.7%, p99 better on every route; p50 −0.3..−0.7%.
+Writes with SQLite underneath: bytecode p50 −0.6..−0.7%, p90 −1.3..−1.6% consistently
+across all four routes; `--native` flat classes are a wash (±1%, within noise — a
+3-int body was already cheap to parse). The win grows with payload: unknown keys are
+skipped without building anything and `List<Class>` elements never materialize a
+per-element Dict-with-string-keys tree, so the improvement shows up as bodies get
+bigger or noisier, not on `{a:1}`.
+
+---
+
+## The JSON binder still pays ~6 allocations per request that it doesn't need
+
+**Found:** 2026-09-27, reviewing the fresh binder itself (review only, nothing
+changed). The tree is gone, but the scaffolding around the parse still allocates
+from plain `new` — while the OLD path's tree allocations mostly went through the
+thread-local recycler (`detail::SmallAlloc`, `Value::new_box()`), which is why the
+`--native` p50 barely moved. Ordered by what each one is worth:
+
+1. **`ClassShapeTable` (project.cpp) is built per request, and it is pure
+   scaffolding.** `intern()` pays an `unordered_map` (bucket array + node: 2
+   allocs), the outer `shapes_` vector and the inner `fields` vector (2 more),
+   plus 2 virtual dispatches per body key (`JsonShapeTable::field_count/field`).
+   None of this is necessary at request time: the shapes are a pure function of
+   `ClassInfo`, which is immutable after `build_classes()`. Build them THERE
+   instead — one `JsonShape { const JsonFieldSpec* fields; size_t n; }` hanging
+   off each `ClassInfo`, with `JsonFieldSpec::nested` becoming a direct
+   `const JsonShape*` (stable: it lives inside the `ClassInfo` that
+   `nested_class`'s shared_ptr keeps alive through the call). `bind_body` then
+   passes `ci.json_shape`, the `JsonShapeTable` interface, the map and both
+   vectors disappear, and hot reload stays safe for free (a new ClassTable
+   builds new shapes; nothing is cached across builds). Do NOT cache shapes on
+   the side keyed by `ClassInfo*`: a recycled address after a reload would bind
+   a body against another class's fields.
+
+2. **`JsonBound`'s two vectors allocate on every bound body** (`bind_document`'s
+   `status.assign` + `values.assign`) — both binaries, every route with a class
+   parameter. `Value` is 16 bytes and `JsonBindStatus` is one: an inline buffer
+   for `n <= 16` (heap fallback above) removes both; the `--native` generated
+   code can go further and emit fixed stack arrays.
+
+3. **`class_object` allocates `std::vector<char> seen` per NESTED object** —
+   an 8-element `List<Item>` is 8 vector constructions per request. A `uint64_t`
+   bitmask covers classes with ≤64 fields (they are all far below that); vector
+   fallback only past it.
+
+4. **`typed_value`'s `Value::List result` grows unreserved** — 2→4→8 reallocs
+   for the typical 3/8-element lists. `reserve(4)` erases them.
+
+5. **Micros, free of risk:** `bind_document`'s instance loop uses
+   `Dict::set()`, which runs a `find` per insertion over keys that are unique
+   by construction there (each declared field exactly once) — `append()` skips
+   the scan; in `class_object` the bitmask from (3) tells first-sight from
+   duplicate, so `append`-then-assign works too. And the fresh
+   `std::string s` per string value in `typed_value` can be one scratch member
+   of `Parser` (`clear()` keeps capacity) — the tree path spent the same, so
+   this is a gain, not a regression fix.
+
+1+3+4 are the same low-risk pattern; 2 changes a public-ish signature
+(json_bind.hpp) and the emitted native code, so measure after it separately.
+None of the five touches an observable verdict: `Ok`/`Missing`/`BadType`,
+400/422 and the messages stay byte for byte, and the suites that caught the two
+binder bugs above are exactly the ones that hold the line here.
+
+**Reviewed and found already fine** (so nobody re-audits blindly):
+`to_json_text()` reserves 256 up front; `Value` boxes and `Dict` pairs go
+through the thread-local recycler; `Dict::find/set` are linear only below 16
+keys and instances are that small; the scratch key string in `bind_document`
+already keeps its capacity across keys; `thread_local VM rule_vm`,
+`prepare_args`'s lazy `form_data` and `last_validation_messages()` were already
+optimized before this.
