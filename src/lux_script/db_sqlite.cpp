@@ -12,6 +12,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <ctime>
 #include <unordered_set>
 #include <cctype>
@@ -255,7 +256,10 @@ public:
         // Replicating, only the replicator checkpoints (see
         // sqlite_replica.cpp); otherwise the writing connections do.
         if (replicator_)       sqlite3_wal_autocheckpoint(db, 0);
-        else if (!inline_slot) sqlite3_wal_hook(db, &wal_hook, &busy_timeout_);
+        else if (!inline_slot) {
+            std::call_once(ckpt_once_, [this] { ckpt_thread_ = std::thread([this] { checkpoint_loop(); }); });
+            sqlite3_wal_hook(db, &wal_hook, this);
+        }
         if (inline_slot)
             sqlite3_progress_handler(db, 1000, &past_deadline,
                                      &deadline_[worker - inline_base()]);
@@ -372,10 +376,11 @@ public:
 
     // Ship the last commits while the connections still hold the WAL
     // (closing the last one checkpoints and deletes it).
-    void shutdown() override { replicator_.reset(); }
+    void shutdown() override { replicator_.reset(); stop_checkpointer(); }
 
     ~SqliteDriver() override {
         replicator_.reset();
+        stop_checkpointer();
         // The statements first: sqlite3_close fails if any are still alive.
         for (auto& table : cache_)
             for (auto& [_, c] : table) sqlite3_finalize(c.stmt);
@@ -510,17 +515,69 @@ private:
     // snapshot, so the WAL is never reset -- measured: 750MB of WAL in 12s
     // of load on a 3MB database, every read slower as it grows. RESTART
     // waits for the readers in flight (microseconds each) and then starts
-    // the WAL over; a budget of a few ms keeps a slow report query from
-    // stalling this writer, and a commit that runs out of it still
-    // backfilled, the next one retries.
-    static int wal_hook(void* timeout_ms, sqlite3* db, const char*, int pages) {
-        if (pages < 4000) return SQLITE_OK;
-        static int kBudgetMs = 5;
-        sqlite3_busy_handler(db, &busy_wait, &kBudgetMs);
-        sqlite3_wal_checkpoint_v2(db, nullptr, SQLITE_CHECKPOINT_RESTART, nullptr, nullptr);
-        sqlite3_busy_handler(db, &busy_wait, timeout_ms);
+    // the WAL over.
+    //
+    // Not on the committing connection, though: a checkpoint ends in an
+    // fsync, 16-25ms on the bench's disk, and every write queued behind it
+    // waited that long -- it WAS the writes' p99 (19ms against gin's 5).
+    // The checkpointer's thread copies and syncs the bulk while writes go
+    // on, then holds the writer (gate) only for the RESTART of what came in
+    // meanwhile: a few pages, whose flush is ~2ms.
+    static constexpr int kCheckpointPages = 4000;
+    static int wal_hook(void* self, sqlite3*, const char*, int pages) {
+        if (pages >= kCheckpointPages) static_cast<SqliteDriver*>(self)->request_checkpoint();
         return SQLITE_OK;
     }
+    void request_checkpoint() {
+        { std::lock_guard<std::mutex> l(ckpt_m_); ckpt_due_ = true; }
+        ckpt_cv_.notify_one();
+    }
+    void checkpoint_loop() {
+        sqlite3* c = nullptr;
+        if (sqlite3_open_v2(file_.c_str(), &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) {
+            lux::log().error("sqlite: the checkpointer cannot open ", file_, ": ", sqlite3_errmsg(c));
+            sqlite3_close(c);
+            return;
+        }
+        sqlite3_wal_autocheckpoint(c, 0);
+        // Also what opens the WAL on this connection: until then a
+        // checkpoint from it does nothing.
+        sqlite3_exec(c, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
+        static int kBudgetMs = 5;   // for the RESTART: a slow report query must not hold the writer
+        sqlite3_busy_handler(c, &busy_wait, &kBudgetMs);
+
+        std::unique_lock<std::mutex> l(ckpt_m_);
+        for (;;) {
+            ckpt_cv_.wait(l, [&] { return ckpt_due_ || ckpt_stop_; });
+            if (ckpt_stop_) break;
+            l.unlock();
+            for (int i = 0; i < 4; ++i) {   // until what is left is small
+                int log = -1, done = -1;
+                sqlite3_wal_checkpoint_v2(c, nullptr, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+                if (log < 0 || log - done < 100) break;
+            }
+            // ponytail: held ~8ms (two fsyncs, ~2ms+ each on the bench's
+            // disk, plus pool reads in flight to finish); 4000 pages measured
+            // best -- 1000 held as long, 5x as often; 16000 swamped the disk.
+            gate(true);
+            sqlite3_wal_checkpoint_v2(c, nullptr, SQLITE_CHECKPOINT_RESTART, nullptr, nullptr);
+            gate(false);
+            l.lock();
+            ckpt_due_ = false;   // a commit past the threshold asks again
+        }
+        l.unlock();
+        sqlite3_close(c);
+    }
+    void stop_checkpointer() {
+        { std::lock_guard<std::mutex> l(ckpt_m_); ckpt_stop_ = true; }
+        ckpt_cv_.notify_one();
+        if (ckpt_thread_.joinable()) ckpt_thread_.join();
+    }
+    std::thread             ckpt_thread_;
+    std::once_flag          ckpt_once_;
+    std::mutex              ckpt_m_;
+    std::condition_variable ckpt_cv_;
+    bool                    ckpt_due_ = false, ckpt_stop_ = false;
     static int past_deadline(void* d) {
         return thread_cpu_ns() > static_cast<Deadline*>(d)->at_ns;
     }

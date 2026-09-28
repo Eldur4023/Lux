@@ -787,8 +787,9 @@ app:
 | a directory, or `file:///path` | Nothing: another disk, or an NFS mount |
 
 What is shipped is the database's WAL, the pages each commit wrote. Each replica holds a full
-copy (a **generation**), then every commit since, in order. A new generation starts when the
-commits outgrow the copy, and the one before is kept. A crash loses at most the last second.
+copy (a **generation**), then every commit since, in order. A new generation starts once the
+commits since the copy add up to four times the database (at least 1 GB), and the one before
+is kept. Taking the copy does not hold up writes. A crash loses at most the last second.
 A clean stop (Ctrl+C, SIGTERM) ships everything first.
 
 To get the database back, on this machine or any other:

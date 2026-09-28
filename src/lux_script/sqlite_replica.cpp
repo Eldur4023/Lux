@@ -73,7 +73,10 @@ constexpr auto     kCaptureEvery     = std::chrono::milliseconds(100);
 constexpr size_t   kFlushBytes       = 64u << 20;         // ship sooner than kInterval past this
 constexpr uint32_t kCheckpointFrames = 4000;              // as the driver's wal_hook
 constexpr size_t   kMaxPendingBytes  = 512u << 20;        // per target, then a new generation
-constexpr uint64_t kMinGenerationBytes = 64u << 20;       // segments before a new snapshot
+// Segments shipped before a new snapshot: past max(this, 4x the database).
+// Replaying segments on restore is cheap; a snapshot is the whole database
+// uploaded again (at the forum bench's write rate, 1x meant one every 2s).
+constexpr uint64_t kMinGenerationBytes = 1ull << 30;
 
 uint32_t be32(const unsigned char* p) {
     return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
@@ -601,7 +604,7 @@ public:
     }
 
     bool open(std::string& error) {
-        for (sqlite3** c : {&lock_, &ckpt_, &pin_}) {
+        for (sqlite3** c : {&lock_, &ckpt_, &pins_[0], &pins_[1]}) {
             if (sqlite3_open_v2(db_.c_str(), c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
                 error = "replicate: cannot open '" + db_ + "': " + sqlite3_errmsg(*c);
                 return false;
@@ -633,7 +636,7 @@ public:
         cv_.notify_all();
         if (upload_.joinable()) upload_.join();
         unpin();
-        for (sqlite3* c : {lock_, ckpt_, pin_}) if (c) sqlite3_close(c);
+        for (sqlite3* c : {lock_, ckpt_, pins_[0], pins_[1]}) if (c) sqlite3_close(c);
     }
 
 private:
@@ -665,6 +668,7 @@ private:
     // The frames captured since the last shipment, as one segment.
     void flush() {
         last_flush_ = std::chrono::steady_clock::now();
+        if (gen_.empty()) { seg_frames_.clear(); seg_count_ = 0; }   // see snapshot()'s failure
         if (seg_count_ == 0) return;
         std::string seg(kSegMagic, 8);
         put_be32(seg, seg_page_size_);
@@ -675,7 +679,7 @@ private:
         since_snapshot_ += seg.size();
         enqueue(Item{gen_ + "/" + hex16(seq_++) + ".wal",
                      std::make_shared<const std::string>(std::move(seg)), nullptr});
-        if (since_snapshot_ > std::max(kMinGenerationBytes, snapshot_bytes_)) need_snapshot_ = true;
+        if (since_snapshot_ > std::max(kMinGenerationBytes, 4 * snapshot_bytes_)) need_snapshot_ = true;
     }
 
     // New committed frames, kept for the next flush(). Returns how many
@@ -734,11 +738,34 @@ private:
         sqlite3_exec(lock_, "ROLLBACK", nullptr, nullptr, nullptr);
         gate_(false);
     }
-    // Always under lock(): the snapshot pinned is the newest one, all shipped.
-    void pin()   { sqlite3_exec(pin_, "BEGIN; SELECT 1 FROM sqlite_master LIMIT 1", nullptr, nullptr, nullptr); }
-    void unpin() { if (pin_ && !sqlite3_get_autocommit(pin_)) sqlite3_exec(pin_, "COMMIT", nullptr, nullptr, nullptr); }
+    // Pins the newest snapshot. Two connections take turns: the new pin is
+    // in place before the old one goes, so the WAL is never left unpinned.
+    // Safe at any time, shipped or not: what the pin guards against is a
+    // reset, and any pin blocks that (a reader on a checkpointed WAL blocks
+    // checkpoints outright; one on frames blocks the reset); a checkpoint
+    // copying frames not yet shipped loses nothing, they stay in the WAL.
+    void pin() {
+        const int next = pinned_ == 0 ? 1 : 0;
+        sqlite3_exec(pins_[next], "BEGIN; SELECT 1 FROM sqlite_master LIMIT 1", nullptr, nullptr, nullptr);
+        unpin();
+        pinned_ = next;
+    }
+    void unpin() {
+        if (pinned_ >= 0) sqlite3_exec(pins_[pinned_], "COMMIT", nullptr, nullptr, nullptr);
+        pinned_ = -1;
+    }
 
+    // As the driver's checkpointer: the bulk is copied and fsynced (16-25ms
+    // on the bench's disk) while the app writes on, up to the refreshed pin;
+    // the writer is held only for the rest, a few pages.
     void checkpoint() {
+        pin();
+        for (int i = 0; i < 4; ++i) {
+            int log = -1, done = -1;
+            sqlite3_wal_checkpoint_v2(ckpt_, nullptr, SQLITE_CHECKPOINT_PASSIVE, &log, &done);
+            if (log < 0 || log - done < 100) break;
+            pin();   // the next round may copy what came in during this one
+        }
         if (!lock()) return;
         capture();
         if (!need_snapshot_) {
@@ -750,7 +777,11 @@ private:
     }
 
     // A new generation: the whole database, then segments from where it
-    // stands. Holding the write lock, so "where it stands" is exact.
+    // stands. Writes are held only while a read transaction opens on ckpt_
+    // and the WAL position is taken, so the two agree exactly; the copy
+    // itself then reads that transaction's snapshot while the app writes on
+    // (holding writes for the whole copy stalled them ~50ms per 65 MB,
+    // every couple of seconds under the forum bench).
     //
     // Copied through SQLite (the backup API, page for page), never by
     // opening the file: POSIX locks belong to the process, and close() on
@@ -759,28 +790,8 @@ private:
     // us (measured: the app's next read failed with "disk I/O error").
     void snapshot() {
         if (!lock()) return;
-        const std::string gen = hex16(now_ms());
-        auto spool = std::make_shared<SpoolFile>(SpoolFile{db_ + "-replica-" + gen});
-        std::error_code ec;
-        fs::remove(spool->path, ec);
-        sqlite3*    dest = nullptr;
-        std::string err;
-        if (sqlite3_open_v2(spool->path.c_str(), &dest, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK) {
-            // From ckpt_: lock_ holds a write transaction, which a backup
-            // source may not.
-            sqlite3_backup* b = sqlite3_backup_init(dest, "main", ckpt_, "main");
-            if (!b || sqlite3_backup_step(b, -1) != SQLITE_DONE) err = sqlite3_errmsg(dest);
-            if (b && sqlite3_backup_finish(b) != SQLITE_OK && err.empty()) err = sqlite3_errmsg(dest);
-        } else {
-            err = sqlite3_errmsg(dest);
-        }
-        sqlite3_close(dest);
-        if (!err.empty()) {
-            unlock();
-            lux::log().error("replicate: cannot snapshot ", db_, ": ", err);
-            return;
-        }
-        // Everything in the WAL is in the copy: continue after its last commit.
+        sqlite3_exec(ckpt_, "BEGIN; SELECT 1 FROM sqlite_master LIMIT 1", nullptr, nullptr, nullptr);
+        // Everything in the WAL is in that snapshot: continue after its last commit.
         have_header_ = false;
         if (const int fd = ::open(wal_.c_str(), O_RDONLY | O_CLOEXEC); fd >= 0) {
             WalHeader h;
@@ -791,12 +802,36 @@ private:
             ::close(fd);
         }
         expect_reset_ = true;
-        unpin();
         pin();
         unlock();
-        // ponytail: writes wait while the backup copies (page-cache speed,
-        // ~1s per GB). For big databases: record the WAL position under the
-        // lock, release it, back up from a read transaction started there.
+
+        const std::string gen = hex16(now_ms());
+        auto spool = std::make_shared<SpoolFile>(SpoolFile{db_ + "-replica-" + gen});
+        std::error_code ec;
+        fs::remove(spool->path, ec);
+        sqlite3*    dest = nullptr;
+        std::string err;
+        if (sqlite3_open_v2(spool->path.c_str(), &dest, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK) {
+            // A backup whose source has a read transaction open copies
+            // from that transaction's snapshot.
+            sqlite3_backup* b = sqlite3_backup_init(dest, "main", ckpt_, "main");
+            if (!b || sqlite3_backup_step(b, -1) != SQLITE_DONE) err = sqlite3_errmsg(dest);
+            if (b && sqlite3_backup_finish(b) != SQLITE_OK && err.empty()) err = sqlite3_errmsg(dest);
+        } else {
+            err = sqlite3_errmsg(dest);
+        }
+        sqlite3_close(dest);
+        sqlite3_exec(ckpt_, "COMMIT", nullptr, nullptr, nullptr);
+        if (!err.empty()) {
+            lux::log().error("replicate: cannot snapshot ", db_, ": ", err);
+            // The position moved past the previous generation's last
+            // segment: what is captured until the next snapshot belongs to
+            // no generation, and flush() drops it instead of leaving that
+            // one with a hole.
+            gen_.clear();
+            need_snapshot_ = true;
+            return;
+        }
 
         gen_ = gen; seq_ = 0; since_snapshot_ = 0; need_snapshot_ = false;
         snapshot_bytes_ = fs::file_size(spool->path, ec);
@@ -898,7 +933,8 @@ private:
     std::function<void(bool)> gate_;
     sqlite3*    lock_ = nullptr;   // holds the write lock while checkpointing
     sqlite3*    ckpt_ = nullptr;   // checkpoints
-    sqlite3*    pin_  = nullptr;   // the read transaction that holds off everyone else's
+    sqlite3*    pins_[2] = {nullptr, nullptr};   // the read transaction that holds off everyone else's
+    int         pinned_  = -1;                   // which of pins_ holds it
 
     // capture thread only
     WalHeader header_;
