@@ -3,12 +3,18 @@
 
 #include <sys/socket.h>
 #include <cerrno>
+#include <chrono>
 
 namespace lux_script {
 
 // ─── DbPool ──────────────────────────────────────────────────────────────────
 
 DbPool::~DbPool() { stop(); }
+
+// Stopping, a worker whose transaction is open waits this long for the rest
+// of it (its handler is still running on an event loop) before giving up;
+// closing its connection then rolls it back.
+constexpr auto kDrainTransaction = std::chrono::seconds(5);
 
 void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, Batch batch) {
     if (!threads_.empty()) return;
@@ -51,7 +57,12 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
                         return !pinned_[i].empty() || (!held_[i] && !jobs_.empty());
                     };
                     cv_.wait(lock, [&] { return stopping_ || ready(); });
-                    if (!ready()) return;   // stopping, nothing left for this worker
+                    // Stopping with nothing queued: done -- unless a
+                    // transaction is still open here; its handler may yet
+                    // send the rest (see kDrainTransaction).
+                    if (!ready() && (!held_[i] ||
+                                     !cv_.wait_for(lock, kDrainTransaction, [&] { return !pinned_[i].empty(); })))
+                        return;
 
                     // What is pinned to this worker goes first: it is the
                     // continuation of a transaction whose connection is open.
@@ -86,7 +97,12 @@ void DbPool::submit(std::function<void(size_t)> job) {
 void DbPool::submit_to(size_t worker, std::function<void(size_t)> job) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (stopping_ || worker >= pinned_.size()) return;
+        // Accepted while stopping: a pinned job is the rest of a transaction
+        // already open, and refusing it left that transaction -- and
+        // SQLite's write lock -- held for good; every job queued behind it
+        // then waited out its busy timeout, one after another, and shutdown
+        // with them (seen on a slow server: a hang after heavy load).
+        if (worker >= pinned_.size()) return;
         pinned_[worker].push(std::move(job));
     }
     // notify_all and not notify_one: the worker that should take it may not be

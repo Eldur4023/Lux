@@ -62,6 +62,18 @@ ids=$(cat "$TMP"/w* | grep -o '"id":[0-9]*' | sort | uniq -d | wc -l)
 [ "$ids" = 0 ] && ok "no two writes got the same id" || fail "no two writes got the same id" "0" "$ids repeated"
 check "the table holds exactly those" GET /stats 200 '"c":180'
 
+# 40 transactions at once, each pausing between its two inserts.
+pids=""
+for i in $(seq 1 40); do
+    curl -s -X POST -o "$TMP/t$i" -w '%{http_code}' "http://127.0.0.1:$PORT/tx/$((500 + i))" > "$TMP/tc$i" & pids="$pids $!"
+done
+for p in $pids; do wait "$p"; done
+bad=0
+for i in $(seq 1 40); do [ "$(cat "$TMP/tc$i")" = 201 ] || bad=$((bad + 1)); done
+[ "$bad" = 0 ] && ok "40 overlapping transactions all commit" \
+    || fail "40 overlapping transactions all commit" "40 x 201" "$bad failed: $(cat "$TMP"/t* | grep -m1 error)"
+check "each one whole: two rows apiece" GET /stats 200 '"c":260'
+
 echo "== replication =="
 check "2500 commits (past a checkpoint and a WAL reset)" POST /bulk/1000/2500 200
 check "and more after it" POST /bulk/5000/300 200

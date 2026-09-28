@@ -41,6 +41,19 @@ post endpoint("/bulk/:from/:count", int from, int count):
         i = i + 1
     return { "ok": true }
 
+# A transaction that yields in the middle: many at once overlap on the
+# writer, which must run each one whole before the next BEGIN.
+post endpoint("/tx/:n", int n):
+    try:
+        await sqlite.begin()
+        await sqlite.exec("insert into items (n, body) values (?, ?)", n, "first")
+        await sleep(5)
+        await sqlite.exec("insert into items (n, body) values (?, ?)", n + 1000000, "second")
+        await sqlite.commit()
+    catch e:
+        return { "error": e.message }.status(500)
+    return { "ok": true }.status(201)
+
 get endpoint("/stats"):
     List<Json> rows = await sqlite.query("select count(*) as c, coalesce(sum(n), 0) as s from items")
     return rows[0]
