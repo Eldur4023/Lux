@@ -78,7 +78,35 @@ void EpollLoop::post(std::function<void()> cb) {
     (void)write(wakeup_fd_, &val, sizeof(val));
 }
 
+void EpollLoop::post_urgent(std::function<void()> cb) {
+    bool wake;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        wake = urgent_queue_.empty() && task_queue_.empty();
+        urgent_queue_.push_back(std::move(cb));
+        has_urgent_.store(true, std::memory_order_release);
+    }
+    if (!wake) return;
+    uint64_t val = 1;
+    (void)write(wakeup_fd_, &val, sizeof(val));
+}
+
+void EpollLoop::process_urgent() {
+    while (has_urgent_.load(std::memory_order_acquire)) {
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            running_urgent_.swap(urgent_queue_);
+            has_urgent_.store(false, std::memory_order_relaxed);
+        }
+        for (auto& task : running_urgent_) {
+            if (task) task();
+        }
+        running_urgent_.clear();
+    }
+}
+
 void EpollLoop::process_tasks() {
+    process_urgent();
     if (!has_tasks_.load(std::memory_order_acquire)) return;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -87,6 +115,7 @@ void EpollLoop::process_tasks() {
     }
     for (auto& task : running_tasks_) {
         if (task) task();
+        process_urgent();
     }
     running_tasks_.clear();
 }
@@ -117,6 +146,7 @@ void EpollLoop::run() {
                 continue;
             }
 
+            process_urgent();
             auto it = callbacks_.find(fd);
             if (it == callbacks_.end()) continue;
 

@@ -425,27 +425,18 @@ private:
     std::string run_batch(size_t w, std::vector<DbPool::Write>& writes) {
         std::string err;
         if (!open(w, err)) return err;
-        std::unique_lock<std::mutex> g(gate_m_);
-        gate_cv_.wait(g, [&] { return !gate_held_; });
-        batch_running_ = true;
-        g.unlock();
-        err = commit_batch(w, writes);
-        g.lock();
-        batch_running_ = false;
-        gate_cv_.notify_all();
-        return err;
+        return commit_batch(w, writes);   // it has the pool's write turn
     }
 
-    // The replicator's gate (see SqliteReplicator::start): held, no batch
-    // starts; taken once the one running has committed.
-    std::mutex              gate_m_;
-    std::condition_variable gate_cv_;
-    bool                    gate_held_ = false, batch_running_ = false;
+    // The replicator's and the checkpointer's gate (SqliteReplicator::start):
+    // the pool's external write turn -- no batch or transaction runs while
+    // it is held.
+    DbPool* pool_ = nullptr;
+    void attach(DbPool* pool) override { pool_ = pool; }
     void gate(bool hold) {
-        std::unique_lock<std::mutex> g(gate_m_);
-        gate_held_ = hold;
-        if (hold) gate_cv_.wait(g, [&] { return !batch_running_; });
-        else      gate_cv_.notify_all();
+        if (!pool_) return;
+        if (hold) pool_->acquire_external_turn();
+        else      pool_->release_external_turn();
     }
 
     std::string commit_batch(size_t w, std::vector<DbPool::Write>& writes) {

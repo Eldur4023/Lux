@@ -29,6 +29,11 @@ public:
     void remove(int fd);
 
     void post(std::function<void()> cb);
+    // Ahead of everything else: run between one event and the next, not after
+    // the whole batch and every task queued before it. For a handler holding
+    // something others wait for -- a database transaction's write turn --
+    // whose continuation, queued like any other, kept it held for ms.
+    void post_urgent(std::function<void()> cb);
 
     int  schedule_timer(int ms, std::function<void()> cb);
     void cancel_timer  (int tfd);
@@ -38,6 +43,7 @@ public:
 
 private:
     void process_tasks();
+    void process_urgent();
     void run_timers();
     int  next_timeout_ms() const;
 
@@ -59,6 +65,9 @@ private:
     std::vector<std::function<void()>> running_tasks_;   // swapped with task_queue_: both keep their capacity
     std::mutex queue_mutex_;
     std::atomic<bool> has_tasks_{false};   // lets process_tasks() skip the lock when idle
+    std::vector<std::function<void()>> urgent_queue_;
+    std::vector<std::function<void()>> running_urgent_;
+    std::atomic<bool> has_urgent_{false};
 };
 
 } // namespace lux::core

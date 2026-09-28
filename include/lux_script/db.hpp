@@ -33,6 +33,15 @@ class DbPool {
 public:
     ~DbPool();
 
+    // A job: `work` runs on a worker with its connection; `done` runs after,
+    // once the pool has looked at the connection's state (in a transaction or
+    // not) -- `done` resumes the handler, which may then use that very
+    // connection (a transaction's statements run inline, see await_db).
+    struct Job {
+        std::function<void(size_t worker)> work;
+        std::function<void()>              done;
+    };
+
     // A write for the writer (see Batch): `work` runs the statement and says
     // whether it succeeded; `done` runs once the batch it went in is
     // committed, with the commit's error ("" if it committed).
@@ -50,15 +59,31 @@ public:
     void start(size_t workers, std::function<bool(size_t)> in_transaction, Batch batch = {});
 
     // Free assignment: the first available worker takes it.
-    void submit(std::function<void(size_t worker)> job);
+    void submit(Job job);
 
     // Pinned to a specific worker.  A transaction needs this: BEGIN, the
     // queries and COMMIT have to go through the SAME connection, and each
     // worker owns one.
-    void submit_to(size_t worker, std::function<void(size_t worker)> job);
+    void submit_to(size_t worker, Job job);
 
     // To the writer; only when has_writer().
     void submit_write(Write w);
+
+    // With a writer (SQLite: one writer at a time), everything that writes
+    // takes turns here instead of racing for SQLite's lock: the writer's
+    // batches, transactions, and a checkpoint (the external turn). Whoever
+    // waits, waits in memory -- not on a pool worker in a busy handler,
+    // polling for the lock, which at load tied up most of the pool and left
+    // the reads queued behind it.
+    //
+    // A transaction's BEGIN: runs once it is the transactions' turn; the turn
+    // is theirs until it ends (commit, rollback, or a BEGIN that failed).
+    void submit_begin(Job job);
+    // For a checkpoint or a replica's snapshot: blocks until nothing else
+    // writes, and holds everyone off until released.
+    void acquire_external_turn();
+    void release_external_turn();
+
     bool has_writer() const { return static_cast<bool>(batch_); }
 
     void stop();
@@ -68,10 +93,18 @@ public:
 private:
     Batch                                           batch_;
     std::vector<Write>                              writes_;
+    enum class Turn { None, Writer, Tx, External };
+    void dispatch_turn();   // under mutex_
+    Turn                                            turn_ = Turn::None, last_turn_ = Turn::None;
+    size_t                                          external_waiting_ = 0;
+    std::queue<Job>                                 begins_;       // waiting for their turn
+    std::queue<Job>                                 begin_ready_;  // has it, for any free worker
+    std::vector<char>                               tx_owner_;     // the worker whose transaction has it
+    int                                             tx_streak_ = 0;   // transaction turns in a row
     std::vector<std::thread>                        threads_;
     std::vector<int>                                workers_;   // only for the size
-    std::queue<std::function<void(size_t)>>              jobs_;
-    std::vector<std::queue<std::function<void(size_t)>>> pinned_;
+    std::queue<Job>                                 jobs_;
+    std::vector<std::queue<Job>>                    pinned_;
     std::vector<char>                               held_;   // connection inside a transaction
     std::mutex                                      mutex_;
     std::condition_variable                         cv_;
@@ -151,6 +184,9 @@ public:
     virtual void shutdown() {}
 
     virtual DbPool::Batch batch() { return {}; }
+    // The pool it runs on, once started (for the write turn, see DbPool).
+    virtual void attach(DbPool* pool) { (void)pool; }
+
     virtual bool batchable(const std::string& sql) const { (void)sql; return false; }
 
     size_t pool_size() const { return pool_size_; }
@@ -230,6 +266,10 @@ struct DbAwaitable {
     lux::core::EventLoop*       loop;
     std::function<void(size_t)>    work;   // receives the worker: it picks the connection
     int                            pinned = -1;   // >= 0 inside a transaction
+    bool                           begin  = false;   // a BEGIN: DbPool::submit_begin
+    // A BEGIN's resume: the write turn is held from here to the commit, and
+    // everyone's writes wait on it, so it goes ahead of the loop's queue.
+    bool                           urgent = false;
 
     bool await_ready() const noexcept { return false; }
 
@@ -237,12 +277,13 @@ struct DbAwaitable {
         // `this` lives until the co_await finishes, and the handle is resumed
         // exactly once, so capturing them by value is safe.
         auto* p = pool; auto* l = loop; auto w = std::move(work); int pin = pinned;
-        auto job = [l, h, w = std::move(w)](size_t worker) {
-            w(worker);
-            l->post([h]() mutable { h.resume(); });
-        };
-        if (pin >= 0) p->submit_to(static_cast<size_t>(pin), std::move(job));
-        else          p->submit(std::move(job));
+        DbPool::Job job{std::move(w), [l, h, urgent = urgent] {
+            if (urgent) l->post_urgent([h]() mutable { h.resume(); });
+            else        l->post([h]() mutable { h.resume(); });
+        }};
+        if (begin)         p->submit_begin(std::move(job));
+        else if (pin >= 0) p->submit_to(static_cast<size_t>(pin), std::move(job));
+        else               p->submit(std::move(job));
     }
 
     void await_resume() const noexcept {}

@@ -35,6 +35,8 @@ public:
     void remove(int fd);
 
     void post(std::function<void()> cb);
+    // No priority lane here yet: queued like any other (see EpollLoop).
+    void post_urgent(std::function<void()> cb) { post(std::move(cb)); }
 
     int  schedule_timer(int ms, std::function<void()> cb);
     void cancel_timer  (int tfd);

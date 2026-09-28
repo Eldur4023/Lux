@@ -21,6 +21,7 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
     workers_.assign(workers, 0);
     pinned_.resize(workers);
     held_.assign(workers, 0);
+    tx_owner_.assign(workers, 0);
     batch_ = std::move(batch);
 
     // The writer: everything queued while the previous batch ran goes in the
@@ -30,12 +31,18 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
         for (;;) {
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [&] { return stopping_ || !writes_.empty(); });
-                if (writes_.empty()) return;
+                cv_.wait(lock, [&] { return turn_ == Turn::Writer || (stopping_ && writes_.empty()); });
+                if (turn_ != Turn::Writer) return;   // stopping, nothing left to write
                 writes.swap(writes_);
             }
             std::string error;
             try { error = batch_(writer, writes); } catch (...) { error = "database writer failed"; }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                turn_ = Turn::None;
+                dispatch_turn();
+            }
+            cv_.notify_all();
             for (auto& w : writes) w.done(error);
             writes.clear();
         }
@@ -45,30 +52,49 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
         threads_.emplace_back([this, i, in_transaction] {
             bool held = false;
             for (;;) {
-                std::function<void(size_t)> job;
+                Job job;
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
                     held_[i] = held;
+                    // This worker's transaction had the write turn and it is
+                    // over (committed, rolled back, or its BEGIN failed): the
+                    // turn goes to whoever is next (dispatch_turn).
+                    if (tx_owner_[i] && !held) {
+                        tx_owner_[i] = 0;
+                        turn_        = Turn::None;
+                        dispatch_turn();
+                        cv_.notify_all();
+                    }
                     // A worker whose connection has a transaction open takes
                     // only what is pinned to it: a shared job would run INSIDE
                     // someone else's transaction -- rolled back with it, or,
                     // on MySQL, a BEGIN there silently commits it.
                     auto ready = [&] {
-                        return !pinned_[i].empty() || (!held_[i] && !jobs_.empty());
+                        return !pinned_[i].empty() || (!held_[i] && (!jobs_.empty() || !begin_ready_.empty()));
                     };
                     cv_.wait(lock, [&] { return stopping_ || ready(); });
                     // Stopping with nothing queued: done -- unless a
                     // transaction is still open here; its handler may yet
                     // send the rest (see kDrainTransaction).
                     if (!ready() && (!held_[i] ||
-                                     !cv_.wait_for(lock, kDrainTransaction, [&] { return !pinned_[i].empty(); })))
+                                     !cv_.wait_for(lock, kDrainTransaction, [&] { return !pinned_[i].empty(); }))) {
+                        if (tx_owner_[i]) {   // given up on: its turn goes on
+                            turn_ = Turn::None;
+                            dispatch_turn();
+                            cv_.notify_all();
+                        }
                         return;
+                    }
 
                     // What is pinned to this worker goes first: it is the
                     // continuation of a transaction whose connection is open.
                     if (!pinned_[i].empty()) {
                         job = std::move(pinned_[i].front());
                         pinned_[i].pop();
+                    } else if (!begin_ready_.empty()) {
+                        job = std::move(begin_ready_.front());
+                        begin_ready_.pop();
+                        tx_owner_[i] = 1;
                     } else {
                         job = std::move(jobs_.front());
                         jobs_.pop();
@@ -76,14 +102,15 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
                 }
                 // A job that throws cannot take the worker down with it: with
                 // no live connection, the module would stop answering everyone.
-                try { job(i); } catch (...) {}
+                try { job.work(i); } catch (...) {}
                 held = in_transaction(i);
+                if (job.done) job.done();   // after: the handler may use this connection next
             }
         });
     }
 }
 
-void DbPool::submit(std::function<void(size_t)> job) {
+void DbPool::submit(Job job) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) return;
@@ -94,7 +121,7 @@ void DbPool::submit(std::function<void(size_t)> job) {
     cv_.notify_all();
 }
 
-void DbPool::submit_to(size_t worker, std::function<void(size_t)> job) {
+void DbPool::submit_to(size_t worker, Job job) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         // Accepted while stopping: a pinned job is the rest of a transaction
@@ -110,11 +137,66 @@ void DbPool::submit_to(size_t worker, std::function<void(size_t)> job) {
     cv_.notify_all();
 }
 
+// Under mutex_. Who writes next, once nobody does: a checkpoint first (rare,
+// and the WAL grows until it runs), then transactions and the writer's batch
+// taking turns -- up to kTxStreak transactions in a row, then the batch: a
+// batch commits everything queued for it at once, so waiting a few turns
+// costs its writes little, while one batch between every two transactions
+// capped them at a turn and a half each (measured: ~500/s on a slow server).
+constexpr int kTxStreak = 8;
+
+void DbPool::dispatch_turn() {
+    if (turn_ != Turn::None) return;
+    const bool batch = !writes_.empty(), tx = !begins_.empty();
+    if (external_waiting_ > 0) {
+        turn_ = Turn::External;
+        --external_waiting_;
+        return;
+    }
+    if (batch && (!tx || tx_streak_ >= kTxStreak)) {
+        turn_ = last_turn_ = Turn::Writer;
+        tx_streak_ = 0;
+    } else if (tx) {
+        turn_ = last_turn_ = Turn::Tx;
+        ++tx_streak_;
+        begin_ready_.push(std::move(begins_.front()));
+        begins_.pop();
+    }
+}
+
+void DbPool::submit_begin(Job job) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) return;
+        begins_.push(std::move(job));   // waits here, not in a busy handler
+        dispatch_turn();
+    }
+    cv_.notify_all();
+}
+
+void DbPool::acquire_external_turn() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++external_waiting_;
+    dispatch_turn();
+    cv_.notify_all();
+    cv_.wait(lock, [&] { return turn_ == Turn::External; });
+}
+
+void DbPool::release_external_turn() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        turn_ = Turn::None;
+        dispatch_turn();
+    }
+    cv_.notify_all();
+}
+
 void DbPool::submit_write(Write w) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) return;
         writes_.push_back(std::move(w));
+        dispatch_turn();
     }
     cv_.notify_all();
 }
@@ -201,6 +283,7 @@ bool DbRegistry::activate(const std::string& name,
     slot.pool = std::make_unique<DbPool>();
     DbDriver* d = slot.driver.get();
     slot.pool->start(d->pool_size(), [d](size_t w) { return d->in_transaction(w); }, d->batch());
+    d->attach(slot.pool.get());
     slot.activated = true;
     return true;
 }
@@ -331,7 +414,7 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         co_return result;
     }
 
-    co_await DbAwaitable{pool, loop,
+    std::function<void(size_t)> work =
         [&, driver, op = stmt_op](size_t worker) {
             used = static_cast<int>(worker);
             std::string err;
@@ -360,8 +443,27 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
                 if (!driver->exec(worker, stmt, {}, n, err)) { errmsg = err; return; }
                 result = Value::boolean(true);
             }
-        },
-        pin};
+        };
+
+    // Inside a transaction (SQLite): the statement runs right here, with the
+    // transaction's connection -- its worker is parked until the commit, so
+    // nothing else touches it. Statements in a transaction only change pages
+    // in memory; the disk write is COMMIT's, and that one goes to the worker
+    // (never disk I/O on an event loop). A round trip per statement held the
+    // write turn -- everyone's writes -- across that many trips through a
+    // busy loop: a comment's transaction capped the whole forum's writes.
+    // ponytail: no CPU budget here (interrupting a write inside a transaction
+    // rolls all of it back); a heavy statement in a transaction runs on the
+    // loop -- send those to the worker if one ever shows up in latency.
+    const bool run_inline = in_tx && pool->has_writer() &&
+                            (op == DbOp::Query || op == DbOp::Exec || op == DbOp::LastId);
+    if (run_inline) {
+        work(static_cast<size_t>(pin));
+    } else {
+        co_await DbAwaitable{pool, loop, work,
+            pin, op == DbOp::Begin && !in_tx && pool->has_writer(),
+            op == DbOp::Begin};   // its resume holds the write turn: ahead of the loop's queue
+    }
 
     if (!errmsg.empty()) {
         // A driver failure INSIDE a transaction poisons it for everything
