@@ -33,9 +33,21 @@ class DbPool {
 public:
     ~DbPool();
 
+    // A write for the writer (see Batch): `work` runs the statement and says
+    // whether it succeeded; `done` runs once the batch it went in is
+    // committed, with the commit's error ("" if it committed).
+    struct Write {
+        std::function<bool(size_t)>              work;
+        std::function<void(const std::string&)>  done;
+    };
+    // Runs everything the writer had queued, as one transaction, on the
+    // writer's connection (index size()); returns the commit's error.
+    using Batch = std::function<std::string(size_t writer, std::vector<Write>& writes)>;
+
     // in_transaction(worker): whether that worker's connection has a
     // transaction open, asked on the worker itself after every job.
-    void start(size_t workers, std::function<bool(size_t)> in_transaction);
+    // With `batch`, one more thread -- the writer -- takes submit_write().
+    void start(size_t workers, std::function<bool(size_t)> in_transaction, Batch batch = {});
 
     // Free assignment: the first available worker takes it.
     void submit(std::function<void(size_t worker)> job);
@@ -45,11 +57,17 @@ public:
     // worker owns one.
     void submit_to(size_t worker, std::function<void(size_t worker)> job);
 
+    // To the writer; only when has_writer().
+    void submit_write(Write w);
+    bool has_writer() const { return static_cast<bool>(batch_); }
+
     void stop();
 
     size_t size() const { return workers_.size(); }
 
 private:
+    Batch                                           batch_;
+    std::vector<Write>                              writes_;
     std::vector<std::thread>                        threads_;
     std::vector<int>                                workers_;   // only for the size
     std::queue<std::function<void(size_t)>>              jobs_;
@@ -125,6 +143,15 @@ public:
         (void)sql; (void)args; (void)out; (void)error;
         return Inline::NotHandled;
     }
+
+    // Group commit, for an engine with a single writer: an exec() outside a
+    // transaction for which batchable() says yes goes to the pool's writer,
+    // and run_batch() commits everything queued there at once.
+    // After the pool has stopped, on a clean exit: last chance to flush.
+    virtual void shutdown() {}
+
+    virtual DbPool::Batch batch() { return {}; }
+    virtual bool batchable(const std::string& sql) const { (void)sql; return false; }
 
     size_t pool_size() const { return pool_size_; }
     void   set_pool_size(size_t n) { pool_size_ = n; }
@@ -221,6 +248,28 @@ struct DbAwaitable {
     void await_resume() const noexcept {}
 };
 
+// The same, for the writer: resumed once the write's batch has committed --
+// never before, or the handler could answer for a write that then rolls back,
+// or read on another connection without seeing its own write.
+struct DbWriteAwaitable {
+    DbPool*                        pool;
+    lux::core::EventLoop*          loop;
+    std::function<bool(size_t)>    work;
+    std::string*                   commit_error;
+
+    bool await_ready() const noexcept { return false; }
+
+    void await_suspend(std::coroutine_handle<> h) {
+        auto* l = loop; auto* ce = commit_error;
+        pool->submit_write({std::move(work), [l, h, ce](const std::string& e) {
+            *ce = e;
+            l->post([h]() mutable { h.resume(); });
+        }});
+    }
+
+    void await_resume() const noexcept {}
+};
+
 // ─── Bridge shared between bytecode and --native ─────────────────────────────
 //
 // --native phase 5.5: the logic of a database suspension used to live only
@@ -235,7 +284,7 @@ enum class DbOp { Query, Exec, LastId, Begin, Commit, Rollback };
 // {"error": msg} -- how every engine failure reaches the .lux, as a normal value.
 Value db_error(const std::string& msg);
 
-// `pinned_workers`/`last_exec_workers`: the same map (module -> worker)
+// `pinned_workers` (module -> worker) and `last_insert_ids` (module -> id): the same maps
 // NativeCtx already carries for a bytecode request today -- the caller
 // (run_db(), or a route's generated native code) owns these maps and
 // passes them by reference, alive for the whole duration of the request.
@@ -257,7 +306,7 @@ Value db_error(const std::string& msg);
 // inside an already-marked transaction returns an immediate error without
 // touching the driver, and commit() on it does a ROLLBACK instead and
 // reports it as an error rather than a success. Lives in the same NativeCtx
-// as pinned_workers/last_exec_workers, same lifetime.
+// as pinned_workers/last_insert_ids, same lifetime.
 //
 // Never throws or raises an error beyond this function: an engine failure
 // (module not configured, invalid SQL, driver failure) produces a
@@ -267,7 +316,7 @@ Value db_error(const std::string& msg);
 lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLoop* loop,
                             const std::string& sql, std::vector<Value> params,
                             std::map<std::string, int>& pinned_workers,
-                            std::map<std::string, int>& last_exec_workers,
+                            std::map<std::string, long long>& last_insert_ids,
                             std::set<std::string>& poisoned);
 
 // Closes, with ROLLBACK, any transaction the handler left open (begin()
@@ -278,6 +327,10 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
 // see the call site in project.cpp (bytecode) and in the code that
 // generates an async native route (native_gen.cpp). Empties
 // `pinned_workers` when done.
+// `lux restore <replica> <out.db>`: rebuilds a SQLite database from one of
+// its `replicate` targets. Returns the exit code.
+int restore_main(const std::vector<std::string>& args);
+
 lux::Task<void> rollback_pending_db(std::map<std::string, int>& pinned_workers,
                                          lux::core::EventLoop* loop);
 

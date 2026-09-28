@@ -231,7 +231,7 @@ if(LUX_SQLITE)
     find_path(SQLITE3_INC sqlite3.h)
     find_library(SQLITE3_LIB sqlite3)
     if(SQLITE3_INC AND SQLITE3_LIB)
-        target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp)
+        target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp src/lux_script/sqlite_replica.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_SQLITE)
         target_include_directories(lux_script PRIVATE ${SQLITE3_INC})
         target_link_libraries(lux_script PRIVATE ${SQLITE3_LIB})
@@ -434,6 +434,11 @@ add_test(NAME sqlite
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+# The single writer and `replicate` (directories; s3/sftp need real targets).
+add_test(NAME sqlite_replica
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_replica.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite_replica PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
 # Same for postgres.
 add_test(NAME postgres

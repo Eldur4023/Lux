@@ -102,10 +102,10 @@ struct NativeCtx {
     // exists, every query of that module goes through the same connection.
     std::map<std::string, int> pinned_workers;
 
-    // Worker that ran the last exec of each module.  `last_id()` has to go
-    // through that SAME connection: the generated identifier does not exist on
-    // the others.
-    std::map<std::string, int> last_exec_workers;
+    // Id the last exec of each module generated, read on its connection
+    // right after it ran: by the time `last_id()` asks, that connection may
+    // have run someone else's statement (the writer batches them).
+    std::map<std::string, long long> last_insert_ids;
 
     // Modules whose CURRENT transaction already had a statement fail. See
     // the comment on `poisoned` in db.hpp's await_db() -- commit() on a

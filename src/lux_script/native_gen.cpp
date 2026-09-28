@@ -2324,7 +2324,7 @@ public:
                            expr(*e.lhs->args[0].value) + "), req.loop, req.cancel_token))";
                 // await <modulo>.query/exec/last_id(...) (Fase 5.5): mismo
                 // camino que bytecode (lux_script::await_db(), ver
-                // db.hpp) -- l_pinned_workers/l_last_exec_workers son las
+                // db.hpp) -- l_pinned_workers/l_last_insert_ids son las
                 // dos variables locales que generate_native_route() declara
                 // al principio de cualquier ruta asincrona, equivalentes a
                 // los mapas que NativeCtx lleva para una peticion bytecode.
@@ -2431,7 +2431,7 @@ public:
         }
         return "lux_script::await_db(lux_script::DbOp::" + dbop + ", " +
                literal_string(call.call_name) + ", req.loop, " + sql + ", " + params +
-               ", l_pinned_workers, l_last_exec_workers, l_poisoned_db)";
+               ", l_pinned_workers, l_last_insert_ids, l_poisoned_db)";
     }
 
     // `Json x = await <module>.query(...)`: the only statement block() may
@@ -3227,7 +3227,7 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
         for (size_t i = 0; i < fn.params.size(); ++i) gen.registrar(static_cast<int>(i), fn.params[i].name);
         out.cuerpo_cpp = "{\n    lux::Request& req = l_ctx.req; lux::Response& res = l_ctx.res; (void)req; (void)res;\n"
                          "    auto& l_pinned_workers = l_ctx.pinned_workers; (void)l_pinned_workers;\n"
-                         "    auto& l_last_exec_workers = l_ctx.last_exec_workers; (void)l_last_exec_workers;\n"
+                         "    auto& l_last_insert_ids = l_ctx.last_insert_ids; (void)l_last_insert_ids;\n"
                          "    auto& l_poisoned_db = l_ctx.poisoned_db; (void)l_poisoned_db;\n" +
                          gen.block(body, 1) +
                          (retorno_decl.kind() == Type::Kind::Void ? "    co_return;\n}"
@@ -3747,7 +3747,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // whole time.
     cuerpo += "    std::optional<std::unordered_map<std::string, std::string>> l_form_data;\n";
     // Fase 5.5/5.6: equivalentes locales, para toda la duracion de esta
-    // peticion, de NativeCtx::pinned_workers/last_exec_workers --
+    // peticion, de NativeCtx::pinned_workers/last_insert_ids --
     // lux_script::await_db() (db.hpp) los toma por referencia para fijar
     // una consulta a la misma conexion que abrio una transaccion (begin(),
     // ver Comprobador::usa_transaccion()) o que hizo el ultimo exec() (para
@@ -3761,7 +3761,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // connections (NativeCtx is what the VM shares across calls too).
     if (asincrona)
         cuerpo += "    auto& l_pinned_workers = l_ctx.pinned_workers;\n"
-                  "    auto& l_last_exec_workers = l_ctx.last_exec_workers;\n"
+                  "    auto& l_last_insert_ids = l_ctx.last_insert_ids;\n"
                   "    auto& l_poisoned_db = l_ctx.poisoned_db;\n";
     if (preparar) {
         if (con_archivos)

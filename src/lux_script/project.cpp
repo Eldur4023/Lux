@@ -452,7 +452,7 @@ bool is_db_await(int id) {
 //
 // Thin adapter over lux_script::await_db() (db.hpp/db.cpp) — the real
 // logic (resolving the driver/pool, deciding the pinned worker, invoking
-// DbAwaitable, updating pinned_workers/last_exec_workers) lives there,
+// DbAwaitable, updating pinned_workers/last_insert_ids) lives there,
 // shared with the code that generates a --native route for the same thing:
 // both paths run EXACTLY the same code, not a separate reproduction that
 // could silently diverge (the same class of bug that already caused two
@@ -481,7 +481,7 @@ lux::Task<Value> run_db(const VM::Result& r, int op, lux::Request& req,
     }
 
     Value v = co_await await_db(dbop, mod, req.loop, sql, std::move(params),
-                                ctx.pinned_workers, ctx.last_exec_workers,
+                                ctx.pinned_workers, ctx.last_insert_ids,
                                 ctx.poisoned_db);
     co_return v;
 }
@@ -2243,6 +2243,17 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         if (sqlite_it != mod->program.app.modules.end()) {
             auto file_it = sqlite_it->second.find("file");
             if (file_it != sqlite_it->second.end()) resolve(file_it->second);
+            // A `replicate` directory is a path like `file` (URLs are left alone).
+            auto rep_it = sqlite_it->second.find("replicate");
+            if (rep_it != sqlite_it->second.end()) {
+                std::string joined, line;
+                std::istringstream in(rep_it->second);
+                while (std::getline(in, line)) {
+                    if (line.find("://") == std::string::npos) resolve(line);
+                    joined += (joined.empty() ? "" : "\n") + line;
+                }
+                rep_it->second = joined;
+            }
         }
     }
 

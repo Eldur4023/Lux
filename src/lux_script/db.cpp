@@ -10,11 +10,30 @@ namespace lux_script {
 
 DbPool::~DbPool() { stop(); }
 
-void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction) {
+void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, Batch batch) {
     if (!threads_.empty()) return;
     workers_.assign(workers, 0);
     pinned_.resize(workers);
     held_.assign(workers, 0);
+    batch_ = std::move(batch);
+
+    // The writer: everything queued while the previous batch ran goes in the
+    // next one, so the busier it is, the more each commit carries.
+    if (batch_) threads_.emplace_back([this, writer = workers] {
+        std::vector<Write> writes;
+        for (;;) {
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait(lock, [&] { return stopping_ || !writes_.empty(); });
+                if (writes_.empty()) return;
+                writes.swap(writes_);
+            }
+            std::string error;
+            try { error = batch_(writer, writes); } catch (...) { error = "database writer failed"; }
+            for (auto& w : writes) w.done(error);
+            writes.clear();
+        }
+    });
 
     for (size_t i = 0; i < workers; ++i) {
         threads_.emplace_back([this, i, in_transaction] {
@@ -75,6 +94,15 @@ void DbPool::submit_to(size_t worker, std::function<void(size_t)> job) {
     cv_.notify_all();
 }
 
+void DbPool::submit_write(Write w) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) return;
+        writes_.push_back(std::move(w));
+    }
+    cv_.notify_all();
+}
+
 void DbPool::stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -99,6 +127,20 @@ std::unique_ptr<DbDriver> make_postgres_driver();
 #ifdef LUX_MYSQL
 std::unique_ptr<DbDriver> make_mysql_driver();
 #endif
+
+#ifdef LUX_SQLITE
+int sqlite_restore_main(const std::vector<std::string>& args);
+#endif
+
+int restore_main(const std::vector<std::string>& args) {
+#ifdef LUX_SQLITE
+    return sqlite_restore_main(args);
+#else
+    (void)args;
+    lux::log().error("restore: this lux was built without the sqlite module");
+    return 1;
+#endif
+}
 
 DbRegistry::DbRegistry() {
 #ifdef LUX_SQLITE
@@ -142,7 +184,7 @@ bool DbRegistry::activate(const std::string& name,
 
     slot.pool = std::make_unique<DbPool>();
     DbDriver* d = slot.driver.get();
-    slot.pool->start(d->pool_size(), [d](size_t w) { return d->in_transaction(w); });
+    slot.pool->start(d->pool_size(), [d](size_t w) { return d->in_transaction(w); }, d->batch());
     slot.activated = true;
     return true;
 }
@@ -161,7 +203,7 @@ DbPool* DbRegistry::pool(const std::string& name) const {
 
 void DbRegistry::shutdown() {
     for (auto& [_, slot] : slots_)
-        if (slot.pool) slot.pool->stop();
+        if (slot.pool) { slot.pool->stop(); slot.driver->shutdown(); }
 }
 
 // ─── Bridge shared by bytecode and --native ──────────────────────────────────
@@ -186,7 +228,7 @@ Value db_error(const std::string& msg) {
 lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLoop* loop,
                             const std::string& sql, std::vector<Value> params,
                             std::map<std::string, int>& pinned_workers,
-                            std::map<std::string, int>& last_exec_workers,
+                            std::map<std::string, long long>& last_insert_ids,
                             std::set<std::string>& poisoned) {
     auto& reg    = DbRegistry::instance();
     auto* driver = reg.active(module);
@@ -201,11 +243,12 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
     bool in_tx = pinit != pinned_workers.end();
     if (in_tx) pin = pinit->second;
 
-    // last_id() is routed to the connection of the last exec: the generated
-    // identifier does not exist on the others.
-    if (pin < 0 && op == DbOp::LastId) {
-        auto le = last_exec_workers.find(module);
-        if (le != last_exec_workers.end()) pin = le->second;
+    // last_id() is the id the last exec read on its own connection, right
+    // after running. Without an exec yet, or on an engine that has no such
+    // id, the driver answers (0, or its error).
+    if (op == DbOp::LastId) {
+        auto le = last_insert_ids.find(module);
+        if (le != last_insert_ids.end()) co_return Value::integer(le->second);
     }
 
     // An earlier statement of THIS transaction already failed: anything
@@ -245,6 +288,32 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
     Value       result;
     std::string errmsg;
     int         used = -1;
+    long long   insert_id = 0;
+    bool        has_insert_id = false;
+
+    // A plain write outside a transaction: to the writer, committed with
+    // whatever else is queued there.
+    if (op == DbOp::Exec && !in_tx && pool->has_writer() && driver->batchable(sql)) {
+        std::string commit_error;
+        co_await DbWriteAwaitable{pool, loop,
+            [&, driver](size_t worker) {
+                std::string err;
+                long long   n = 0;
+                if (!driver->open(worker, err) || !driver->exec(worker, sql, params, n, err)) {
+                    errmsg = err;
+                    return false;
+                }
+                result        = Value::integer(n);
+                has_insert_id = driver->last_insert_id(worker, insert_id, err);
+                return true;
+            },
+            &commit_error};
+        if (errmsg.empty()) errmsg = commit_error;
+        if (!errmsg.empty()) co_return db_error(errmsg);
+        if (has_insert_id) last_insert_ids[module] = insert_id;
+        else               last_insert_ids.erase(module);
+        co_return result;
+    }
 
     co_await DbAwaitable{pool, loop,
         [&, driver, op = stmt_op](size_t worker) {
@@ -260,6 +329,7 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
             } else if (op == DbOp::Exec) {
                 if (!driver->exec(worker, sql, params, n, err)) { errmsg = err; return; }
                 result = Value::integer(n);
+                has_insert_id = driver->last_insert_id(worker, insert_id, err);
             } else if (op == DbOp::LastId) {
                 if (!driver->last_insert_id(worker, n, err)) { errmsg = err; return; }
                 result = Value::integer(n);
@@ -288,7 +358,10 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         co_return db_error(errmsg);
     }
 
-    if (op == DbOp::Exec) last_exec_workers[module] = used;
+    if (op == DbOp::Exec) {
+        if (has_insert_id) last_insert_ids[module] = insert_id;
+        else               last_insert_ids.erase(module);
+    }
 
     // A transaction pins its connection when it opens and releases it when
     // it closes.

@@ -2,11 +2,16 @@
 #include <unordered_map>
 #include <lux_script/db.hpp>
 #include <lux_script/crypto.hpp>
+#include <lux/logger.hpp>
+
+#include "sqlite_replica.hpp"
 
 #include <sqlite3.h>
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <ctime>
 #include <unordered_set>
 #include <cctype>
@@ -133,12 +138,28 @@ public:
         auto t = options.find("timeout_ms");
         if (t != options.end()) busy_timeout_ = std::atoi(t->second.c_str());
 
-        // Past the pool's workers, one slot per event-loop thread for
-        // query_inline(). A :memory: database is private to each connection,
-        // so an inline read there would see a different, empty database.
-        inline_ok_ = file_.find(":memory:") == std::string::npos &&
-                     file_.find("mode=memory") == std::string::npos;
-        const size_t slots = pool_size() + kInlineSlots;
+        // Past the pool's workers, the writer's slot, then one per
+        // event-loop thread for query_inline(). A :memory: database is
+        // private to each connection, so an inline read -- or a write on
+        // the writer -- there would see a different, empty database.
+        shared_file_ = file_.find(":memory:") == std::string::npos &&
+                       file_.find("mode=memory") == std::string::npos;
+
+        // `replicate` may be given more than once (the parser joins the
+        // values with newlines): every target gets every commit.
+        if (auto r = options.find("replicate"); r != options.end()) {
+            for (size_t at = 0; at <= r->second.size();) {
+                const size_t nl = r->second.find('\n', at);
+                std::string  target = r->second.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+                if (!target.empty()) replicate_.push_back(std::move(target));
+                if (nl == std::string::npos) break;
+                at = nl + 1;
+            }
+            if (!shared_file_) { error = "sqlite: an in-memory database cannot be replicated"; return false; }
+            if (!SqliteReplicator::validate(replicate_, error)) return false;
+        }
+
+        const size_t slots = inline_base() + kInlineSlots;
         conns_.assign(slots, nullptr);
         cache_.assign(slots, {});
         rc_.assign(slots, SQLITE_OK);
@@ -154,16 +175,16 @@ public:
     // thread, and it and every later call go to the pool.
     Inline query_inline(const std::string& sql, const std::vector<Value>& args,
                         Value& out, std::string& error) override {
-        if (!inline_ok_) return Inline::NotHandled;
+        if (!shared_file_) return Inline::NotHandled;
         const long slot = inline_slot();
         if (slot < 0) return Inline::NotHandled;
-        auto& slow = slow_[static_cast<size_t>(slot) - pool_size()];
+        auto& slow = slow_[static_cast<size_t>(slot) - inline_base()];
         if (slow.count(sql)) return Inline::NotHandled;
 
         std::string open_error;
         if (!open(static_cast<size_t>(slot), open_error)) return Inline::NotHandled;
 
-        deadline_[static_cast<size_t>(slot) - pool_size()].at_ns = thread_cpu_ns() + kInlineBudgetNs;
+        deadline_[static_cast<size_t>(slot) - inline_base()].at_ns = thread_cpu_ns() + kInlineBudgetNs;
         if (query(static_cast<size_t>(slot), sql, args, out, error)) return Inline::Done;
 
         switch (rc_[static_cast<size_t>(slot)] & 0xff) {
@@ -178,9 +199,25 @@ public:
         if (worker >= conns_.size()) { error = "sqlite: worker out of range"; return false; }
         if (conns_[worker]) return true;
 
+        // Replication starts with the first connection, not at configure
+        // time: `lux --check` configures too, and must not upload anything.
+        if (!replicate_.empty()) {
+            std::call_once(replicator_once_, [&] {
+                replicator_ = SqliteReplicator::start(file_, replicate_,
+                                                      [this](bool hold) { gate(hold); },
+                                                      replicator_error_);
+                if (!replicator_) lux::log().error(replicator_error_);
+            });
+            if (!replicator_) { error = replicator_error_; return false; }
+        }
+
+        // NOMUTEX: every connection here is used by one thread at a time (a
+        // pool worker, the writer, or one event loop), so SQLite's own
+        // per-call mutex was pure overhead -- 8.6% of a list endpoint.
         sqlite3* db = nullptr;
         int rc = sqlite3_open_v2(file_.c_str(), &db,
-                                 SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+                                 SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
+                                 nullptr);
         if (rc != SQLITE_OK) {
             error = std::string("sqlite: cannot open '") + file_ + "': " +
                     (db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
@@ -204,18 +241,24 @@ public:
         if (msg) sqlite3_free(msg);
         sqlite3_exec(db, "PRAGMA foreign_keys=ON", nullptr, nullptr, &msg);
         if (msg) sqlite3_free(msg);
+        // No mmap_size: measured on the forum bench, mapping the file cost
+        // 12% of peak throughput (page faults from 8 loop threads contend on
+        // the process's mmap_lock); pread() from the page cache is cheaper.
+        sqlite3_exec(db, "PRAGMA temp_store=MEMORY", nullptr, nullptr, &msg);
+        if (msg) sqlite3_free(msg);
 
         // Waits instead of failing when another connection holds the file --
         // except on an inline slot: the event loop never sleeps.
-        const bool inline_slot = worker >= pool_size();
+        const bool inline_slot = worker >= inline_base();
         if (inline_slot) sqlite3_busy_timeout(db, 0);
-        else {
-            sqlite3_busy_handler(db, &busy_wait, &busy_timeout_);
-            sqlite3_wal_hook(db, &wal_hook, &busy_timeout_);
-        }
+        else             sqlite3_busy_handler(db, &busy_wait, &busy_timeout_);
+        // Replicating, only the replicator checkpoints (see
+        // sqlite_replica.cpp); otherwise the writing connections do.
+        if (replicator_)       sqlite3_wal_autocheckpoint(db, 0);
+        else if (!inline_slot) sqlite3_wal_hook(db, &wal_hook, &busy_timeout_);
         if (inline_slot)
             sqlite3_progress_handler(db, 1000, &past_deadline,
-                                     &deadline_[worker - pool_size()]);
+                                     &deadline_[worker - inline_base()]);
 
         conns_[worker] = db;
         return true;
@@ -281,6 +324,7 @@ public:
         int rc = sqlite3_step(stmt);
         if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
             error = std::string("sqlite: ") + sqlite3_errmsg(conns_[worker]);
+            rc_[worker] = rc;
             release(stmt, cached);
             return false;
         }
@@ -302,7 +346,36 @@ public:
         return true;
     }
 
+    // The writer: one connection takes every plain write, so they never
+    // fight over SQLite's write lock (the busy_wait sleeps were most of a
+    // write's latency), and everything that queued up while the last batch
+    // ran commits as one transaction -- one WAL append instead of one each.
+    DbPool::Batch batch() override {
+        if (!shared_file_) return {};
+        return [this](size_t writer, std::vector<DbPool::Write>& writes) { return run_batch(writer, writes); };
+    }
+
+    // Statements that cannot run inside the batch's transaction go to the
+    // pool as before.
+    bool batchable(const std::string& sql) const override {
+        size_t i = 0;
+        while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) ++i;
+        size_t j = i;
+        while (j < sql.size() && std::isalpha(static_cast<unsigned char>(sql[j]))) ++j;
+        std::string kw = sql.substr(i, j - i);
+        for (auto& c : kw) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        static const std::unordered_set<std::string> alone = {
+            "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE",
+            "VACUUM", "ATTACH", "DETACH", "PRAGMA"};
+        return !kw.empty() && !alone.count(kw);
+    }
+
+    // Ship the last commits while the connections still hold the WAL
+    // (closing the last one checkpoints and deletes it).
+    void shutdown() override { replicator_.reset(); }
+
     ~SqliteDriver() override {
+        replicator_.reset();
         // The statements first: sqlite3_close fails if any are still alive.
         for (auto& table : cache_)
             for (auto& [_, c] : table) sqlite3_finalize(c.stmt);
@@ -332,6 +405,70 @@ private:
 
     std::string           file_;
     int                   busy_timeout_ = 5000;
+    bool                  shared_file_ = false;   // a file every connection sees
+    std::vector<std::string>          replicate_;
+    std::unique_ptr<SqliteReplicator> replicator_;
+    std::once_flag                    replicator_once_;
+    std::string                       replicator_error_;
+
+    size_t inline_base() const { return pool_size() + 1; }   // after the writer's slot
+
+    // Each write in its own savepoint: one that fails (a constraint) is
+    // undone alone, the rest still commit -- what each would have done on
+    // its own. A failure that takes the whole transaction with it (a full
+    // disk) fails every write in the batch.
+    std::string run_batch(size_t w, std::vector<DbPool::Write>& writes) {
+        std::string err;
+        if (!open(w, err)) return err;
+        std::unique_lock<std::mutex> g(gate_m_);
+        gate_cv_.wait(g, [&] { return !gate_held_; });
+        batch_running_ = true;
+        g.unlock();
+        err = commit_batch(w, writes);
+        g.lock();
+        batch_running_ = false;
+        gate_cv_.notify_all();
+        return err;
+    }
+
+    // The replicator's gate (see SqliteReplicator::start): held, no batch
+    // starts; taken once the one running has committed.
+    std::mutex              gate_m_;
+    std::condition_variable gate_cv_;
+    bool                    gate_held_ = false, batch_running_ = false;
+    void gate(bool hold) {
+        std::unique_lock<std::mutex> g(gate_m_);
+        gate_held_ = hold;
+        if (hold) gate_cv_.wait(g, [&] { return !batch_running_; });
+        else      gate_cv_.notify_all();
+    }
+
+    std::string commit_batch(size_t w, std::vector<DbPool::Write>& writes) {
+        if (writes.size() == 1) { writes[0].work(w); return ""; }
+
+        long long n = 0;
+        auto run = [&](const char* sql) { std::string e; return exec(w, sql, {}, n, e); };
+        if (!run("BEGIN IMMEDIATE")) {               // the lock never came: each on its own
+            for (auto& x : writes) x.work(w);
+            return "";
+        }
+        for (auto& x : writes) {
+            run("SAVEPOINT lux_write");
+            if (x.work(w)) { run("RELEASE lux_write"); continue; }
+            if (sqlite3_get_autocommit(conns_[w]))
+                return std::string("sqlite: the batch this write was in was rolled back: ") +
+                       sqlite3_errmsg(conns_[w]);
+            run("ROLLBACK TO lux_write");
+            run("RELEASE lux_write");
+        }
+        if (!run("COMMIT")) {
+            std::string err = std::string("sqlite: commit failed: ") + sqlite3_errmsg(conns_[w]);
+            run("ROLLBACK");
+            return err;
+        }
+        return "";
+    }
+
     std::vector<sqlite3*> conns_;
     struct Col    { std::string name; bool is_bool = false; };
     struct Cached { sqlite3_stmt* stmt; std::vector<Col> meta; int reprepares = -1; };
@@ -347,7 +484,6 @@ private:
     // the pool.
     static constexpr int64_t kInlineBudgetNs = 100'000;
     struct Deadline { int64_t at_ns = 0; };
-    bool                                          inline_ok_ = false;
     std::atomic<size_t>                           next_inline_{0};
     std::vector<Deadline>                         deadline_;   // per inline slot
     std::vector<std::unordered_set<std::string>> slow_;       // per inline slot
@@ -396,7 +532,7 @@ private:
         if (owner != this) {
             owner = this;
             const size_t n = next_inline_.fetch_add(1);
-            slot = n < kInlineSlots ? static_cast<long>(pool_size() + n) : -1;
+            slot = n < kInlineSlots ? static_cast<long>(inline_base() + n) : -1;
         }
         return slot;
     }

@@ -80,7 +80,12 @@ void usage() {
         "  --autotest      walk the endpoints on startup and on every reload\n"
         "  --autotest=all  also include POST/PUT/PATCH/DELETE\n"
         "  --native        compiles to native code (g++) the functions that\n"
-        "                  can be; turns off hot reload, same as --no-watch\n";
+        "                  can be; turns off hot reload, same as --no-watch\n"
+        "\n"
+        "       lux restore <replica> <out.db>\n"
+        "\n"
+        "  Rebuilds a sqlite database from a `replicate` target of its\n"
+        "  sqlite: block (s3://..., sftp://... or a directory)\n";
 }
 
 // Watches the compiled files and recompiles when it detects a change.
@@ -207,6 +212,9 @@ int main(int argc, char** argv) {
     // M_TRIM_THRESHOLD if resident size matters more than those faults.
     mallopt(M_MMAP_THRESHOLD, 1 << 20);
     mallopt(M_TRIM_THRESHOLD, 8 << 20);
+    if (argc >= 2 && std::string(argv[1]) == "restore")
+        return lux_script::restore_main({argv + 2, argv + argc});
+
     std::vector<std::string> args;
     bool check_only = false, watch = true, verbose = false, native = false, json_output = false;
     int  port_override = 0;

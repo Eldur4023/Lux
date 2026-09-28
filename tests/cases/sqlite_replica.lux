@@ -1,0 +1,46 @@
+import sqlite
+
+# The single writer (group commit) and `replicate`: run_sqlite_replica.sh
+# fires concurrent writes, then rebuilds the file from each replica.
+
+app:
+    port 8821
+
+    sqlite:
+        file env("REPL_DB")
+        replicate env("REPL_A")
+        replicate env("REPL_B")
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+get endpoint("/create"):
+    await sqlite.exec("create table if not exists items (id integer primary key autoincrement, n integer unique, body text)")
+    return { "ok": true }
+
+# One write among many in flight: its id is its own, and it can read it back
+# at once (the writer resumes it only after the commit).
+post endpoint("/add/:n", int n):
+    try:
+        await sqlite.exec("insert into items (n, body) values (?, ?)", n, "x")
+    catch e:
+        return { "error": e.message }.status(409)
+    int id = await sqlite.last_id()
+    List<Json> rows = await sqlite.query("select n from items where id = ?", id)
+    if len(rows) == 0:
+        return { "id": id, "seen": false }.status(500)
+    return { "id": id, "n": rows[0]["n"] }.status(201)
+
+# Enough commits to pass the checkpoint threshold (4000 WAL frames), so the
+# WAL is checkpointed and starts over while replicating.
+post endpoint("/bulk/:from/:count", int from, int count):
+    string body = "0123456789abcdef".repeat(250)
+    int i = 0
+    while i < count:
+        await sqlite.exec("insert into items (n, body) values (?, ?)", from + i, body)
+        i = i + 1
+    return { "ok": true }
+
+get endpoint("/stats"):
+    List<Json> rows = await sqlite.query("select count(*) as c, coalesce(sum(n), 0) as s from items")
+    return rows[0]

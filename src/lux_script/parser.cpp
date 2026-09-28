@@ -693,6 +693,7 @@ void Parser::parse_app(Program& out) {
                     if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
                     if (!check(Tok::Ident)) { error_here("expected a key"); advance(); continue; }
 
+                    SourceLoc   mk_loc = peek().loc;
                     std::string mk = advance().text;
                     std::string text; long long number = 0; bool flag = false; int kind = -1;
                     if (!config_value(text, number, flag, kind)) {
@@ -702,9 +703,15 @@ void Parser::parse_app(Program& out) {
                         continue;
                     }
                     // Everything is kept as text: each driver reads its own.
-                    opts[mk] = (kind == 1) ? std::to_string(number)
-                             : (kind == 2) ? (flag ? "true" : "false")
-                                           : text;
+                    std::string value = (kind == 1) ? std::to_string(number)
+                                      : (kind == 2) ? (flag ? "true" : "false")
+                                                    : text;
+                    // `replicate` is the one key that may repeat: one line
+                    // per target, joined with newlines for the driver.
+                    auto prev = opts.find(mk);
+                    if (prev == opts.end())      opts[mk] = std::move(value);
+                    else if (mk == "replicate")  prev->second += "\n" + value;
+                    else diags_.error(mk_loc, "'" + mk + "' is given twice in the " + k + ": block");
                     skip_newlines();
                 }
                 match(Tok::Dedent);

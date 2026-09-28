@@ -751,12 +751,60 @@ production.
 
 | Module | Keys |
 |---|---|
-| `sqlite` | `file` (required), `pool`, `timeout_ms` |
+| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica) |
 | `postgres` | `url`, or else `host` / `port` / `database` (required) / `user` / `password`; `pool` |
 | `mysql` | `host` / `port` / `database` / `user` / `password`; `pool` |
 
 `pool` is the number of connections, between 1 and 64. Defaults to 4. Use `env()` for
 passwords: it is resolved at compile time and does not stay written in the `.lux`.
+
+### SQLite: one writer, and replicas
+
+SQLite lets one connection write at a time. So in Lux every `exec()` outside a transaction
+goes to **one writer connection**, and whatever queued up while it was busy commits together,
+as one transaction (group commit). Each statement keeps its own savepoint: one that fails, a
+unique constraint say, fails alone. Your `await` returns once its batch has **committed**, so
+a query right after it sees the write. `last_id()` is the id of **your** insert, even with
+other requests' inserts in the same batch. Transactions (`begin()`) and statements that cannot
+run inside one (`pragma`, `vacuum`, `attach`) go to the pool as before.
+
+`replicate` copies every commit, within a second, somewhere else. Give it as many times as
+you want:
+
+```lux
+app:
+    sqlite:
+        file "./app.db"
+        replicate "s3://my-bucket/app"
+        replicate "sftp://backup@other-machine/srv/replicas/app"
+        replicate "/mnt/second-disk/app"
+```
+
+| Target | Needs |
+|---|---|
+| `s3://bucket/prefix` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` in the environment. For R2, B2, MinIO and the like, also `AWS_ENDPOINT_URL` |
+| `sftp://user@host[:port]/absolute/path` | Another machine you can `ssh` into with a key (the agent or `~/.ssh/id_*`), already in `~/.ssh/known_hosts`. Files go over SCP |
+| a directory, or `file:///path` | Nothing: another disk, or an NFS mount |
+
+What is shipped is the database's WAL, the pages each commit wrote. Each replica holds a full
+copy (a **generation**), then every commit since, in order. A new generation starts when the
+commits outgrow the copy, and the one before is kept. A crash loses at most the last second.
+A clean stop (Ctrl+C, SIGTERM) ships everything first.
+
+To get the database back, on this machine or any other:
+
+```
+lux restore s3://my-bucket/app ./app.db
+```
+
+It takes the newest generation, replays its commits, and runs SQLite's `integrity_check` on
+the result before writing `./app.db` (it never overwrites an existing file). A commit that
+was only half uploaded when the machine died is recognized and left out.
+
+A replica is a copy to restore from, not a second live database. Nothing else should
+checkpoint the file while Lux replicates it. Lux keeps a read transaction open so that other
+processes' checkpoints cannot get ahead of it; if one still resets the WAL, Lux starts a new
+generation and says so in the log.
 
 ---
 
