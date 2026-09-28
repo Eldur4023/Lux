@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <linux/openat2.h>
 
@@ -551,6 +552,24 @@ void App::run(const std::string& host, uint16_t port) {
     // other pool) for a burst of concurrent slow calls to not queue up
     // behind each other.
     io_blocking_pool().start(num_threads, num_threads * 16);
+
+    // Descriptors: the soft limit up to the hard one (often 1024 of
+    // 524288), as Go does at startup -- at 1024 the server ran out of them
+    // near a thousand connections. The connection cap follows from it
+    // unless it was set.
+    {
+        rlimit rl{};
+        if (::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
+            rl.rlim_cur = rl.rlim_max;
+            ::setrlimit(RLIMIT_NOFILE, &rl);
+            ::getrlimit(RLIMIT_NOFILE, &rl);
+        }
+        if (max_connections_ <= 0) {
+            const rlim_t fds = rl.rlim_cur == RLIM_INFINITY ? rlim_t(1) << 20 : rl.rlim_cur;
+            max_connections_ = static_cast<int>(std::min<rlim_t>(
+                fds > 2048 ? fds - 1024 : fds * 3 / 4, 1 << 30));
+        }
+    }
 
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);

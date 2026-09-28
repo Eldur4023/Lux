@@ -318,8 +318,10 @@ public:
         return *this;
     }
 
-    // Maximum simultaneous open connections (default 10 000).
-    // Excess connections receive 503 immediately.
+    // Maximum simultaneous open connections. Excess connections receive
+    // 503 immediately. Default: what the process's file descriptors allow
+    // (run() raises their soft limit to the hard one), less 1024 kept for
+    // everything else -- database files, uploads, outgoing HTTP.
     App& max_connections(int n) { max_connections_ = n; return *this; }
 
     // Overrides how handle_request() decides "is there a declared route for
@@ -370,7 +372,7 @@ private:
     std::function<void()>                     before_stop_;
     std::function<void(core::EventLoop&)>     on_start_;
 
-    int                                       max_connections_ = 10'000;
+    int                                       max_connections_ = 0;   // 0: from the fd limit
 
 
     // Set to true by prepare() so docs routes are only registered once.
