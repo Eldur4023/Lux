@@ -20,6 +20,9 @@ get endpoint("/query", string q, int n = 5):
 post endpoint("/mp/one", File f, string title):
     return { "title": title, "filename": f.filename }
 
+post endpoint("/mp/sha", File f):
+    return { "sha256": f.sha256() }
+
 # The four scalar types that exist, all as text fields of a form with
 # files.
 post endpoint("/mp/types", File f, string s, int n, bool b):

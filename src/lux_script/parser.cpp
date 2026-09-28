@@ -57,6 +57,19 @@ void Parser::skip_to_eol() {
     while (!check(Tok::Newline) && !check(Tok::Dedent) && !check(Tok::EndOfFile)) advance();
 }
 
+void Parser::method_words_as_names() {
+    for (size_t i = 0; i < toks_.size(); ++i) {
+        switch (toks_[i].kind) {
+            case Tok::KwGet: case Tok::KwPost: case Tok::KwPut:
+            case Tok::KwPatch: case Tok::KwDelete: case Tok::KwOptions: case Tok::KwAny:
+                if (i + 1 >= toks_.size() || toks_[i + 1].kind != Tok::KwEndpoint)
+                    toks_[i].kind = Tok::Ident;
+                break;
+            default: break;
+        }
+    }
+}
+
 void Parser::skip_newlines() {
     while (check(Tok::Newline)) advance();
 }

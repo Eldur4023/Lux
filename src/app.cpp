@@ -463,7 +463,10 @@ Task<void> App::handle_request(Request& req, Response& res) {
 
     // Error handlers run after the full chain, while we still own req/res.
     // Async handlers take precedence over sync handlers for the same code.
-    if (res.status_code() >= 400) {
+    // Not over a body the route returned with its own status: a route that
+    // answers `{"error": "duplicate", ...}.status(409)` has already said what
+    // the client should see (a global handler replaced it with its own).
+    if (res.status_code() >= 400 && !res.route_body()) {
         int code = res.status_code();
 
         // The default body is already written and marked as committed.  An

@@ -190,6 +190,9 @@ check "group with prefix"   GET /api/v1/hello      200 '"v":1'
 check "guard denies"      GET /admin/panel      403
 check "guard allows"      GET '/admin/panel?k=abre' 200 '"panel":true'
 check "404 handler"       GET /tampoco          404 '"path":"/tampoco"'
+check "a route's own 404 body is kept" GET /own_404 404 '"id":7'
+check "a bare status(404) gets the handler" GET /bare_404 404 '"path":"/bare_404"'
+check "method words are names outside a route" GET /method_names 200 '"post":"p","delete":2'
 
 # ── Parameter binding matrix ──────────────────────────────────────────────
 # Origen (path / query / multipart) x type (escalar, File, List<File>) x
@@ -209,6 +212,8 @@ check_mp "multipart: text next to a file" /mp/one 200 '"title":"hello"' \
     -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "title=hello"
 check_mp "multipart: the file arrives too" /mp/one 200 '"filename":"a.txt"' \
     -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "title=hello"
+check_mp "File.sha256() is the upload's hash" /mp/sha 200 "\"sha256\":\"$(sha256sum "$HERE/cases/params.lux" | cut -d' ' -f1)\"" \
+    -F "f=@$HERE/cases/params.lux;filename=a.txt"
 
 check_mp "multipart: string"  /mp/types 200 '"s":"hello"' \
     -F "f=@$HERE/cases/params.lux;filename=a.txt" -F "s=hello" -F "n=7" -F "b=true"
@@ -285,6 +290,22 @@ sig = hmac.new(b'test-jwt-secret-long-enough-for-hmac-signing', (h + '.' + p).en
 print(h + '.' + p + '.' + b(sig))")
 got=$(curl -sS -H "Authorization: Bearer $token" "http://127.0.0.1:$PORT/api/me")
 case "$got" in *'"sub":"u42"'*) ok "a valid jwt" ;; *) fail "a valid jwt" 'sub u42' "$got" ;; esac
+# jwt.sign issues what jwt.valid accepts; jwt.verify checks any token.
+signed=$(curl -sS -X POST "http://127.0.0.1:$PORT/token" | python3 -c "import json,sys; print(json.load(sys.stdin)['token'])")
+got=$(curl -sS -H "Authorization: Bearer $signed" "http://127.0.0.1:$PORT/api/me")
+case "$got" in *'"sub":"u7"'*) ok "jwt.sign issues what jwt.valid accepts" ;; *) fail "jwt.sign issues what jwt.valid accepts" 'sub u7' "$got" ;; esac
+check "jwt.verify: a signed token, with its issuer" GET "/verify?token=$signed" 200 '"valid":true,"sub":"u7","iss":"tests"'
+check "jwt.verify: a tampered one"  GET "/verify?token=${signed%?}x" 200 '"valid":false'
+check "jwt.verify: garbage"         GET "/verify?token=abc" 200 '"valid":false'
+check "an sse guard answers 401 before the stream" GET "/live/feed?token=bad" 401
+code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+       -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: http://t.test" \
+       "http://127.0.0.1:$PORT/live/chat?token=bad")
+[ "$code" = 401 ] && ok "a ws guard answers 401 before the upgrade" || fail "a ws guard answers 401 before the upgrade" 401 "$code"
+code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+       -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: http://t.test" \
+       "http://127.0.0.1:$PORT/live/chat?token=$signed")
+[ "$code" = 101 ] && ok "and upgrades with a good token" || fail "and upgrades with a good token" 101 "$code"
 
 echo "== database =="
 rm -f "$HERE/cases/tests-suite.db"*
@@ -555,6 +576,7 @@ check "and/or give the winning operand"     GET /values 200 '"and":0,"or":5,"nul
 check "a function that awaits, with and without await" GET /awaits 200 '"x":4,"y":6'
 check "a catch whose body awaits"           GET /awaits 200 '"caught":"division by zero"'
 check "a null result is a 204"              GET /nothing 204
+check "await on the skipped side of or"     GET /short_circuit 401
 check "List methods on typed lists"         GET /list_methods 200 '{"had":true,"at":1,"missing":-1,"gone":true,"out":false,"xs":[3,3,7,9],"ys":[3,3,7,9],"words":["c","b","a"],"part":[3,7,9],"tail":[9,1],"both":[3,7,9,9,1],"joined":"c-b-a","first":3,"last":1,"popped":1,"lo":3,"hi":"c","isum":22,"fsum":4.0,"esum":0,"emin":null,"epop":null}'
 check "moves only what is not read again"   GET /moves 200 '{"s":"01234","rows":[{"k":1},{"k":1},{"k":1}],"parts":["ab","ab"],"piece":"ab","b":{"x":1},"a2":{"y":2},"d":{"y":2},"xs":[1,2,3],"pair":[{"k":1},{"k":1}],"caught":"{\"z\":3}","rep":"xyxyxy"}'
 

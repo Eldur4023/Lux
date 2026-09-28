@@ -53,6 +53,9 @@ class Response {
         // Set when any body-writing method is first called.
         // Lets handlers and middlewares check res.is_committed() before writing.
         bool body_committed = false;
+        // The route returned this response itself -- a body with its own
+        // status (`return {...}.status(409)`): `on error` handlers leave it.
+        bool route_body     = false;
     };
     std::shared_ptr<State> state_;
 
@@ -279,6 +282,8 @@ public:
     const std::string&     sendfile_path()  const { return state_->sendfile_path; }
     std::uintmax_t         sendfile_size()  const { return state_->sendfile_size; }
     bool                   is_committed()   const { return state_->body_committed; }
+    bool                   route_body()     const { return state_->route_body; }
+    Response&              mark_route_body()      { state_->route_body = true; return *this; }
     bool                   sse_started()    const { return state_->sse_started; }
     void                   mark_sse_started()    { state_->sse_started = true; }
     bool                   ws_started()     const { return state_->ws_started; }

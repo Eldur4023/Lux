@@ -133,6 +133,8 @@ struct NativeCtx {
 
     // Claims of the Authorization: Bearer JWT, already verified by the driver.
     const Value* jwt_claims = nullptr;
+    // The app's session/jwt configuration (jwt.sign, jwt.verify); set by begin_auth.
+    const struct AuthConfig* auth = nullptr;
     bool         jwt_ok     = false;
 
     // Set by any builtin that writes the response (text, render, redirect...).

@@ -677,6 +677,29 @@ Signature, `exp` and `iss` (if an `issuer` was configured) are checked. **Any `a
 than HS256 is rejected, `none` included**: accepting the algorithm the token itself declares
 is the classic JWT library vulnerability.
 
+Issuing one is `jwt.sign(claims, seconds)`: an HS256 token with the same secret, that
+`jwt.valid` accepts. The lifetime is required, and sets `exp`; the configured `issuer`, if
+any, goes in as `iss`.
+
+```lux
+post endpoint("/login", LoginIn l):
+    # ... check the password ...
+    return { "token": jwt.sign({ "sub": str(id), "name": name }, 86400) }
+```
+
+A token that does not come in the `Authorization` header (a browser cannot set headers on a
+WebSocket, so it sends `?token=`) is checked with `jwt.verify(token)`: the claims, or `null`
+for anything that fails the same checks `jwt.valid` makes.
+
+```lux
+group("/live"):
+    require jwt.verify(query("token", "")) != null else status(401)
+
+    ws endpoint("/chat", string token = "") origins("https://myapp.com"):
+        Json me = jwt.verify(token)
+        ...
+```
+
 RS256 is not there: it would require asymmetric cryptography, and Lux does not link
 OpenSSL.
 
@@ -975,6 +998,10 @@ ws endpoint("/echo") origins("https://myapp.com", "http://localhost:5173"):
 
 `await ws.recv()` returns the message text, or `null` when the connection closes.
 
+A group's `require` runs **before** the handshake: a guard that fails answers its plain
+HTTP status (a `401`, say), and the connection is never upgraded. The same goes for `sse`
+routes and their stream.
+
 **`origins(...)` is required**, and leaving it out is a compile error. Browsers do not apply
 the same-origin policy to the WebSocket handshake: without an allowlist, any site can open
 the connection from your user's browser and inherit their cookies. An origin outside the list
@@ -1100,8 +1127,9 @@ mount (§3) for the URL to actually resolve — `save("./public/uploads")` above
 `static "/static" -> "./public"` mount §3 shows, so `/static/uploads/<name>` is that same file.
 Saving into a directory no mount covers gives back a URL that 404s.
 
-A `File` has `name`, `filename`, `content_type` and `size`, plus the method
-`save(directory)`, which returns the name it was saved under.
+A `File` has `name`, `filename`, `content_type` and `size`, plus the methods
+`save(directory)`, which returns the name it was saved under, and `sha256()`, the hex
+SHA-256 of its content: a content-addressed name or a duplicate check without saving it first.
 
 `save()` keeps only the file component of the name: a `filename` with `..` or an absolute one
 cannot escape the target directory.
@@ -1137,6 +1165,11 @@ handler has already written the response, and replacing it would be a response f
 is, middleware, which Lux delegates to the proxy on purpose.
 
 The status code is preserved. If the handler writes nothing, the default body is kept.
+
+A handler covers the errors Lux produces (a route that does not exist, a body that fails
+validation, a crash) and a bare `status(...)`, such as `require ... else status(403)`. It does
+**not** replace a body the route returned with its own status: a route answering
+`{"error": "duplicate", "post_id": 7}.status(409)` has already said what the client should see.
 
 ---
 
@@ -1401,7 +1434,7 @@ string role = age >= 18 ? "adult" : "minor"
 |---|---|---|
 | `request` | `path` `method` `ip` `body` | Any handler |
 | `session` | any field, `clear()` | Any handler |
-| `jwt` | `valid` `claims` | Any handler |
+| `jwt` | `valid` `claims` `sign(claims, seconds)` `verify(token)` | Any handler |
 | `state` | `incr` `decr` `get` `set` `remove` | Any handler |
 | `log` | `info` `warn` `error` | Everywhere |
 | `sse` | `send` `ping` `open` | `sse` routes |

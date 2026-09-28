@@ -35,3 +35,24 @@ post endpoint("/login", string user, string role):
 post endpoint("/logout"):
     session.clear()
     return { "ok": true }
+
+post endpoint("/token"):
+    return { "token": jwt.sign({ "sub": "u7" }, 600) }
+
+get endpoint("/verify", string token = ""):
+    Json c = jwt.verify(token)
+    if c == null:
+        return { "valid": false }
+    return { "valid": true, "sub": c["sub"], "iss": c["iss"] }
+
+# A stream's guard answers before the stream opens: a 401, not a socket or
+# an event stream that closes at once.
+group("/live"):
+    require jwt.verify(query("token", "")) != null else status(401)
+
+    sse endpoint("/feed", string token = ""):
+        sse.send("hi")
+
+    ws endpoint("/chat", string token = "") origins("http://t.test"):
+        ws.send("hi")
+        ws.close()

@@ -3,6 +3,8 @@
 #include <lux_script/natives.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
+#include <lux_script/auth.hpp>
+#include <ctime>
 #include <lux_script/vm.hpp>
 
 #include <lux/request.hpp>
@@ -332,6 +334,42 @@ Value fn_jwt_claims(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return *ctx.jwt_claims;
 }
 
+// jwt.sign(claims, seconds): the HS256 token jwt.valid accepts, signed with
+// the app's jwt secret, expiring `seconds` from now (and carrying the
+// configured issuer). The lifetime is required: a token that never expires
+// should not be what you get by forgetting an argument.
+Value fn_jwt_sign(NativeCtx& ctx, std::vector<Value>& a, std::string& error) {
+    if (!ctx.auth || ctx.auth->jwt_secret.empty()) {
+        error = "jwt.sign() needs a jwt: block with a secret in app:";
+        return Value::null();
+    }
+    if (!a[0].is_dict()) { error = "jwt.sign() expects the claims as a Dict"; return Value::null(); }
+    if (!a[1].is_int() || a[1].as_int() <= 0) {
+        error = "jwt.sign() expects the lifetime in seconds, a positive int";
+        return Value::null();
+    }
+    Value claims = a[0];
+    claims.as_dict()["exp"] = Value::integer(static_cast<long long>(std::time(nullptr)) + a[1].as_int());
+    if (!ctx.auth->jwt_issuer.empty()) claims.as_dict()["iss"] = Value::str(ctx.auth->jwt_issuer);
+    const std::string input = crypto::base64url_encode(R"({"alg":"HS256","typ":"JWT"})") + "." +
+                              crypto::base64url_encode(claims.to_json_text());
+    return Value::str(input + "." + crypto::base64url_encode(crypto::hmac_sha256(ctx.auth->jwt_secret, input)));
+}
+
+// jwt.verify(token): the claims of a token that did not come in the
+// Authorization header -- a WebSocket's ?token=, a link -- or null. The same
+// checks as jwt.valid: HS256 only, signature, exp, issuer.
+Value fn_jwt_verify(NativeCtx& ctx, std::vector<Value>& a, std::string& error) {
+    if (!ctx.auth || ctx.auth->jwt_secret.empty()) {
+        error = "jwt.verify() needs a jwt: block with a secret in app:";
+        return Value::null();
+    }
+    if (!a[0].is_str()) return Value::null();
+    Value claims;
+    if (!verify_jwt(a[0].as_str(), ctx.auth->jwt_secret, ctx.auth->jwt_issuer, claims)) return Value::null();
+    return claims;
+}
+
 // ─── state.* ─────────────────────────────────────────────────────────────────
 
 Value fn_state_incr(NativeCtx&, std::vector<Value>& args, std::string& error) {
@@ -444,7 +482,7 @@ Value fn_req_body(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.body);
 }
 
-const std::array<NativeDef, 51> kNatives = {{
+const std::array<NativeDef, 53> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -477,6 +515,8 @@ const std::array<NativeDef, 51> kNatives = {{
     {"__session_clear", 0, 0,  fn_session_clear},
     {"__jwt_valid",     0, 0,  fn_jwt_valid},
     {"__jwt_claims",    0, 0,  fn_jwt_claims},
+    {"__jwt_sign",      2, 2,  fn_jwt_sign},
+    {"__jwt_verify",    1, 1,  fn_jwt_verify},
     {"__error_code",    0, 0,  fn_error_code},
     {"__error_message",  0, 0, fn_error_message},
     {"__error_messages", 0, 0, fn_error_messages},
@@ -701,7 +741,9 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             error = "status() expects an integer status code";
             return Value::null();
         }
-        ctx.res.status(static_cast<int>(args[0].as_int()));
+        // A value with its own status: the route wrote this answer, and an
+        // `on error` handler must not replace it (a bare status() it may).
+        ctx.res.status(static_cast<int>(args[0].as_int())).mark_route_body();
         return recv;
     }
     if (name == "header") {
@@ -1117,6 +1159,20 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
     if (recv.is_dict()) {
         auto& d = recv.as_dict();
 
+        // An uploaded File's SHA-256 (hex): content-addressed names and
+        // duplicate checks without saving it and reading it back first.
+        if (name == "sha256") {
+            auto idx = d.find("__idx");
+            if (idx == d.end() || !ctx.parts) {
+                error = "sha256() only exists on an uploaded File";
+                return Value::null();
+            }
+            if (!want(args.size(), 0, 0, name, error)) return Value::null();
+            const size_t i = static_cast<size_t>(idx->second.as_int());
+            if (i >= ctx.parts->size()) { error = "the uploaded file is no longer available"; return Value::null(); }
+            return Value::str(crypto::hex_encode(crypto::sha256((*ctx.parts)[i].body)));
+        }
+
         if (name == "save") {
             auto idx = d.find("__idx");
             if (idx == d.end() || !ctx.parts) {
@@ -1303,6 +1359,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
     });
     static const std::vector<BuiltinMethod> kDict = with_own({
         {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
+        {"sha256", 0, 0, "string"},
         {"values", 0, 0, "List"}, {"get", 1, 2, "Json"}, {"remove", 1, 1, "bool"},
         {"merge", 1, 1, nullptr}, {"items", 0, 0, "List"},
     });
@@ -1320,7 +1377,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 31> kMembers = {{
+const std::array<MemberMap, 33> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -1331,6 +1388,8 @@ const std::array<MemberMap, 31> kMembers = {{
     {"session", "clear",  "__session_clear"},
     {"jwt",     "valid",  "__jwt_valid"},
     {"jwt",     "claims", "__jwt_claims"},
+    {"jwt",     "sign",   "__jwt_sign"},
+    {"jwt",     "verify", "__jwt_verify"},
     {"error",   "code",    "__error_code"},
     {"error",   "message",  "__error_message"},
     {"error",   "messages", "__error_messages"},

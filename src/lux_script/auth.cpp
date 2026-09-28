@@ -133,6 +133,7 @@ void begin_auth(const AuthConfig& cfg, lux::Request& req,
         }
     }
     ctx.jwt_claims = &claims;
+    ctx.auth       = &cfg;
 }
 
 void end_auth(const AuthConfig& cfg, const SessionState& session,

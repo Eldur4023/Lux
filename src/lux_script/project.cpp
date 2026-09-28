@@ -1752,6 +1752,51 @@ void build_error_handlers(Module& mod, const FunctionSigs& fns,
     }
 }
 
+// A ws or sse route answers its client -- the 101, or the stream's headers --
+// before its body runs, so a group guard compiled into that body could only
+// fail too late: a bad token got a socket that closed at once, never the
+// guard's 401. The guards alone, compiled as a plain route with an empty body,
+// run first against the ordinary request (guards_pass); the stream opens only
+// if none of them answered. They stay in the body too, where they now pass.
+bool compile_guards(const RouteDecl& r, Emitter& emitter, std::shared_ptr<Chunk>& out) {
+    if (r.guards.empty()) return true;
+    RouteDecl g;
+    g.method      = "GET";
+    g.pattern     = r.pattern;
+    // Without defaults (not copyable, and not needed: the arguments the
+    // guards see are already bound, defaults applied).
+    for (const auto& p : r.params) g.params.push_back(Param{p.type, p.name, nullptr, p.loc});
+    g.guards      = r.guards;
+    g.loc         = r.loc;
+    g.pattern_loc = r.pattern_loc;
+    out = std::make_shared<Chunk>();
+    return emitter.emit_route(g, *out);
+}
+
+lux::Task<bool> guards_pass(const Chunk* guards, const std::vector<Value>& args,
+                            const AuthConfig& auth, const FunctionTable* fn_table,
+                            const NativeDispatch& native_table, const std::vector<Template>* tpl_table,
+                            const std::string& where, lux::Request& req, lux::Response& res) {
+    if (!guards) co_return true;
+    NativeCtx ctx{req, res};
+    ctx.templates = tpl_table;
+    ctx.functions = fn_table;
+    SessionState session;
+    Value        claims = Value::dict();
+    begin_auth(auth, req, session, claims, ctx);
+    VM         vm;
+    VM::Result result = vm.start(*guards, args, ctx, fn_table, &native_table);
+    if (!co_await drive_vm(vm, result, req, ctx)) co_return false;
+    if (result.status == VM::Status::Error) {
+        lux::log().error(error_at(result, where) + ": " + result.error);
+        Value::Dict d;
+        d["error"] = Value::str("Internal Server Error");
+        responder(res, 500, Value::dict(std::move(d)));
+        co_return false;
+    }
+    co_return !ctx.response_written;
+}
+
 void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth,
                   const FunctionSigs& fns, const ClassSigs& sigs,
                   const EnumSigs& enums, DiagnosticBag& diags) {
@@ -1800,6 +1845,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             auto    ws_chunk = std::make_shared<Chunk>();
             Emitter ws_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
             if (!ws_emitter.emit_route(r, *ws_chunk)) continue;
+            std::shared_ptr<Chunk> ws_guards;
+            if (!compile_guards(r, ws_emitter, ws_guards)) continue;
 
             ++mod.vm_routes;
             std::string ws_where = "WS " + r.pattern;
@@ -1843,11 +1890,13 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
                 // checks to preserve the old order would need
                 // make_ws_handler's origin logic duplicated or factored out
                 // on its own -- not worth it for a difference this small.
-                [ws_chunk, ws_binds, ws_where, auth, fn_table, native_table, tpl_table,
+                [ws_chunk, ws_guards, ws_binds, ws_where, auth, fn_table, native_table, tpl_table,
                  opts](lux::Request& req, lux::Response& res) -> lux::Task<void> {
                     NativeCtx           pre_ctx{req, res};
                     std::vector<Value>  args;
                     if (!prepare_args(ws_binds, fn_table, req, res, pre_ctx, args)) co_return;
+                    if (!co_await guards_pass(ws_guards.get(), args, auth, fn_table, native_table,
+                                              tpl_table, ws_where, req, res)) co_return;
 
                     co_await lux::App::make_ws_handler(
                         [ws_chunk, ws_where, auth, fn_table, native_table, tpl_table,
@@ -1904,12 +1953,14 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
             auto    sse_chunk = std::make_shared<Chunk>();
             Emitter sse_emitter(diags, &fns, &sigs, &mod.program.imports, &pctx);
             if (!sse_emitter.emit_route(r, *sse_chunk)) continue;
+            std::shared_ptr<Chunk> sse_guards;
+            if (!compile_guards(r, sse_emitter, sse_guards)) continue;
 
             ++mod.vm_routes;
             std::string sse_where = "SSE " + r.pattern;
             mod.route_report.push_back({r.method, r.pattern, "sse"});
             mod.router.add_internal("GET", r.pattern,
-                [sse_chunk, sse_binds, sse_where, auth, fn_table, native_table, tpl_table](lux::Request& req,
+                [sse_chunk, sse_guards, sse_binds, sse_where, auth, fn_table, native_table, tpl_table](lux::Request& req,
                                                         lux::Response& res)
                     -> lux::Task<void> {
                     NativeCtx    ctx{req, res};
@@ -1921,6 +1972,8 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
                     std::vector<Value> args;
                     if (!prepare_args(sse_binds, fn_table, req, res, ctx, args)) co_return;
+                    if (!co_await guards_pass(sse_guards.get(), args, auth, fn_table, native_table,
+                                              tpl_table, sse_where, req, res)) co_return;
 
                     // make_sse already writes the stream headers, so the
                     // response counts as sent from this point on.

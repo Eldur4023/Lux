@@ -131,3 +131,11 @@ get endpoint("/list_methods"):
     Json lo = xs.min()
     Json hi = words.max()
     return { "had": had, "at": at, "missing": missing, "gone": gone, "out": out, "xs": xs, "ys": ys, "words": words, "part": part, "tail": tail, "both": both, "joined": words.join("-"), "first": first, "last": last, "popped": popped, "lo": lo, "hi": hi, "isum": xs.sum(), "fsum": fs.sum(), "esum": nofs.sum(), "emin": nofs.min(), "epop": nofs.pop() }
+
+# `a or await f(...)`: the await must not run when `a` already decided it
+# (under --native it did: rows[0] of an empty list, a 500 for a 401).
+get endpoint("/short_circuit"):
+    List<Json> rows = []
+    if len(rows) == 0 or not await hash.verify("pw", rows[0]["h"]):
+        return status(401)
+    return { "ok": true }

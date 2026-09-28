@@ -905,6 +905,15 @@ private:
 
             case IrExprKind::Binary: {
                 if (!e.lhs || !e.rhs) return std::nullopt;
+                // An `await` in the operand that may be skipped (`a or await
+                // f(a[0])`) stays on bytecode. GCC 13.3 does not keep a
+                // co_await operand that builds temporaries inside && / ||
+                // short-circuited: it ran rows[0] with rows empty and the
+                // route answered 500 where bytecode answers 401 (the same
+                // shape in a standalone coroutine is an ICE).
+                // ponytail: the route falls back whole; lower `a or await b`
+                // to `if` statements if such routes need to be native.
+                if ((e.text == "and" || e.text == "or") && contiene_await(*e.rhs)) return std::nullopt;
 
                 // Fase 5.7: `x == null`/`x != null`. Solo tiene sentido
                 // contra un valor dinamico (Json, o un campo `?` de clase
@@ -961,6 +970,9 @@ private:
                 // regla que truthy() del VM para cada tipo.
                 if (!e.object || !tipo_provable(*e.object)) return std::nullopt;
                 if (!e.lhs || !e.rhs) return std::nullopt;
+                // Only one branch runs: an await in either one is the same
+                // short-circuit problem as `a or await b` (see Binary).
+                if (contiene_await(*e.lhs) || contiene_await(*e.rhs)) return std::nullopt;
                 auto ts = tipo_provable(*e.lhs);
                 auto tn = tipo_provable(*e.rhs);
                 if (ts && tn && *ts == *tn) return ts;
@@ -2923,7 +2935,7 @@ public:
         // DictLit/ListLit mas grande.
         if (e.kind == IrExprKind::Call && e.call_shape == IrCallShape::BuiltinMethodCall &&
             e.call_name == "status")
-            return "(res.status(" + expr(*e.args[0].value) + "), " + valor_json(*e.object) + ")";
+            return "(res.status(" + expr(*e.args[0].value) + ").mark_route_body(), " + valor_json(*e.object) + ")";
         if (e.kind == IrExprKind::StringLit) return "lux_k<" + literal_string(e.text) + ">()";
         auto t = comprobador_.tipo_provable(e);
         // Json (Fase 5.5), o un List<Json>/Dict<string,Json> (mismo

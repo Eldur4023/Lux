@@ -13,7 +13,7 @@ namespace lux_script {
 class Parser {
 public:
     Parser(std::vector<Token> tokens, DiagnosticBag& diags)
-        : toks_(std::move(tokens)), diags_(diags) {}
+        : toks_(std::move(tokens)), diags_(diags) { method_words_as_names(); }
 
     // Parses into `out`.  Several calls with different files accumulate onto
     // the same Program: that is what allows splitting the app across .lux files.
@@ -25,6 +25,10 @@ public:
     ExprPtr parse_single_expression();
 
 private:
+    // get/post/put/patch/delete/options/any are a route's method only right
+    // before `endpoint`; anywhere else they are ordinary names (`string post`).
+    void method_words_as_names();
+
     std::vector<Token> toks_;
     DiagnosticBag&     diags_;
     size_t             i_ = 0;

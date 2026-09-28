@@ -419,6 +419,14 @@ add_test(NAME regression
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(regression PROPERTIES TIMEOUT 300)
+# The same suite with every server under --native: the two backends must
+# answer alike, and a bug only native code has (an await on the skipped side
+# of `or`) went unseen while only bytecode ran here.
+add_test(NAME regression_native
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(regression_native PROPERTIES TIMEOUT 600
+                     ENVIRONMENT "LUX_TEST_FLAGS=--native;LUX_TEST_PORT=9790")
 
 # The mysql module needs a server, so its suite skips itself —code 77— when
 # there is none, instead of turning a machine where it does not apply red.
