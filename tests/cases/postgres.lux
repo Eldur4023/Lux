@@ -80,8 +80,16 @@ post endpoint("/add_id/:name", string name):
     List<Json> rows = await postgres.query("insert into articles (title, author) values (?, ?) returning id", name, "test")
     return rows[0].status(201)
 
-# last_id() does not exist in postgres: the driver says so instead of making something up.
+# last_id(): the insert returns its id (RETURNING, appended by the driver) --
+# the same id a select finds; an insert with nothing inserted has none.
 post endpoint("/last_id"):
+    await postgres.exec("insert into articles (title, author) values (?, ?);", "lastid", "test")
+    int id = await postgres.last_id()
+    List<Json> rows = await postgres.query("select max(id) as m from articles where title = ?", "lastid")
+    return { "same": id == rows[0]["m"] }
+
+post endpoint("/last_id/none"):
+    await postgres.exec("insert into special (kind) values (?)", "x")
     return { "r": await postgres.last_id() }
 
 post endpoint("/delete_row/:id", int id):

@@ -271,14 +271,45 @@ public:
         return true;
     }
 
+    // last_id() with no extra round trip: an INSERT runs with `RETURNING`
+    // its table's id column appended, and the id comes back with the insert
+    // itself (the column is looked up once per statement and connection).
+    // An INSERT that already says RETURNING gives the first column of its
+    // last row. Nothing inserted (ON CONFLICT DO NOTHING), or no single
+    // serial/identity column: last_id() says so rather than guess.
     bool exec(size_t worker, const std::string& sql, const std::vector<Value>& args,
               long long& affected, std::string& error) override {
-        PGresult* res = run(worker, sql, args, error);
+        Conn& k = conns_[worker];
+        k.has_last_id = false;
+        const bool insert = starts_with_word(sql, "insert");
+        PGresult* res = run(worker, sql, args, error, insert);
         if (!res) return false;
         const char* n = PQcmdTuples(res);
         affected = (n && *n) ? std::strtoll(n, nullptr, 10) : 0;
+        const int rows = PQntuples(res);
+        if (insert && rows > 0 && PQnfields(res) > 0 && !PQgetisnull(res, rows - 1, 0)) {
+            char* end = nullptr;
+            const char* v = PQgetvalue(res, rows - 1, 0);
+            const long long id = std::strtoll(v, &end, 10);
+            if (end != v && *end == '\0') { k.last_id = id; k.has_last_id = true; }
+        }
         PQclear(res);
         return true;
+    }
+
+    // Read once: await_db() takes it right after the exec, on the same
+    // connection. A later last_id() that reaches the pool can land on any
+    // connection, whose id would be someone else's.
+    bool last_insert_id(size_t worker, long long& id, std::string& error) override {
+        if (worker < conns_.size() && conns_[worker].has_last_id) {
+            id = conns_[worker].last_id;
+            conns_[worker].has_last_id = false;
+            return true;
+        }
+        error = "postgres: last_id(): the last exec() inserted no row with an id "
+                "(a table needs one serial or identity column; or use "
+                "'insert ... returning id' with query())";
+        return false;
     }
 
     bool in_transaction(size_t worker) const override {
@@ -299,6 +330,11 @@ private:
         PGconn*                                      db = nullptr;
         std::unordered_map<std::string, std::string> stmts;
         unsigned                                     next_id = 0;
+        // An INSERT's SQL -> the same with `RETURNING <its id column>`
+        // ("" when the table has no single serial/identity column).
+        std::unordered_map<std::string, std::string> returning;
+        long long                                    last_id = 0;
+        bool                                         has_last_id = false;
     };
     static constexpr size_t kMaxCachedStatements = 128;
 
@@ -311,6 +347,79 @@ private:
         if (k.db) PQfinish(k.db);
         k.db = nullptr;
         k.stmts.clear();   // prepared statements die with their connection
+        k.returning.clear();
+    }
+
+    static bool starts_with_word(const std::string& sql, const char* word) {
+        size_t i = 0;
+        while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) ++i;
+        const size_t n = std::strlen(word);
+        if (sql.size() - i < n) return false;
+        for (size_t j = 0; j < n; ++j)
+            if (std::tolower(static_cast<unsigned char>(sql[i + j])) != word[j]) return false;
+        return i + n == sql.size() || !std::isalnum(static_cast<unsigned char>(sql[i + n]));
+    }
+
+    // `sql` (an INSERT, placeholders translated) with its table's id column
+    // returned; `sql` itself when it already returns something, when its
+    // end or table is not plain to read, or when the table has no single
+    // serial/identity column.
+    const std::string& with_returning(size_t worker, const std::string& sql) {
+        Conn& k = conns_[worker];
+        if (auto it = k.returning.find(sql); it != k.returning.end())
+            return it->second.empty() ? sql : it->second;
+
+        std::string lower(sql);
+        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        // A comment could swallow what is appended; RETURNING is the user's.
+        if (lower.find("returning") != std::string::npos || lower.find("--") != std::string::npos ||
+            lower.find("/*") != std::string::npos)
+            return remember(k, sql, "");
+
+        // insert into <table>: bare, schema-qualified, or "quoted".
+        size_t i = lower.find("into");
+        if (i == std::string::npos) return remember(k, sql, "");
+        i += 4;
+        while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) ++i;
+        size_t j = i;
+        while (j < sql.size() && (std::isalnum(static_cast<unsigned char>(sql[j])) ||
+                                  sql[j] == '_' || sql[j] == '.' || sql[j] == '"'))
+            ++j;
+        const std::string table = sql.substr(i, j - i);
+
+        // Never an error, so it cannot abort a transaction it runs inside:
+        // to_regclass() is NULL for a table that is not there.
+        const char* lookup =
+            "select quote_ident(a.attname) from pg_attribute a "
+            "left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum "
+            "where a.attrelid = to_regclass($1) and a.attnum > 0 and not a.attisdropped "
+            "and (a.attidentity <> '' or pg_get_expr(d.adbin, d.adrelid) like 'nextval(%')";
+        const char* param = table.c_str();
+        PGresult* r = PQexecParams(k.db, lookup, 1, nullptr, &param, nullptr, nullptr, 0);
+        if (!r || PQresultStatus(r) != PGRES_TUPLES_OK) {   // not cached: try again next time
+            if (r) PQclear(r);
+            return sql;
+        }
+        std::string out;
+        if (PQntuples(r) == 1) {
+            size_t end = sql.size();
+            while (end > 0 && (std::isspace(static_cast<unsigned char>(sql[end - 1])) || sql[end - 1] == ';')) --end;
+            out = sql.substr(0, end) + " RETURNING " + PQgetvalue(r, 0, 0);
+        }
+        PQclear(r);
+        return remember(k, sql, std::move(out));
+    }
+
+    // Past the cap (SQL built by hand), each such INSERT looks its table up
+    // again: a round trip more, never a wrong id.
+    static const std::string& remember(Conn& k, const std::string& sql, std::string out) {
+        if (k.returning.size() >= kMaxCachedStatements) {
+            thread_local std::string last;
+            last = out.empty() ? sql : std::move(out);
+            return last;
+        }
+        const std::string& cached = k.returning.emplace(sql, std::move(out)).first->second;
+        return cached.empty() ? sql : cached;
     }
 
     // Named statement for `sql` on this connection, preparing it on first
@@ -352,11 +461,12 @@ private:
     // makes SQL injection impossible from Lux Script.  They are sent as text
     // and the server converts them to the column type.
     PGresult* run(size_t worker, const std::string& sql, const std::vector<Value>& args,
-                  std::string& error) {
+                  std::string& error, bool insert = false) {
         PGconn* c = conns_[worker].db;
 
         std::string sql_pg;
         if (!traducir_marcadores(sql, args.size(), sql_pg, error)) return nullptr;
+        if (insert) sql_pg = with_returning(worker, sql_pg);
 
         std::vector<std::string> store;
         std::vector<const char*> ptrs;

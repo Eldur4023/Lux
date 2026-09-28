@@ -93,8 +93,9 @@ echo "== writing =="
 check "insert and affected rows" POST /add/probing  201 '"rows":1'
 check "returning id"             POST /add_id/other   201 '"id"'
 check "delete"                   POST /delete_row/99999    200 '"rows":0'
-# postgres has no reliable last_id: the driver says so instead of making one up.
-check "last_id says it is unavailable" POST /last_id 500 'is not available'
+check "last_id is the inserted row's id" POST /last_id 200 '"same":true'
+# A table with no serial/identity column: the driver says so instead of making one up.
+check "last_id with no id column says so" POST /last_id/none 500 'inserted no row with an id'
 
 echo "== transactions =="
 check "commit"               POST /transfer       200 '"ok":true'
