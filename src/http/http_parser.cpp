@@ -27,6 +27,8 @@ struct HttpParser::ParseContext {
     // well-formed request that is simply too big, not a malformed one.
     bool body_too_large = false;
 
+    bool in_message = false;   // see HttpParser::in_message()
+
     // Back-pointer to the owning parser's callbacks (stable address)
     OnComplete*        on_complete         = nullptr;
     OnHeadersComplete* on_headers_complete = nullptr;
@@ -36,6 +38,11 @@ struct HttpParser::ParseContext {
 
 static HttpParser::ParseContext* ctx(llhttp_t* p) {
     return static_cast<HttpParser::ParseContext*>(p->data);
+}
+
+static int cb_on_message_begin(llhttp_t* p) {
+    ctx(p)->in_message = true;
+    return HPE_OK;
 }
 
 static int cb_on_url(llhttp_t* p, const char* at, size_t len) {
@@ -139,6 +146,7 @@ static int cb_on_body(llhttp_t* p, const char* at, size_t len) {
 
 static int cb_on_message_complete(llhttp_t* p) {
     auto* c = ctx(p);
+    c->in_message = false;
 
     // Split path from query string
     auto q = c->current.path.find('?');
@@ -192,6 +200,7 @@ HttpParser::HttpParser(OnComplete on_complete, OnHeadersComplete on_headers_comp
     ctx_->on_headers_complete = &on_headers_complete_;
 
     llhttp_settings_init(settings_.get());
+    settings_->on_message_begin    = cb_on_message_begin;
     settings_->on_url              = cb_on_url;
     settings_->on_header_field     = cb_on_header_field;
     settings_->on_header_value     = cb_on_header_value;
@@ -204,6 +213,8 @@ HttpParser::HttpParser(OnComplete on_complete, OnHeadersComplete on_headers_comp
 }
 
 HttpParser::~HttpParser() = default;
+
+bool HttpParser::in_message() const { return ctx_->in_message; }
 
 bool HttpParser::feed(const char* data, size_t len) {
     if (ctx_->error) return false;

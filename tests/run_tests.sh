@@ -359,6 +359,27 @@ check "state set/get/incr/decr/remove" GET /state/plain 200 '"k":{"x":1},"n":-2,
 check "net.ip_in v4/v6/lists"    GET /net/basic 200 '"in":true,"out":false,"list":true,"v6net":true,"v4_in_v6":false,"bad":false'
 check "net.is_private"           GET /net/basic 200 '"priv":true,"meta":true,"pub":false,"ula":true'
 check "net.ip_version"           GET /net/basic 200 '"v4":4,"v6":6,"none":null'
+# Keep-alive: a connection idle past the header timeout (5s) is still open
+# -- it used to get a 408 then, taken by the client's next request as its
+# answer -- while a request begun and left unfinished still gets the 408.
+timeouts=$(python3 -c "
+import socket, sys, threading, time
+port = int(sys.argv[1]); out = {}
+def idle():
+    s = socket.create_connection(('127.0.0.1', port)); s.settimeout(10)
+    s.sendall(b'GET /net/basic HTTP/1.1\\r\\nHost: t\\r\\n\\r\\n'); s.recv(65536)
+    time.sleep(6)
+    s.sendall(b'GET /net/basic HTTP/1.1\\r\\nHost: t\\r\\n\\r\\n')
+    out['idle'] = s.recv(65536)[:12]
+def partial():
+    s = socket.create_connection(('127.0.0.1', port)); s.settimeout(10)
+    s.sendall(b'GET /net/basic HTTP/1.1\\r\\nHo')
+    out['partial'] = s.recv(65536)[:12]
+ts = [threading.Thread(target=f) for f in (idle, partial)]
+[t.start() for t in ts]; [t.join() for t in ts]
+print(out.get('idle'), out.get('partial'))" "$PORT" 2>&1 | tail -1)
+if [ "$timeouts" = "b'HTTP/1.1 200' b'HTTP/1.1 408'" ]; then ok "keep-alive idle past 5s stays open; a partial request gets 408"
+else fail "keep-alive idle past 5s stays open; a partial request gets 408" "b'HTTP/1.1 200' b'HTTP/1.1 408'" "$timeouts"; fi
 check "zip.create writes the archive" GET /zip/create 200 '"n":2'
 zip_path=$(curl -sS "http://127.0.0.1:$PORT/zip/create" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
 zip_check=$(python3 -c "

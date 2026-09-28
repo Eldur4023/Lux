@@ -74,6 +74,10 @@ public:
     // Resume after a pause.  Safe to call when not paused.
     void resume();
 
+    // True from a request's first byte until it completes: a connection
+    // with part of a request in hand is not idle.
+    bool in_message() const;
+
 private:
     OnComplete                       on_complete_;
     OnHeadersComplete                on_headers_complete_;

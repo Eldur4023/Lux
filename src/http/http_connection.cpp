@@ -40,8 +40,12 @@ HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
 {}
 
 void HttpConnection::start() {
-    // Arm the header timeout — Slowloris defence.
-    set_deadline(kHeaderTimeoutMs, kHeaderTimeoutMsg);
+    set_deadline(kIdleTimeoutMs, kIdleMsg);
+}
+
+void HttpConnection::arm_between_requests() {
+    if (parser_.in_message()) set_deadline(kHeaderTimeoutMs, kHeaderTimeoutMsg);
+    else                      set_deadline(kIdleTimeoutMs, kIdleMsg);
 }
 
 // Fired by the parser (cb_on_headers_complete, via the OnHeadersComplete
@@ -58,11 +62,16 @@ void HttpConnection::on_headers_complete() {
 void HttpConnection::set_deadline(int ms, const char* msg) {
     deadline_     = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     deadline_msg_ = msg;
-    if (timer_ < 0) schedule_deadline(std::min(ms, kHeaderTimeoutMs));
+    if (timer_ >= 0 && deadline_ < timer_at_) {   // earlier than the timer: rare, see the .hpp
+        loop_.cancel_timer(timer_);
+        timer_ = -1;
+    }
+    if (timer_ < 0) schedule_deadline(ms);
 }
 
 void HttpConnection::schedule_deadline(int ms) {
     std::weak_ptr<HttpConnection> weak = shared_from_this();
+    timer_at_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
     timer_ = loop_.schedule_timer(ms, [weak]() {
         if (auto self = weak.lock()) self->on_deadline();
     });
@@ -74,10 +83,10 @@ void HttpConnection::on_deadline() {
     const auto left = deadline_ - std::chrono::steady_clock::now();
     if (left > std::chrono::steady_clock::duration::zero()) {
         const auto ms = std::chrono::ceil<std::chrono::milliseconds>(left).count();
-        schedule_deadline(static_cast<int>(std::min<long long>(ms, kHeaderTimeoutMs)));
+        schedule_deadline(static_cast<int>(ms));
         return;
     }
-    send_error(408, deadline_msg_);
+    if (deadline_msg_ != kIdleMsg) send_error(408, deadline_msg_);
     close();
 }
 
@@ -173,6 +182,9 @@ void HttpConnection::do_read() {
         }
 
         if (!feed_parser(buf, static_cast<size_t>(n))) return;
+        // A request begun but not finished: from idle to the header timeout.
+        if (deadline_msg_ == kIdleMsg && parser_.in_message())
+            set_deadline(kHeaderTimeoutMs, kHeaderTimeoutMsg);
 
         // The handler was synchronous and already replied inside feed(): now
         // that the pause is in place, the cycle can really be closed.
@@ -768,10 +780,10 @@ void HttpConnection::finish_cycle() {
         if (in_flight_) return;
     }
 
-    // Re-arm the header timeout for the next pipelined/keep-alive request.
-    // Without this, a client that sends headers slowly on the second request
-    // (Slowloris) would go unchecked — the 5s timer only ran for the first one.
-    set_deadline(kHeaderTimeoutMs, kHeaderTimeoutMsg);
+    // Re-arm for the next keep-alive request: idle, or the header timeout
+    // when part of it is already here. Without this, a client that sends
+    // headers slowly on the second request (Slowloris) would go unchecked.
+    arm_between_requests();
 
     // Ready for the next request
     arm(EPOLLIN);

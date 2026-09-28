@@ -77,9 +77,15 @@ private:
     bool cycle_pending_ = false;
 
     // ── Timeouts ──────────────────────────────────────────────────────────────
-    // kHeaderTimeoutMs: armed at construction (and again after each response,
-    //   for the next keep-alive/pipelined request); fires 408 if complete
-    //   headers are not received within this window (Slowloris defence).
+    // kIdleTimeoutMs: a connection with no request in progress (just
+    //   accepted, or kept alive after a response) is closed after this
+    //   long, silently, as nginx does (keepalive_timeout, 75s). It was the
+    //   header timeout, 5s, with a 408: a user who read a page for more
+    //   than 5s sent the next click into a closing socket and got that 408
+    //   as its answer (measured: every page kind failing at 50k users).
+    // kHeaderTimeoutMs: from a request's first byte (a partial read left it
+    //   unfinished); fires 408 if complete headers are not received within
+    //   this window (Slowloris defence).
     //   Cancelled in on_headers_complete() -- the llhttp callback that fires
     //   the instant headers finish parsing, NOT in dispatch(), which only
     //   runs once the BODY has fully arrived too. Cancelling in dispatch()
@@ -108,11 +114,14 @@ private:
     //   it armed would 408 a healthy SSE/WS stream mid-flight regardless of
     //   how much data was flowing.
     //
-    // The two never run at once, so they share one deadline and one timer:
-    // arming moves the deadline, and the timer, firing before it, sleeps again
-    // (never more than kHeaderTimeoutMs, so no deadline lands before it).
-    // Scheduling and cancelling a timer per request cost an allocation and
-    // two map updates each, four times over.
+    // They never run at once, so they share one deadline and one timer:
+    // arming moves the deadline, and the timer, firing before it, sleeps
+    // again. Only a deadline moved EARLIER reschedules it (idle -> header,
+    // on a partial request: rare): scheduling and cancelling a timer per
+    // request cost an allocation and two map updates each, four times over.
+    // A request that arrives whole goes idle -> request, later: no reschedule.
+    static constexpr int kIdleTimeoutMs    = 60'000;
+    static constexpr const char* kIdleMsg  = "idle";   // closes, answers nothing
     static constexpr int kHeaderTimeoutMs  = 5'000;
     static constexpr int kRequestTimeoutMs = 30'000;
     static constexpr const char* kHeaderTimeoutMsg  = "Request Header Timeout";
@@ -120,6 +129,7 @@ private:
     std::chrono::steady_clock::time_point deadline_{};
     const char* deadline_msg_ = nullptr;   // null: no deadline
     int         timer_        = -1;
+    std::chrono::steady_clock::time_point timer_at_{};   // when timer_ fires
 
     // Peer address, resolved on the first request: it cannot change for the
     // life of the socket, and keep-alive would otherwise pay getpeername +
@@ -163,6 +173,7 @@ private:
     void cancel_request_timeout();
     // 408 `msg` and close once `ms` pass without being moved or cleared.
     void set_deadline(int ms, const char* msg);
+    void arm_between_requests();   // idle, or header if a request has begun
     void schedule_deadline(int ms);
     void on_deadline();
 
