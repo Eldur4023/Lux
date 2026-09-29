@@ -78,6 +78,48 @@ constexpr size_t   kMaxPendingBytes  = 512u << 20;        // per target, then a 
 // uploaded again (at the forum bench's write rate, 1x meant one every 2s).
 constexpr uint64_t kMinGenerationBytes = 1ull << 30;
 
+// A snapshot is the whole database copied (7 GB on the 1M-user forum bench):
+// at full speed through the page cache it wrote gigabytes of dirty pages
+// and pushed the app's hot pages out, and the server collapsed until it was
+// done. Copied instead in slices, each flushed and dropped from the cache,
+// and paced: slower, and the app does not notice it.
+// ponytail: a fixed rate; make it a `replicate_rate` key if a disk needs another.
+constexpr uint64_t kColdSlice       = 8u << 20;
+constexpr uint64_t kColdBytesPerSec = 100u << 20;
+
+// Paces a big sequential read or write of `fd` and keeps it out of the page
+// cache: every kColdSlice, what was written goes to disk and what was read
+// or written is dropped. fd -1 (a segment in memory): only paced. Not
+// paced once the server is stopping (g_cold_hurry): what is left of a
+// snapshot or an upload then goes as fast as it can.
+std::atomic<bool> g_cold_hurry{false};
+
+class ColdIo {
+public:
+    ColdIo(int fd, bool writes) : fd_(fd), writes_(writes) {}
+    ~ColdIo() { drop(); }
+    void advance(uint64_t n) {
+        done_ += n;
+        if ((since_ += n) < kColdSlice) return;
+        drop();
+        if (!g_cold_hurry.load(std::memory_order_relaxed))
+            std::this_thread::sleep_until(start_ + std::chrono::microseconds(done_ * 1'000'000 / kColdBytesPerSec));
+    }
+
+private:
+    void drop() {
+        since_ = 0;
+        if (fd_ < 0) return;
+        if (writes_) ::sync_file_range(fd_, 0, 0, SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
+                                                  SYNC_FILE_RANGE_WAIT_AFTER);
+        ::posix_fadvise(fd_, 0, 0, POSIX_FADV_DONTNEED);
+    }
+    int      fd_;
+    bool     writes_;
+    uint64_t done_ = 0, since_ = 0;
+    std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
+};
+
 uint32_t be32(const unsigned char* p) {
     return uint32_t(p[0]) << 24 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 8 | p[3];
 }
@@ -222,8 +264,15 @@ public:
         char   buf[1 << 16];
         size_t n;
         bool   ok = true;
-        while ((n = std::fread(buf, 1, sizeof buf, in)) > 0)
-            if (std::fwrite(buf, 1, n, out) != n) { ok = false; break; }
+        {
+            ColdIo rd(fileno(in), false), wr(fileno(out), true);
+            while ((n = std::fread(buf, 1, sizeof buf, in)) > 0) {
+                if (std::fwrite(buf, 1, n, out) != n) { ok = false; break; }
+                rd.advance(n);
+                if (std::fflush(out) != 0) { ok = false; break; }
+                wr.advance(n);
+            }
+        }
         ok = ok && std::fflush(out) == 0 && fsync(fileno(out)) == 0;
         ok = (std::fclose(out) == 0) && ok;
         if (ok) fs::rename(tmp, to, ec);
@@ -309,13 +358,23 @@ protected:
     }
     virtual void auth(CURL*) {}
 
+    struct ColdSource { FILE* in; ColdIo io; };
+    static size_t cold_read(char* p, size_t s, size_t n, void* src) {
+        auto* c = static_cast<ColdSource*>(src);
+        const size_t got = std::fread(p, 1, s * n, c->in);
+        c->io.advance(got);
+        return got;
+    }
+
     bool upload(const std::string& url, FILE* in, uint64_t size, std::string& err,
                 const std::function<void(CURL*)>& extra = {}) {
+        ColdSource  src{in, ColdIo(fileno(in), false)};
         long        code = 0;
         std::string body;
         if (!run(url, err, &code, [&](CURL* h) {
                 curl_easy_setopt(h, CURLOPT_UPLOAD, 1L);
-                curl_easy_setopt(h, CURLOPT_READDATA, in);
+                curl_easy_setopt(h, CURLOPT_READFUNCTION, cold_read);
+                curl_easy_setopt(h, CURLOPT_READDATA, &src);
                 curl_easy_setopt(h, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(size));
                 curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, to_string_cb);
                 curl_easy_setopt(h, CURLOPT_WRITEDATA, &body);
@@ -623,6 +682,7 @@ public:
     }
 
     ~Replicator() override {
+        g_cold_hurry = true;
         {
             std::lock_guard<std::mutex> l(m_);
             stopping_ = true;
@@ -812,11 +872,32 @@ private:
         sqlite3*    dest = nullptr;
         std::string err;
         if (sqlite3_open_v2(spool->path.c_str(), &dest, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) == SQLITE_OK) {
+            // A scratch copy: no journal, no syncs (ColdIo flushes it).
+            sqlite3_exec(dest, "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF", nullptr, nullptr, nullptr);
             // A backup whose source has a read transaction open copies
-            // from that transaction's snapshot.
+            // from that transaction's snapshot -- slice after slice, since
+            // that transaction stays open between steps.
+            int page_size = 4096;
+            if (sqlite3_stmt* st = nullptr;
+                sqlite3_prepare_v2(ckpt_, "PRAGMA page_size", -1, &st, nullptr) == SQLITE_OK) {
+                if (sqlite3_step(st) == SQLITE_ROW) page_size = sqlite3_column_int(st, 0);
+                sqlite3_finalize(st);
+            }
+            const int slice = static_cast<int>(kColdSlice / static_cast<uint64_t>(std::max(page_size, 512)));
+            const int fd = ::open(spool->path.c_str(), O_RDONLY | O_CLOEXEC);
             sqlite3_backup* b = sqlite3_backup_init(dest, "main", ckpt_, "main");
-            if (!b || sqlite3_backup_step(b, -1) != SQLITE_DONE) err = sqlite3_errmsg(dest);
+            if (!b) err = sqlite3_errmsg(dest);
+            {
+                ColdIo io(fd, true);
+                for (int rc = SQLITE_OK; b && rc != SQLITE_DONE; io.advance(uint64_t(slice) * page_size)) {
+                    rc = sqlite3_backup_step(b, slice);
+                    if (rc != SQLITE_OK && rc != SQLITE_DONE) { err = sqlite3_errmsg(dest); break; }
+                }
+            }
             if (b && sqlite3_backup_finish(b) != SQLITE_OK && err.empty()) err = sqlite3_errmsg(dest);
+            sqlite3_close(dest);
+            dest = nullptr;
+            if (fd >= 0) ::close(fd);   // after dest: closing it earlier dropped dest's locks
         } else {
             err = sqlite3_errmsg(dest);
         }
