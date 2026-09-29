@@ -22,8 +22,8 @@ namespace lux_script {
 // file:line:col it happened at (project.cpp's bytecode routes,
 // native_gen.cpp's generated ones) -- useful while developing, but a real
 // deployment leaking its own source layout and internal error text to
-// whoever sent the request that triggered it is the kind of thing this
-// project's own SECURITY-AUDIT.md exists to catch. Both places check this
+// whoever sent the request that triggered it is an information leak. Both
+// places check this
 // ONE function instead of duplicating the decision, so bytecode and
 // --native can never disagree about which mode a deployment is in --
 // exactly the divergence this codebase's own comments repeatedly call out

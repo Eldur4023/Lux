@@ -250,8 +250,8 @@ std::string random_bytes(size_t n) {
     while (got < n) {
         // getrandom(2) over /dev/urandom: it draws from the same CSPRNG but
         // needs no file descriptor, so it cannot fail merely because the
-        // process is out of them (a real failure mode under load -- see
-        // SECURITY-AUDIT.md #13) and it blocks instead of returning
+        // process is out of them (a real failure mode under load) and it
+        // blocks instead of returning
         // low-quality output before the kernel's entropy pool is
         // initialised at boot (irrelevant days into a server's uptime, but
         // free correctness). Available unconditionally: this project only
