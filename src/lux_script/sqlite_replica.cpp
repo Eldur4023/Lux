@@ -197,7 +197,7 @@ WalPos scan_wal(int fd, const WalHeader& h, WalPos pos, std::string* out) {
         if (out) pending += frame;
         if (be32(f + 4) != 0) {                 // commit frame: size of the db after it
             committed = cur;
-            if (out) { *out += pending; pending.clear(); }
+            if (out) { *out += pending; pending.clear(); if (out->size() >= kFlushBytes) break; }
         }
     }
     return committed;
@@ -642,15 +642,18 @@ struct SpoolFile {
 
 struct Item {
     std::string                        key;
-    std::shared_ptr<const std::string> data;       // a segment, or
-    std::shared_ptr<SpoolFile>         file;       // a snapshot
-    uint64_t size() const { return data ? data->size() : 0; }
+    std::shared_ptr<const std::string> data;       // a segment in memory, or
+    std::shared_ptr<SpoolFile>         file;       // one on disk: a snapshot, or a segment queued behind one
+    bool                               snapshot = false;
+    uint64_t                           bytes = 0;  // of a segment
+    uint64_t size() const { return data ? bytes : 0; }         // held in memory
+    uint64_t spilled() const { return !data && !snapshot ? bytes : 0; }   // held on disk
 };
 
 struct Replica {
     std::unique_ptr<Target> target;
     std::deque<Item>        queue;
-    size_t                  pending = 0;
+    size_t                  pending = 0, spilled = 0;
     bool                    failing = false;
     std::chrono::steady_clock::time_point retry_at{};
 };
@@ -676,8 +679,12 @@ public:
             sqlite3_exec(*c, "PRAGMA journal_mode=WAL", nullptr, nullptr, &msg);
             if (msg) sqlite3_free(msg);
         }
+        // Only ever closed after every connection above: closing any
+        // descriptor of the file drops the process's POSIX locks.
+        dbfd_    = ::open(db_.c_str(), O_RDONLY | O_CLOEXEC);
         capture_ = std::thread([this] { capture_loop(); });
         upload_  = std::thread([this] { upload_loop(); });
+        writeback_ = std::thread([this] { writeback_loop(); });
         return true;
     }
 
@@ -696,7 +703,10 @@ public:
         cv_.notify_all();
         if (upload_.joinable()) upload_.join();
         unpin();
+        writeback_stop_ = true;
+        if (writeback_.joinable()) writeback_.join();
         for (sqlite3* c : {lock_, ckpt_, pins_[0], pins_[1]}) if (c) sqlite3_close(c);
+        if (dbfd_ >= 0) ::close(dbfd_);
     }
 
 private:
@@ -716,7 +726,8 @@ private:
 
     void tick() {
         if (need_snapshot_) { flush(); snapshot(); return; }
-        const uint64_t frames = capture();
+        uint64_t frames;   // a backlog (a snapshot just ended) goes out a segment at a time
+        while ((frames = capture()), seg_frames_.size() >= kFlushBytes) flush();
         if (need_snapshot_) { flush(); snapshot(); return; }
         if (frames >= kCheckpointFrames) checkpoint();
         if (stopping() || seg_frames_.size() >= kFlushBytes ||
@@ -737,9 +748,47 @@ private:
         seg_frames_.clear();
         seg_count_ = 0;
         since_snapshot_ += seg.size();
-        enqueue(Item{gen_ + "/" + hex16(seq_++) + ".wal",
-                     std::make_shared<const std::string>(std::move(seg)), nullptr});
+        Item item{gen_ + "/" + hex16(seq_) + ".wal", nullptr, nullptr, false, seg.size()};
+        // Behind a snapshot still uploading (70 s per 7 GB) segments wait on
+        // disk, not in memory: a memory cap has the page cache to feed too.
+        const std::string path = db_ + "-replica-seg-" + hex16(seq_++);
+        if (behind_snapshot() && write_file(path, seg)) {
+            item.file = std::make_shared<SpoolFile>();   // not a copy of a temporary: its destructor deletes the file
+            item.file->path = path;
+        } else item.data = std::make_shared<const std::string>(std::move(seg));
+        enqueue(std::move(item));
         if (since_snapshot_ > std::max(kMinGenerationBytes, 4 * snapshot_bytes_)) need_snapshot_ = true;
+    }
+
+    // While a checkpoint copies frames into the database, what it dirties is
+    // pushed to disk as it goes: after a snapshot the WAL is ~1 GB, and left
+    // to the kernel that lands as one burst of writeback that stalled the
+    // whole server (reads too) under a memory cap.
+    void writeback_loop() {
+        while (!writeback_stop_) {
+            if (checkpointing_ && dbfd_ >= 0) ::sync_file_range(dbfd_, 0, 0, SYNC_FILE_RANGE_WRITE);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    bool behind_snapshot() {
+        std::lock_guard<std::mutex> l(m_);
+        for (auto& r : replicas_) if (!r.queue.empty() && r.queue.front().snapshot) return true;
+        return false;
+    }
+    static bool write_file(const std::string& path, const std::string& d) {
+        const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        if (fd < 0) return false;
+        bool ok = true;
+        {
+            ColdIo io(fd, true);   // out of the page cache, like the snapshot
+            for (size_t at = 0; ok && at < d.size(); at += kColdSlice) {
+                const size_t n = std::min<size_t>(kColdSlice, d.size() - at);
+                ok = ::write(fd, d.data() + at, n) == static_cast<ssize_t>(n);
+                io.advance(n);
+            }
+        }
+        return ::close(fd) == 0 && ok;
     }
 
     // New committed frames, kept for the next flush(). Returns how many
@@ -819,6 +868,8 @@ private:
     // on the bench's disk) while the app writes on, up to the refreshed pin;
     // the writer is held only for the rest, a few pages.
     void checkpoint() {
+        checkpointing_ = true;
+        struct Off { std::atomic<bool>& f; ~Off() { f = false; } } off{checkpointing_};
         pin();
         for (int i = 0; i < 4; ++i) {
             int log = -1, done = -1;
@@ -916,7 +967,7 @@ private:
 
         gen_ = gen; seq_ = 0; since_snapshot_ = 0; need_snapshot_ = false;
         snapshot_bytes_ = fs::file_size(spool->path, ec);
-        enqueue(Item{gen_ + "/snapshot.db", nullptr, spool});
+        enqueue(Item{gen_ + "/snapshot.db", nullptr, spool, true, 0});
     }
 
     // ── upload: segments to every target, in order ──
@@ -925,16 +976,21 @@ private:
         {
             std::lock_guard<std::mutex> l(m_);
             for (auto& r : replicas_) {
-                if (r.pending > kMaxPendingBytes) {
+                // Segments behind a snapshot still uploading wait on disk
+                // (flush()) and count apart: else a busy database drops the
+                // snapshot it is sending, takes a new one, and never
+                // finishes either.
+                if (r.pending > kMaxPendingBytes || r.spilled > 8 * kMaxPendingBytes) {
                     // ponytail: in memory; a target down this long loses its
                     // queue and gets a new generation once it is back.
                     lux::log().error("replicate: ", r.target->url(), " is too far behind; "
                                      "it will get a new generation");
                     r.queue.clear();
-                    r.pending = 0;
-                    if (!item.file) need_snapshot_ = true;   // unless this is that new snapshot
+                    r.pending = r.spilled = 0;
+                    if (!item.snapshot) need_snapshot_ = true;   // unless this is that new snapshot
                 }
                 r.pending += item.size();
+                r.spilled += item.spilled();
                 r.queue.push_back(item);
             }
         }
@@ -961,11 +1017,12 @@ private:
                 l.unlock();
                 std::string err;
                 const bool  ok = put(*r.target, item, err);
-                if (ok && item.file) prune(*r.target, item.key.substr(0, 16));
+                if (ok && item.snapshot) prune(*r.target, item.key.substr(0, 16));
                 l.lock();
                 if (ok) {
                     if (!r.queue.empty() && r.queue.front().key == item.key) {
                         r.pending -= std::min(r.pending, size_t(item.size()));
+                        r.spilled -= std::min(r.spilled, size_t(item.spilled()));
                         r.queue.pop_front();
                     }
                     if (r.failing) lux::log().info("replicate: ", r.target->url(), " is back");
@@ -1033,7 +1090,9 @@ private:
     std::vector<Replica>    replicas_;
     bool                    stopping_ = false, capture_done_ = false;
     int                     final_attempts_ = 0;
-    std::thread             capture_, upload_;
+    std::thread             capture_, upload_, writeback_;
+    std::atomic<bool>       checkpointing_{false}, writeback_stop_{false};
+    int                     dbfd_ = -1;
 };
 
 } // namespace
