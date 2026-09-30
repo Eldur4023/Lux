@@ -3,6 +3,7 @@
 
 #include <sys/socket.h>
 #include <cerrno>
+#include <algorithm>
 #include <chrono>
 
 namespace lux_script {
@@ -130,7 +131,8 @@ void DbPool::submit_to(size_t worker, Job job) {
 // costs its writes little, while one batch between every two transactions
 // capped them at a turn and a half each (measured: ~500/s on a slow server).
 constexpr int kTxStreak = 8;
-constexpr size_t kMaxGroup = 128;   // transactions in one COMMIT
+constexpr size_t kMaxGroup = 128;
+constexpr int kSameOrigin = 32;   // transaction turns in a row to one loop   // transactions in one COMMIT
 
 void DbPool::dispatch_turn() {
     if (turn_ != Turn::None) return;
@@ -146,18 +148,28 @@ void DbPool::dispatch_turn() {
     } else if (tx) {
         turn_ = last_turn_ = Turn::Tx;
         ++tx_streak_;
-        auto grant = std::move(begins_.front());
-        begins_.pop();
+        // The loop that just finished goes on with its own waiters: no wakeup,
+        // no waiting for another loop to get to the grant. kSameOrigin keeps
+        // the others from starving.
+        auto it = begins_.begin();
+        if (last_origin_ && same_origin_ < kSameOrigin)
+            if (auto f = std::find_if(begins_.begin(), begins_.end(),
+                                      [&](const Begin& b) { return b.origin == last_origin_; });
+                f != begins_.end())
+                it = f;
+        same_origin_ = it->origin == last_origin_ ? same_origin_ + 1 : 0;
+        auto grant = std::move(it->grant);
+        begins_.erase(it);
         grant();
     }
 }
 
-void DbPool::submit_begin(std::function<void()> grant) {
+void DbPool::submit_begin(std::function<void()> grant, const void* origin) {
     Wake w;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) return;
-        begins_.push(std::move(grant));   // waits here, not in a busy handler
+        begins_.push_back({std::move(grant), origin});   // waits here, not in a busy handler
         dispatch_turn();
         w = wake_after_turn();
     }
@@ -176,11 +188,12 @@ void DbPool::release_tx_turn() {
     wake(w);
 }
 
-bool DbPool::tx_release(GroupDone done) {
+bool DbPool::tx_release(GroupDone done, const void* origin) {
     Wake w;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done) group_.push_back(std::move(done));
+        last_origin_ = origin;
         // An external turn (checkpoint, snapshot) needs the group committed
         // first; so does a stop, and a group this big has waited long enough.
         const bool more = !stopping_ && external_waiting_ == 0 && group_.size() < kMaxGroup &&
@@ -250,7 +263,7 @@ void DbPool::stop() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (stopping_) return;
         stopping_ = true;
-        begins_ = {};   // never started: their loops stop right after this
+        begins_.clear();   // never started: their loops stop right after this
         // A transaction in progress runs on an event loop, which is still
         // running: it may finish (see kDrainTransaction). Given up on, its
         // connection is the writer's -- nothing else may touch it (the
@@ -375,7 +388,7 @@ void GroupCommitAwaitable::await_suspend(std::coroutine_handle<> h) {
     if (pool->tx_release([l, h, e](const std::string& err) {
             *e = err;
             l->post([h]() mutable { h.resume(); });
-        }))
+        }, l))
         commit_group(pool, driver, slot);
 }
 
@@ -554,7 +567,7 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
             } else {   // a rollback, an aborted commit, or a RELEASE that failed
                 run("ROLLBACK TO lux_tx", false);
                 run("RELEASE lux_tx", false);
-                if (pool->tx_release(nullptr)) commit_group(pool, driver, slot);
+                if (pool->tx_release(nullptr, loop)) commit_group(pool, driver, slot);
                 if (errmsg.empty()) result = Value::boolean(true);
             }
         } else {
@@ -562,7 +575,7 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         }
     } else {
         co_await DbAwaitable{pool, loop, work, pin, op == DbOp::Begin && tx_turn};
-        if (op == DbOp::Begin && tx_turn && !errmsg.empty() && pool->tx_release(nullptr))
+        if (op == DbOp::Begin && tx_turn && !errmsg.empty() && pool->tx_release(nullptr, loop))
             commit_group(pool, driver, pool->size());
     }
 
@@ -624,7 +637,7 @@ lux::Task<void> rollback_pending_db(std::map<std::string, int>& pinned_workers,
             std::string err;
             driver->exec(static_cast<size_t>(worker), "ROLLBACK TO lux_tx", {}, n, err);
             driver->exec(static_cast<size_t>(worker), "RELEASE lux_tx", {}, n, err);
-            if (pool->tx_release(nullptr)) commit_group(pool, driver, static_cast<size_t>(worker));
+            if (pool->tx_release(nullptr, loop)) commit_group(pool, driver, static_cast<size_t>(worker));
             continue;
         }
         co_await DbAwaitable{pool, loop,

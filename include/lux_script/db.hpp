@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <deque>
 #include <queue>
 #include <set>
 #include <string>
@@ -84,7 +85,11 @@ public:
     // or a BEGIN that failed). No thread hop while it holds everyone's
     // writes: a hop to a pool worker for BEGIN and another for COMMIT each
     // waited for a CPU under load -- measured, comments at 1.3s p50.
-    void submit_begin(std::function<void()> grant);
+    // `origin` (the caller's event loop) lets the pool prefer a waiter on the
+    // loop that just finished: handing the turn to another loop costs a wakeup
+    // and the time that loop needs to reach it, ~100us under load -- the
+    // whole write path idle for that long, once per transaction.
+    void submit_begin(std::function<void()> grant, const void* origin = nullptr);
     void release_tx_turn();
 
     // Group commit of transactions. On the writer's connection a transaction
@@ -101,7 +106,7 @@ public:
     // when the turn went on to someone who will (another transaction, or the
     // writer's batch).
     using GroupDone = std::function<void(const std::string&)>;
-    bool tx_release(GroupDone done);
+    bool tx_release(GroupDone done, const void* origin = nullptr);
     void group_committed(const std::string& error);
     // For a checkpoint or a replica's snapshot: blocks until nothing else
     // writes, and holds everyone off until released.
@@ -122,7 +127,10 @@ private:
     void dispatch_turn();   // under mutex_
     Turn                                            turn_ = Turn::None, last_turn_ = Turn::None;
     size_t                                          external_waiting_ = 0;
-    std::queue<std::function<void()>>               begins_;       // waiting for their turn
+    struct Begin { std::function<void()> grant; const void* origin; };
+    std::deque<Begin>                               begins_;       // waiting for their turn
+    const void*                                     last_origin_ = nullptr;   // the loop of the last transaction turn
+    int                                             same_origin_ = 0;         // grants in a row to it
     bool                                            abandoned_ = false;   // stop() gave up on a transaction
     int                                             tx_streak_ = 0;   // transaction turns in a row
     std::vector<std::thread>                        threads_;
@@ -309,7 +317,7 @@ struct DbAwaitable {
         if (begin) {   // on the loop, ahead of its queue: it holds everyone's writes
             p->submit_begin([l, h, w = std::move(work), slot = p->size()] {
                 l->post_urgent([h, w, slot]() mutable { w(slot); h.resume(); });
-            });
+            }, l);
             return;
         }
         DbPool::Job job{std::move(work), [l, h] { l->post([h]() mutable { h.resume(); }); }};
