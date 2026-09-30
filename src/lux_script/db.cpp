@@ -27,6 +27,7 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
     // The writer: everything queued while the previous batch ran goes in the
     // next one, so the busier it is, the more each commit carries.
     if (batch_) threads_.emplace_back([this, writer = workers] {
+        pthread_setname_np(pthread_self(), "lux-dbwriter");
         std::vector<Write> writes;
         std::vector<GroupDone> group;
         for (;;) {
@@ -56,6 +57,7 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
 
     for (size_t i = 0; i < workers; ++i) {
         threads_.emplace_back([this, i, in_transaction] {
+            pthread_setname_np(pthread_self(), "lux-dbpool");
             bool held = false;
             for (;;) {
                 Job job;

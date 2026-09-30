@@ -24,6 +24,7 @@ void BlockingPool::start(size_t core_workers, size_t max_workers,
 }
 
 void BlockingPool::worker_loop(bool overflow) {
+    pthread_setname_np(pthread_self(), "lux-blocking");
     for (;;) {
         std::function<void()> job;
         {

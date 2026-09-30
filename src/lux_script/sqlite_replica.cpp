@@ -713,6 +713,7 @@ private:
     // ── capture: the WAL into segments ──
 
     void capture_loop() {
+        pthread_setname_np(pthread_self(), "lux-rcapture");
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             const bool last = stopping_;
@@ -765,6 +766,7 @@ private:
     // to the kernel that lands as one burst of writeback that stalled the
     // whole server (reads too) under a memory cap.
     void writeback_loop() {
+        pthread_setname_np(pthread_self(), "lux-rwriteback");
         while (!writeback_stop_) {
             if (checkpointing_ && dbfd_ >= 0) ::sync_file_range(dbfd_, 0, 0, SYNC_FILE_RANGE_WRITE);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -998,6 +1000,7 @@ private:
     }
 
     void upload_loop() {
+        pthread_setname_np(pthread_self(), "lux-rupload");
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             bool all_empty = true, any_ready = false;

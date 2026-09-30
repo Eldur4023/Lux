@@ -547,6 +547,7 @@ private:
         ckpt_cv_.notify_one();
     }
     void checkpoint_loop() {
+        pthread_setname_np(pthread_self(), "lux-ckpt");
         sqlite3* c = nullptr;
         if (sqlite3_open_v2(file_.c_str(), &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) {
             lux::log().error("sqlite: the checkpointer cannot open ", file_, ": ", sqlite3_errmsg(c));

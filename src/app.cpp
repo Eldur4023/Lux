@@ -663,6 +663,7 @@ void App::run(const std::string& host, uint16_t port) {
     threads.reserve(num_threads - 1);
     for (unsigned i = 1; i < num_threads; ++i) {
         threads.emplace_back([&]() {
+            pthread_setname_np(pthread_self(), "lux-loop");
             core::EventLoop loop;
             core::TcpServer server(host, port, loop, dispatch,
                                    max_connections_, shared_conn_count, group);
