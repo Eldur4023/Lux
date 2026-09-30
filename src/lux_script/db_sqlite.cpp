@@ -178,24 +178,36 @@ public:
     // Measured on the bench: a primary-key read is ~2us inside SQLite and
     // ~15us of handoff to the pool and back. So reads run on the loop's own
     // connection -- until one takes over kInlineBudgetNs: the progress handler
-    // interrupts it (a read, nothing to undo), it is marked slow on this
-    // thread, and it and every later call go to the pool.
+    // interrupts it (a read, nothing to undo) and that call goes to the pool.
+    // A statement interrupted kSlowStrikes times in a row is slow for this
+    // thread: its calls go to the pool, except one in kProbeEvery, run inline
+    // to find out whether it recovered. One interruption is not enough: the
+    // SQL text is the same for every parameter (page 1 and page 900 of a
+    // listing), and marking it for good on the first deep page sent every
+    // later call, the fast ones too, through the pool -- half the forum
+    // crowd's CPU went into that hop.
     Inline query_inline(const std::string& sql, const std::vector<Value>& args,
                         Value& out, std::string& error) override {
         if (!shared_file_) return Inline::NotHandled;
         const long slot = inline_slot();
         if (slot < 0) return Inline::NotHandled;
         auto& slow = slow_[static_cast<size_t>(slot) - inline_base()];
-        if (slow.count(sql)) return Inline::NotHandled;
+        auto  mark = slow.find(sql);
+        if (mark != slow.end() && mark->second.strikes >= kSlowStrikes &&
+            (++mark->second.skipped % kProbeEvery) != 0)
+            return Inline::NotHandled;
 
         std::string open_error;
         if (!open(static_cast<size_t>(slot), open_error)) return Inline::NotHandled;
 
         deadline_[static_cast<size_t>(slot) - inline_base()].at_ns = thread_cpu_ns() + kInlineBudgetNs;
-        if (query(static_cast<size_t>(slot), sql, args, out, error)) return Inline::Done;
+        if (query(static_cast<size_t>(slot), sql, args, out, error)) {
+            if (mark != slow.end()) slow.erase(mark);   // finished in budget: strikes start over
+            return Inline::Done;
+        }
 
         switch (rc_[static_cast<size_t>(slot)] & 0xff) {
-            case SQLITE_INTERRUPT: slow.insert(sql); return Inline::NotHandled;
+            case SQLITE_INTERRUPT: ++slow[sql].strikes; return Inline::NotHandled;
             case SQLITE_BUSY:
             case SQLITE_LOCKED:    return Inline::NotHandled;   // the pool may wait; the loop may not
             default:               return Inline::Failed;       // the pool would fail the same way
@@ -491,7 +503,9 @@ private:
     struct Deadline { int64_t at_ns = 0; };
     std::atomic<size_t>                           next_inline_{0};
     std::vector<Deadline>                         deadline_;   // per inline slot
-    std::vector<std::unordered_set<std::string>> slow_;       // per inline slot
+    static constexpr unsigned kSlowStrikes = 8, kProbeEvery = 256;
+    struct Strikes { unsigned strikes = 0, skipped = 0; };
+    std::vector<std::unordered_map<std::string, Strikes>> slow_;   // per inline slot
 
     static int64_t thread_cpu_ns() {
         timespec ts{};
