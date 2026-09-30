@@ -86,6 +86,23 @@ public:
     // waited for a CPU under load -- measured, comments at 1.3s p50.
     void submit_begin(std::function<void()> grant);
     void release_tx_turn();
+
+    // Group commit of transactions. On the writer's connection a transaction
+    // is a SAVEPOINT inside one shared SQLite transaction (the group): when
+    // its statements are done it RELEASEs, and the group's one COMMIT covers
+    // it -- one WAL append for every transaction that queued up meanwhile,
+    // as the batch does for plain writes.
+    //
+    // tx_release: the holder of a transaction turn has released its savepoint
+    // (or rolled it back). `done` (null for a rollback) is called with the
+    // COMMIT's error once the group is committed -- a handler must not answer
+    // before. Returns true when nobody is waiting for the turn: the caller
+    // still holds it, must commit the group and call group_committed(). False
+    // when the turn went on to someone who will (another transaction, or the
+    // writer's batch).
+    using GroupDone = std::function<void(const std::string&)>;
+    bool tx_release(GroupDone done);
+    void group_committed(const std::string& error);
     // For a checkpoint or a replica's snapshot: blocks until nothing else
     // writes, and holds everyone off until released.
     void acquire_external_turn();
@@ -100,6 +117,7 @@ public:
 private:
     Batch                                           batch_;
     std::vector<Write>                              writes_;
+    std::vector<GroupDone>                          group_;   // waiting for the group's COMMIT
     enum class Turn { None, Writer, Tx, External };
     void dispatch_turn();   // under mutex_
     Turn                                            turn_ = Turn::None, last_turn_ = Turn::None;
@@ -113,7 +131,15 @@ private:
     std::vector<std::queue<Job>>                    pinned_;
     std::vector<char>                               held_;   // connection inside a transaction
     std::mutex                                      mutex_;
-    std::condition_variable                         cv_;
+    std::condition_variable                         cv_;          // the pool workers
+    std::condition_variable                         writer_cv_;   // the writer: its turn came
+    std::condition_variable                         turn_cv_;     // acquire_external_turn() and stop()
+    // Under mutex_, after dispatch_turn(): who the turn's new state is news to.
+    // One shared condition variable woke all of the pool's threads on every
+    // write, for an event only the writer could act on.
+    struct Wake { bool writer, turn; };
+    Wake wake_after_turn() const { return {turn_ == Turn::Writer, turn_ == Turn::External || stopping_}; }
+    void wake(Wake w) { if (w.writer) writer_cv_.notify_one(); if (w.turn) turn_cv_.notify_all(); }
     bool                                            stopping_ = false;
 };
 
@@ -315,6 +341,24 @@ struct DbWriteAwaitable {
 
     void await_resume() const noexcept {}
 };
+
+// Commits the transaction group the caller's savepoint is in (see
+// DbPool::tx_release) and resumes the handler once it is committed.
+struct GroupCommitAwaitable {
+    DbPool*                 pool;
+    lux::core::EventLoop*   loop;
+    DbDriver*               driver;
+    size_t                  slot;   // the writer's connection
+    std::string*            error;
+
+    bool await_ready() const noexcept { return false; }
+    void await_suspend(std::coroutine_handle<> h);
+    void await_resume() const noexcept {}
+};
+
+// The caller holds the transaction turn and nobody is waiting for it: COMMIT
+// the group (if a transaction is open) and hand the turn on.
+void commit_group(DbPool* pool, DbDriver* driver, size_t slot);
 
 // ─── Bridge shared between bytecode and --native ─────────────────────────────
 //

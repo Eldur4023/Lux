@@ -440,11 +440,14 @@ private:
     }
 
     std::string commit_batch(size_t w, std::vector<DbPool::Write>& writes) {
-        if (writes.size() == 1) { writes[0].work(w); return ""; }
+        // A group of transactions (DbPool::tx_release) may be open: join it
+        // and commit it with this batch.
+        const bool joined = !sqlite3_get_autocommit(conns_[w]);
+        if (writes.size() == 1 && !joined) { writes[0].work(w); return ""; }
 
         long long n = 0;
         auto run = [&](const char* sql) { std::string e; return exec(w, sql, {}, n, e); };
-        if (!run("BEGIN IMMEDIATE")) {               // the lock never came: each on its own
+        if (!joined && !run("BEGIN IMMEDIATE")) {               // the lock never came: each on its own
             for (auto& x : writes) x.work(w);
             return "";
         }

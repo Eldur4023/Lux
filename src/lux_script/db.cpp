@@ -27,23 +27,29 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
     // next one, so the busier it is, the more each commit carries.
     if (batch_) threads_.emplace_back([this, writer = workers] {
         std::vector<Write> writes;
+        std::vector<GroupDone> group;
         for (;;) {
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [&] { return turn_ == Turn::Writer || (stopping_ && (writes_.empty() || abandoned_)); });
+                writer_cv_.wait(lock, [&] { return turn_ == Turn::Writer || (stopping_ && (writes_.empty() || abandoned_)); });
                 if (turn_ != Turn::Writer) return;   // stopping, nothing left to write
                 writes.swap(writes_);
+                group.swap(group_);   // their savepoints are in the transaction this batch commits
             }
             std::string error;
             try { error = batch_(writer, writes); } catch (...) { error = "database writer failed"; }
+            Wake w;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 turn_ = Turn::None;
                 dispatch_turn();
+                w = wake_after_turn();
             }
-            cv_.notify_all();
+            wake(w);
             for (auto& w : writes) w.done(error);
+            for (auto& g : group) g(error);
             writes.clear();
+            group.clear();
         }
     });
 
@@ -124,6 +130,7 @@ void DbPool::submit_to(size_t worker, Job job) {
 // costs its writes little, while one batch between every two transactions
 // capped them at a turn and a half each (measured: ~500/s on a slow server).
 constexpr int kTxStreak = 8;
+constexpr size_t kMaxGroup = 128;   // transactions in one COMMIT
 
 void DbPool::dispatch_turn() {
     if (turn_ != Turn::None) return;
@@ -146,51 +153,96 @@ void DbPool::dispatch_turn() {
 }
 
 void DbPool::submit_begin(std::function<void()> grant) {
+    Wake w;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) return;
         begins_.push(std::move(grant));   // waits here, not in a busy handler
         dispatch_turn();
+        w = wake_after_turn();
     }
-    cv_.notify_all();
+    wake(w);
 }
 
 void DbPool::release_tx_turn() {
+    Wake w;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (turn_ != Turn::Tx) return;
         turn_ = Turn::None;
         dispatch_turn();
+        w = wake_after_turn();
     }
-    cv_.notify_all();
+    wake(w);
+}
+
+bool DbPool::tx_release(GroupDone done) {
+    Wake w;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (done) group_.push_back(std::move(done));
+        // An external turn (checkpoint, snapshot) needs the group committed
+        // first; so does a stop, and a group this big has waited long enough.
+        const bool more = !stopping_ && external_waiting_ == 0 && group_.size() < kMaxGroup &&
+                          (!writes_.empty() || !begins_.empty());
+        if (!more) {
+            tx_streak_ = 0;
+            return true;   // turn_ stays Tx: the caller commits
+        }
+        turn_ = Turn::None;
+        dispatch_turn();
+        w = wake_after_turn();
+    }
+    wake(w);
+    return false;
+}
+
+void DbPool::group_committed(const std::string& error) {
+    std::vector<GroupDone> waiting;
+    Wake w;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        waiting.swap(group_);
+        if (turn_ == Turn::Tx) {
+            turn_ = Turn::None;
+            dispatch_turn();
+        }
+        w = wake_after_turn();
+    }
+    wake(w);
+    for (auto& g : waiting) g(error);
 }
 
 void DbPool::acquire_external_turn() {
     std::unique_lock<std::mutex> lock(mutex_);
     ++external_waiting_;
     dispatch_turn();
-    cv_.notify_all();
-    cv_.wait(lock, [&] { return turn_ == Turn::External || abandoned_; });
+    wake(wake_after_turn());
+    turn_cv_.wait(lock, [&] { return turn_ == Turn::External || abandoned_; });
 }
 
 void DbPool::release_external_turn() {
+    Wake w;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (turn_ != Turn::External) return;   // abandoned_: never had it
         turn_ = Turn::None;
         dispatch_turn();
+        w = wake_after_turn();
     }
-    cv_.notify_all();
+    wake(w);
 }
 
 void DbPool::submit_write(Write w) {
+    Wake wk;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopping_) return;
         writes_.push_back(std::move(w));
         dispatch_turn();
+        wk = wake_after_turn();
     }
-    cv_.notify_all();
+    wake(wk);
 }
 
 void DbPool::stop() {
@@ -203,11 +255,11 @@ void DbPool::stop() {
         // running: it may finish (see kDrainTransaction). Given up on, its
         // connection is the writer's -- nothing else may touch it (the
         // writer quits; closing the connection rolls it back).
-        if (!cv_.wait_for(lock, kDrainTransaction, [&] { return turn_ != Turn::Tx; })) {
+        if (!turn_cv_.wait_for(lock, kDrainTransaction, [&] { return turn_ != Turn::Tx; })) {
             abandoned_ = true;
         }
     }
-    cv_.notify_all();
+    cv_.notify_all(); writer_cv_.notify_all(); turn_cv_.notify_all();
     for (auto& t : threads_) if (t.joinable()) t.join();
     threads_.clear();
 }
@@ -318,6 +370,27 @@ SocketState peek_socket(int fd) {
     return SocketState::Dead;                             // reset and friends
 }
 
+void GroupCommitAwaitable::await_suspend(std::coroutine_handle<> h) {
+    auto* l = loop; auto* e = error;
+    if (pool->tx_release([l, h, e](const std::string& err) {
+            *e = err;
+            l->post([h]() mutable { h.resume(); });
+        }))
+        commit_group(pool, driver, slot);
+}
+
+void commit_group(DbPool* pool, DbDriver* driver, size_t slot) {
+    std::string err;
+    if (driver->in_transaction(slot)) {
+        long long n = 0; std::string e;
+        if (!driver->exec(slot, "COMMIT", {}, n, e)) {
+            err = "commit failed: " + e;
+            driver->exec(slot, "ROLLBACK", {}, n, e);
+        }
+    }
+    pool->group_committed(err);
+}
+
 Value db_error(const std::string& msg) {
     Value::Dict d;
     d["error"] = Value::str(msg);
@@ -414,6 +487,7 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         co_return result;
     }
 
+    const bool tx_turn = pool->has_writer();
     std::function<void(size_t)> work =
         [&, driver, op = stmt_op](size_t worker) {
             used = static_cast<int>(worker);
@@ -438,6 +512,15 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
                 // with SQLITE_BUSY when another one did the same -- no
                 // busy_timeout wait can resolve two readers both wanting to
                 // write -- so read-then-update transactions broke under load.
+                if (op == DbOp::Begin && tx_turn) {
+                    // With the writer: a savepoint in the group's transaction,
+                    // opened by the first (see DbPool::tx_release).
+                    if (!driver->in_transaction(worker) &&
+                        !driver->exec(worker, "BEGIN IMMEDIATE", {}, n, err)) { errmsg = err; return; }
+                    if (!driver->exec(worker, "SAVEPOINT lux_tx", {}, n, err)) { errmsg = err; return; }
+                    result = Value::boolean(true);
+                    return;
+                }
                 const char* stmt = (op == DbOp::Begin)  ? (module == "sqlite" ? "BEGIN IMMEDIATE" : "BEGIN")
                                   : (op == DbOp::Commit) ? "COMMIT" : "ROLLBACK";
                 if (!driver->exec(worker, stmt, {}, n, err)) { errmsg = err; return; }
@@ -454,14 +537,33 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
     // ponytail: no CPU budget here (interrupting a write inside a transaction
     // rolls all of it back); a heavy statement in a transaction runs on the
     // loop -- send those to a worker if one ever shows up in latency.
-    const bool tx_turn = pool->has_writer();
     if (in_tx && tx_turn) {
-        work(static_cast<size_t>(pin));
-        if ((op == DbOp::Commit || op == DbOp::Rollback) && !driver->in_transaction(static_cast<size_t>(pin)))
-            pool->release_tx_turn();
+        const size_t slot = static_cast<size_t>(pin);
+        if (op == DbOp::Commit || op == DbOp::Rollback) {
+            auto run = [&](const char* q, bool keep_error) {
+                long long n = 0; std::string e;
+                const bool ok = driver->exec(slot, q, {}, n, e);
+                if (!ok && keep_error && errmsg.empty()) errmsg = e;
+                return ok;
+            };
+            if (stmt_op == DbOp::Commit && run("RELEASE lux_tx", true)) {
+                std::string group_error;
+                co_await GroupCommitAwaitable{pool, loop, driver, slot, &group_error};
+                if (!group_error.empty()) errmsg = group_error;
+                else                      result = Value::boolean(true);
+            } else {   // a rollback, an aborted commit, or a RELEASE that failed
+                run("ROLLBACK TO lux_tx", false);
+                run("RELEASE lux_tx", false);
+                if (pool->tx_release(nullptr)) commit_group(pool, driver, slot);
+                if (errmsg.empty()) result = Value::boolean(true);
+            }
+        } else {
+            work(slot);
+        }
     } else {
         co_await DbAwaitable{pool, loop, work, pin, op == DbOp::Begin && tx_turn};
-        if (op == DbOp::Begin && tx_turn && !errmsg.empty()) pool->release_tx_turn();
+        if (op == DbOp::Begin && tx_turn && !errmsg.empty() && pool->tx_release(nullptr))
+            commit_group(pool, driver, pool->size());
     }
 
     if (!errmsg.empty()) {
@@ -472,6 +574,13 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
         // to poison.
         if (in_tx && op != DbOp::Begin && op != DbOp::Commit && op != DbOp::Rollback)
             poisoned.insert(module);
+        // With the writer the turn is already given back (commit() or
+        // rollback() failed after that): the transaction is over, and
+        // nothing may release the turn a second time.
+        if (in_tx && tx_turn && (op == DbOp::Commit || op == DbOp::Rollback)) {
+            pinned_workers.erase(module);
+            poisoned.erase(module);
+        }
         co_return db_error(errmsg);
     }
 
@@ -513,8 +622,9 @@ lux::Task<void> rollback_pending_db(std::map<std::string, int>& pinned_workers,
         if (pool->has_writer()) {   // it runs on this loop (see await_db)
             long long n = 0;
             std::string err;
-            driver->exec(static_cast<size_t>(worker), "ROLLBACK", {}, n, err);
-            pool->release_tx_turn();
+            driver->exec(static_cast<size_t>(worker), "ROLLBACK TO lux_tx", {}, n, err);
+            driver->exec(static_cast<size_t>(worker), "RELEASE lux_tx", {}, n, err);
+            if (pool->tx_release(nullptr)) commit_group(pool, driver, static_cast<size_t>(worker));
             continue;
         }
         co_await DbAwaitable{pool, loop,
