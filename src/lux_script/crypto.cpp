@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <cstring>
 #include <sys/random.h>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace lux_script::crypto {
 
@@ -29,7 +32,7 @@ constexpr uint32_t kK[64] = {
 
 inline uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 
-void compress(uint32_t h[8], const uint8_t block[64]) {
+void compress_soft(uint32_t h[8], const uint8_t block[64]) {
     uint32_t w[64];
     for (int i = 0; i < 16; ++i) {
         w[i] = (uint32_t(block[i * 4]) << 24) | (uint32_t(block[i * 4 + 1]) << 16) |
@@ -61,6 +64,45 @@ void compress(uint32_t h[8], const uint8_t block[64]) {
     h[0] += a; h[1] += b; h[2] += c; h[3] += d;
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
+
+#if defined(__x86_64__)
+// SHA-256 on the CPU's SHA extensions (SHA-NI): several times the portable
+// rounds above. Picked at run time, so the binary still runs on CPUs without.
+__attribute__((target("sha,sse4.1,ssse3")))
+void compress_ni(uint32_t h[8], const uint8_t block[64]) {
+    const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+    __m128i tmp    = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(h)), 0xB1);
+    __m128i state1 = _mm_shuffle_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(h + 4)), 0x1B);
+    __m128i state0 = _mm_alignr_epi8(tmp, state1, 8);   // ABEF
+    state1         = _mm_blend_epi16(state1, tmp, 0xF0); // CDGH
+    const __m128i save0 = state0, save1 = state1;
+
+    __m128i m[4];
+    for (int i = 0; i < 4; ++i)
+        m[i] = _mm_shuffle_epi8(_mm_loadu_si128(reinterpret_cast<const __m128i*>(block + 16 * i)), mask);
+    for (int r = 0; r < 16; ++r) {
+        __m128i msg = _mm_add_epi32(m[r & 3], _mm_loadu_si128(reinterpret_cast<const __m128i*>(kK + 4 * r)));
+        state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+        state0 = _mm_sha256rnds2_epu32(state0, state1, _mm_shuffle_epi32(msg, 0x0E));
+        if (r < 12) {   // the next four schedule words replace the ones just used
+            __m128i t = _mm_add_epi32(_mm_sha256msg1_epu32(m[r & 3], m[(r + 1) & 3]),
+                                      _mm_alignr_epi8(m[(r + 3) & 3], m[(r + 2) & 3], 4));
+            m[r & 3] = _mm_sha256msg2_epu32(t, m[(r + 3) & 3]);
+        }
+    }
+    state0 = _mm_add_epi32(state0, save0);
+    state1 = _mm_add_epi32(state1, save1);
+    tmp    = _mm_shuffle_epi32(state0, 0x1B);
+    state1 = _mm_shuffle_epi32(state1, 0xB1);
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(h), _mm_blend_epi16(tmp, state1, 0xF0));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(h + 4), _mm_alignr_epi8(state1, tmp, 8));
+}
+const auto compress_impl = __builtin_cpu_supports("sha") && __builtin_cpu_supports("sse4.1") ? compress_ni : compress_soft;
+#else
+const auto compress_impl = compress_soft;
+#endif
+
+void compress(uint32_t h[8], const uint8_t block[64]) { compress_impl(h, block); }
 
 constexpr size_t kBlock = 64;
 
@@ -144,17 +186,37 @@ std::string pbkdf2_sha256(std::string_view password, std::string_view salt,
     std::memcpy(inner, kIV, sizeof inner); compress(inner, ipad);
     std::memcpy(outer, kIV, sizeof outer); compress(outer, opad);
     auto hmac = [&](std::string_view m) { return sha256_from(outer, kBlock, sha256_from(inner, kBlock, m)); };
+    // One HMAC of a 32-byte value, in words, no allocation: two compressions of a
+    // block that is the value, 0x80, zeros and the length (64 + 32 bytes = 768 bits).
+    auto hmac32 = [&](const uint32_t in[8], uint32_t out[8]) {
+        uint8_t blk[kBlock] = {};
+        auto fill = [&](const uint32_t v[8]) {
+            for (int i = 0; i < 8; ++i)
+                for (int b = 0; b < 4; ++b) blk[i * 4 + b] = static_cast<uint8_t>(v[i] >> (24 - 8 * b));
+        };
+        fill(in);
+        blk[32] = 0x80; blk[62] = 0x03; blk[63] = 0x00;   // 768 = 0x0300
+        uint32_t h[8]; std::memcpy(h, inner, sizeof h); compress(h, blk);
+        fill(h);
+        std::memcpy(out, outer, sizeof h); compress(out, blk);
+    };
 
     std::string out;
     for (uint32_t block = 1; out.size() < length; ++block) {
         std::string first(salt);
         for (int s = 24; s >= 0; s -= 8) first += static_cast<char>((block >> s) & 0xFF);
-        std::string u = hmac(first), t = u;
+        const std::string u0 = hmac(first);
+        uint32_t u[8], t[8];
+        for (int i = 0; i < 8; ++i)
+            u[i] = (uint32_t(uint8_t(u0[i * 4])) << 24) | (uint32_t(uint8_t(u0[i * 4 + 1])) << 16) |
+                   (uint32_t(uint8_t(u0[i * 4 + 2])) << 8) | uint32_t(uint8_t(u0[i * 4 + 3]));
+        std::memcpy(t, u, sizeof t);
         for (unsigned i = 1; i < iterations; ++i) {
-            u = hmac(u);
-            for (size_t j = 0; j < t.size(); ++j) t[j] ^= u[j];
+            hmac32(u, u);
+            for (int j = 0; j < 8; ++j) t[j] ^= u[j];
         }
-        out += t;
+        for (int i = 0; i < 8; ++i)
+            for (int b = 0; b < 4; ++b) out += static_cast<char>(t[i] >> (24 - 8 * b));
     }
     out.resize(length);
     return out;
