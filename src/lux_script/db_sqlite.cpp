@@ -127,6 +127,12 @@ public:
 
     bool configure(const std::map<std::string, std::string>& options,
                    std::string& error) override {
+        // SQLite counts every allocation under one process-wide mutex by default
+        // (memory statistics nobody here reads): with a connection per loop
+        // thread, that mutex was ~12% of the CPU of the forum crowd, in futex
+        // waits inside sqlite3Malloc. Must come before SQLite initializes; if
+        // something already did, it is refused and nothing changes.
+        sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0);
         auto it = options.find("file");
         if (it == options.end() || it->second.empty()) {
             error = "sqlite: missing 'file' in the configuration block";
