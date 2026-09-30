@@ -153,21 +153,32 @@ std::string sha256_from(const uint32_t start[8], size_t prefix, std::string_view
 std::string sha256(std::string_view data) { return sha256_from(kIV, 0, data); }
 
 std::string hmac_sha256(std::string_view key, std::string_view message) {
-    // RFC 2104: a key longer than the block is replaced by its hash.
-    std::string k(key);
-    if (k.size() > kBlock) k = sha256(k);
-    k.resize(kBlock, '\0');
-
-    std::string inner(kBlock, '\0'), outer(kBlock, '\0');
-    for (size_t i = 0; i < kBlock; ++i) {
-        inner[i] = static_cast<char>(static_cast<uint8_t>(k[i]) ^ 0x36);
-        outer[i] = static_cast<char>(static_cast<uint8_t>(k[i]) ^ 0x5c);
+    // RFC 2104: a key longer than the block is replaced by its hash. The two
+    // padded-key blocks are compressed once per key, not per call: a JWT
+    // secret never changes, and this halves the compressions of a short
+    // message. ponytail: 4 keys per thread, round-robin; a fifth just
+    // recomputes, as every call used to.
+    struct Pads { std::string key; uint32_t inner[8], outer[8]; bool used = false; };
+    thread_local Pads cache[4];
+    thread_local size_t next = 0;
+    Pads* p = nullptr;
+    for (auto& c : cache) if (c.used && c.key == key) { p = &c; break; }
+    if (!p) {
+        p = &cache[next++ % 4];
+        std::string k(key);
+        if (k.size() > kBlock) k = sha256(k);
+        k.resize(kBlock, '\0');
+        uint8_t ipad[kBlock], opad[kBlock];
+        for (size_t i = 0; i < kBlock; ++i) {
+            ipad[i] = static_cast<uint8_t>(k[i]) ^ 0x36;
+            opad[i] = static_cast<uint8_t>(k[i]) ^ 0x5c;
+        }
+        std::memcpy(p->inner, kIV, sizeof p->inner); compress(p->inner, ipad);
+        std::memcpy(p->outer, kIV, sizeof p->outer); compress(p->outer, opad);
+        p->key.assign(key);
+        p->used = true;
     }
-
-    inner.append(message);
-    std::string inner_hash = sha256(inner);
-    outer.append(inner_hash);
-    return sha256(outer);
+    return sha256_from(p->outer, kBlock, sha256_from(p->inner, kBlock, message));
 }
 
 std::string pbkdf2_sha256(std::string_view password, std::string_view salt,
