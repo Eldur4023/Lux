@@ -427,6 +427,12 @@ app:
     version   "1.0.0"
     port      8080
     templates "./templates"
+    host      "127.0.0.1"           # listen address (default 0.0.0.0)
+    headers:                        # added to every response; a handler's own header wins
+        "Content-Security-Policy" "default-src 'self'"
+        "Strict-Transport-Security" "max-age=31536000"
+    max_body "16MB"                 # request body cap (default 16MB; 512KB, 2GB, bytes or env()).
+                                    # Past 16MB only multipart uploads are accepted: they stream to a temp file
 
     static "/static" -> "./public"
     static "/"       -> "./dist" spa

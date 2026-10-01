@@ -77,10 +77,20 @@ inline std::optional<std::string> read_whole_file(const std::filesystem::path& p
 // `data` are the names —with their type, if known— the route will pass to
 // render(), and they take the first slots.  `dir` is the templates folder, to
 // resolve {% include %}.  Returns false if there were errors; they go in `diags`.
+// What the expressions inside {{ }} may call: the project's `fn`s, its classes
+// and enums, and the modules it imports (`{{ fmt_dt(x) }}`, `{{ time.format(...) }}`).
+struct TemplateEnv {
+    const FunctionSigs*          fns     = nullptr;
+    const ClassSigs*             classes = nullptr;
+    const std::set<std::string>* imports = nullptr;
+    const EnumSigs*              enums   = nullptr;
+};
+
 bool compile_template(const std::string& source, const std::string& file,
                         const std::string& dir,
                         const std::vector<TypedName>& data,
-                        DiagnosticBag& diags, Template& out);
+                        DiagnosticBag& diags, Template& out,
+                        const TemplateEnv& env = {});
 
 // Renders.  `values` arrives in the same order as the `data` it was compiled
 // with.  A runtime error —dividing by zero inside a {{ }}— comes out through

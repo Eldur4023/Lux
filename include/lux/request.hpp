@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <lux/core/event_loop.hpp>
 #include "cancel.hpp"
+#include "mapped_body.hpp"
 #include "cookies.hpp"
 #include "percent_encoding.hpp"
 
@@ -22,6 +23,10 @@ public:
     std::string path;
     std::string version;
     std::string body;
+    // Set instead of `body` when a multipart upload outgrew memory.
+    std::shared_ptr<const MappedBody> body_map;
+    std::string_view body_view() const { return body_map ? body_map->view() : std::string_view(body); }
+    std::string raw_query;  // the query string as sent, without the "?"
     std::string remote_ip;  // IPv4/IPv6 of the connected peer
 
     // Headers stored with lowercase keys, in arrival order. A flat vector:

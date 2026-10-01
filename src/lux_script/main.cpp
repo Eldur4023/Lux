@@ -1,4 +1,10 @@
 // The Lux binary: it reads .lux files and serves.
+#include "../http/http_parser.hpp"
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <malloc.h>
 #include <lux_script/schedule.hpp>
 #include <lux_script/project.hpp>
@@ -82,6 +88,16 @@ void usage() {
         "  --native        compiles to native code (g++) the functions that\n"
         "                  can be; turns off hot reload, same as --no-watch\n"
         "\n"
+        "       lux run <files|directory> -- <command> [args...]\n"
+        "\n"
+        "  Runs the `command \"name\":` block (after the `on start:` blocks)\n"
+        "  once, as a script: os.argv(), os.input(), os.exit(code)\n"
+        "\n"
+        "       lux test <files|directory> [-- name-filter]\n"
+        "\n"
+        "  Starts the app on a free port and runs its `test \"name\":` blocks\n"
+        "  against it (module `test`: ok, eq, contains, fail, base_url)\n"
+        "\n"
         "       lux restore <replica> <out.db>\n"
         "\n"
         "  Rebuilds a sqlite database from a `replicate` target of its\n"
@@ -151,11 +167,15 @@ void watch_loop(std::vector<fs::path> inputs) {
 
 } // namespace
 
+// `on start:` blocks still running: requests wait (503) until it is zero.
+std::atomic<int> g_starting{0};
+
 // One `every` block: armed on the main loop, never run twice at once.
 struct ScheduledTask : std::enable_shared_from_this<ScheduledTask> {
     std::string              path, label;
     lux_script::EverySpec    spec;
     lux::DispatchFn          dispatch;
+    bool                     once = false;      // `on start:`
     bool                     running = false;   // touched only on the loop's thread
 
     static long long now() {
@@ -196,12 +216,127 @@ struct ScheduledTask : std::enable_shared_from_this<ScheduledTask> {
                 lux::log().error("every \"", self->label, "\" failed: ", e.what());
             }
             self->running = false;
+            if (self->once) g_starting.fetch_sub(1);
         }(shared_from_this(), req, res);
         auto h = task.detach();
         h.promise().loop = &loop;
         h.resume();
     }
 };
+
+// `lux run files -- name args`: runs the `on start:` blocks, then the
+// `command "name":`, on an event loop of its own, and returns the exit code.
+static int run_command(const lux_script::Module& m, lux::DispatchFn dispatch,
+                       const std::string& name, std::vector<std::string> args) {
+    std::vector<std::string> paths;
+    std::string              cmd_path, known;
+    for (const auto& r : m.program.routes) {
+        if (r.method != "EVERY") continue;
+        if (r.every == "start") paths.push_back(r.pattern);
+        else if (r.every.rfind("cmd:", 0) == 0) {
+            known += (known.empty() ? "" : ", ") + r.every.substr(4);
+            if (r.every.substr(4) == name) cmd_path = r.pattern;
+        }
+    }
+    if (cmd_path.empty()) {
+        std::cerr << "lux run: " << (name.empty() ? "no command given" : "no command '" + name + "'")
+                  << (known.empty() ? "; the project declares none (command \"name\":)" : "; available: " + known) << "\n";
+        return 2;
+    }
+    paths.push_back(cmd_path);
+
+    auto& sm = lux_script::script_mode();
+    sm.on   = true;
+    sm.args = std::move(args);
+
+    lux::core::EventLoop loop;
+    int  rc = 0;
+    bool done = false;
+    auto task = [](lux::DispatchFn dispatch, std::vector<std::string> paths, int& rc, bool& done,
+                   lux::core::EventLoop& loop) -> lux::Task<void> {
+        for (size_t i = 0; i < paths.size(); ++i) {
+            lux::Request  req;
+            lux::Response res;
+            req.method = "EVERY"; req.path = paths[i]; req.remote_ip = "127.0.0.1"; req.loop = &loop;
+            try {
+                co_await dispatch(req, res);
+            } catch (const std::exception& e) {
+                std::cerr << "lux run: " << e.what() << "\n";
+                rc = 1;
+                break;
+            }
+            if (res.status_code() >= 400) {
+                std::cerr << "lux run: failed: " << res.body() << "\n";
+                rc = 1;
+                break;
+            }
+            if (lux_script::script_mode().exit_code) break;   // os.exit() in the middle
+            if (i + 1 == paths.size() && !res.body().empty()) std::cout << res.body() << "\n";
+        }
+        done = true;
+        loop.stop();
+    }(std::move(dispatch), std::move(paths), rc, done, loop);
+    auto h = task.detach();
+    h.promise().loop = &loop;
+    h.resume();
+    if (!done) loop.run();
+    std::cout.flush();
+    return rc ? rc : sm.exit_code;
+}
+
+std::atomic<int> g_test_rc{0};
+
+// `lux test`: once the server is up and its `on start:` blocks are done, runs
+// every `test "name":` (all, or those whose name contains `filter`), in the
+// order written, then stops the server. Runs on a thread of its own.
+static void run_tests(const lux_script::Module& m, lux::DispatchFn dispatch, std::string filter) {
+    while (g_starting.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    struct T { std::string name, path; };
+    std::vector<T> tests;
+    for (const auto& r : m.program.routes)
+        if (r.method == "EVERY" && r.every.rfind("test:", 0) == 0 && r.every.find(filter, 5) != std::string::npos)
+            tests.push_back({r.every.substr(5), r.pattern});
+    if (tests.empty()) std::cout << "lux test: no tests" << (filter.empty() ? "" : " matching '" + filter + "'") << "\n";
+
+    lux::core::EventLoop loop;
+    int  failed = 0;
+    bool done = false;
+    auto task = [](lux::DispatchFn dispatch, std::vector<T> tests, int& failed, bool& done,
+                   lux::core::EventLoop& loop) -> lux::Task<void> {
+        for (const auto& t : tests) {
+            lux::Request  req;
+            lux::Response res;
+            req.method = "EVERY"; req.path = t.path; req.remote_ip = "127.0.0.1"; req.loop = &loop;
+            lux_script::script_mode().failure.clear();
+            std::string why;
+            try {
+                co_await dispatch(req, res);
+                if (!lux_script::script_mode().failure.empty()) why = lux_script::script_mode().failure;
+                else if (res.status_code() >= 400) why = res.body();
+            } catch (const std::exception& e) {
+                why = e.what();
+            }
+            if (why.empty()) std::cout << "  ok    " << t.name << "\n";
+            else { ++failed; std::cout << "  FAIL  " << t.name << ": " << why << "\n"; }
+            std::cout.flush();
+        }
+        done = true;
+        loop.stop();
+    }(std::move(dispatch), tests, failed, done, loop);
+    auto h = task.detach();
+    h.promise().loop = &loop;
+    h.resume();
+    if (!done) loop.run();
+    std::cout << (failed ? "FAILED: " + std::to_string(failed) + " of " : "all ") << tests.size()
+              << (failed ? " tests\n" : " tests passed\n");
+    std::cout.flush();
+    g_test_rc = failed ? 1 : 0;
+    ::kill(::getpid(), SIGTERM);   // graceful shutdown of the server...
+    // ...but the tests' own http client may hold a keep-alive connection to it, which the
+    // drain would wait 30 s for: a moment's grace, then out with the result.
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::_Exit(g_test_rc.load());
+}
 
 int main(int argc, char** argv) {
     // glibc mmaps every allocation past 128 KB and unmaps it when freed: a
@@ -216,11 +351,21 @@ int main(int argc, char** argv) {
         return lux_script::restore_main({argv + 2, argv + argc});
 
     std::vector<std::string> args;
+    const bool run_mode  = argc >= 2 && std::string(argv[1]) == "run";
+    const bool test_mode = argc >= 2 && std::string(argv[1]) == "test";
+    std::string              command_name;
+    std::vector<std::string> command_args;
     bool check_only = false, watch = true, verbose = false, native = false, json_output = false;
     int  port_override = 0;
 
-    for (int i = 1; i < argc; ++i) {
+    if (run_mode || test_mode) watch = false;
+    for (int i = (run_mode || test_mode) ? 2 : 1; i < argc; ++i) {
         std::string a = argv[i];
+        if ((run_mode || test_mode) && a == "--") {   // everything after is the command and its arguments
+            if (i + 1 < argc) command_name = argv[++i];
+            for (++i; i < argc; ++i) command_args.push_back(argv[i]);
+            break;
+        }
         if      (a == "--check")    check_only = true;
         else if (a == "--json")     { check_only = true; json_output = true; }
         else if (a == "--no-watch") watch = false;
@@ -287,7 +432,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::cout << "lux: " << inputs.size() << " file(s), " << route_summary(*mod) << "\n";
+    if (!run_mode) std::cout << "lux: " << inputs.size() << " file(s), " << route_summary(*mod) << "\n";   // stdout is the command's
     if (native) {
         std::cout << "lux: --native: " << (mod->native ? mod->native->compiled() : 0)
                   << " function(s), " << (mod->native ? mod->native->routes_compiled() : 0)
@@ -320,7 +465,23 @@ int main(int argc, char** argv) {
     // One line per request, with its flush, costs close to 25% of the
     // throughput and multiplies median latency by 2.6: it is opt-in.
     // Startup, reloads and autotest are always shown.
-    if (verbose) app.use(lux::logger());
+    if (cfg.log.present) {
+        lux::LoggerOptions lo;
+        lo.file = !cfg.log.file.empty();
+        if (lo.file) {
+            const std::filesystem::path p(cfg.log.file);
+            lo.dir      = p.has_parent_path() ? p.parent_path().string() : ".";
+            lo.filename = p.filename().string();
+        }
+        lo.max_file_size = cfg.log.max_size;
+        lo.max_files     = cfg.log.keep;
+        lo.console       = cfg.log.console;
+        lo.level = cfg.log.level == "debug" ? lux::LogLevel::Debug : cfg.log.level == "warn" ? lux::LogLevel::Warn
+                 : cfg.log.level == "error" ? lux::LogLevel::Error : cfg.log.level == "off" ? lux::LogLevel::Off
+                 : lux::LogLevel::Info;
+        lux::log().configure(lo);
+    }
+    if (verbose || cfg.log.access) app.use(lux::logger());
 
     // The database module pools have their own threads that resume handlers by
     // posting to the event loop.  They have to be stopped and waited for while
@@ -359,6 +520,10 @@ int main(int argc, char** argv) {
     auto dispatch = [](lux::Request& req, lux::Response& res) -> lux::Task<void> {
         static constexpr auto done = []() -> lux::Task<void> { co_return; };
         const auto& mod = current_module();
+        if (g_starting.load() > 0 && req.method != "EVERY") {
+            res.status(503).header("Retry-After", "1").json_text(R"({"error":"starting"})");
+            return done();
+        }
         if (!mod) { res.status(503).json_text(R"({"error":"no module loaded"})"); return done(); }
 
         auto match = mod->router.match(req.method, req.path);
@@ -373,28 +538,56 @@ int main(int argc, char** argv) {
         req._hold  = mod;
         return (*match.handler)(req, res);
     };
+    if (test_mode) {
+        // Its own port, so a running instance of the app does not get in the way.
+        if (!port_override) {
+            const int s = ::socket(AF_INET, SOCK_STREAM, 0);
+            sockaddr_in a{};
+            a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            socklen_t len = sizeof a;
+            if (s >= 0 && ::bind(s, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0 &&
+                ::getsockname(s, reinterpret_cast<sockaddr*>(&a), &len) == 0)
+                port_override = ntohs(a.sin_port);
+            if (s >= 0) ::close(s);
+        }
+        lux_script::script_mode().base_url = "http://127.0.0.1:" + std::to_string(port_override ? port_override : cfg.port);
+    }
+    if (run_mode) return run_command(*mod, dispatch, command_name, std::move(command_args));
     app.any("/",  dispatch);
     app.any("/*", dispatch);
 
+    std::function<void(lux::core::EventLoop&)> boot;
     // `every` blocks: one timer each on the main loop, dispatched like a
     // request to the live module, so a hot reload changes what a task does
     // (a new task, or a new schedule, needs a restart).
     {
         std::vector<std::shared_ptr<ScheduledTask>> tasks;
         for (const auto& r : mod->program.routes) {
-            if (r.method != "EVERY") continue;
+            if (r.method != "EVERY" || r.every.rfind("cmd:", 0) == 0 || r.every.rfind("test:", 0) == 0) continue;   // commands and tests only run from `lux run` / `lux test`
             auto t = std::make_shared<ScheduledTask>();
             t->path = r.pattern;
             t->label = r.every;
             t->dispatch = dispatch;
-            lux_script::parse_every_spec(r.every, t->spec);
+            if (r.every == "start") { t->once = true; g_starting.fetch_add(1); }
+            else lux_script::parse_every_spec(r.every, t->spec);
             tasks.push_back(std::move(t));
         }
         if (!tasks.empty())
-            app.on_start([tasks](lux::core::EventLoop& loop) {
-                for (const auto& t : tasks) t->arm(loop, t->spec.next(ScheduledTask::now()));
-            });
+            boot = [tasks](lux::core::EventLoop& loop) {
+                for (const auto& t : tasks) {
+                    if (t->once) t->run(loop);
+                    else t->arm(loop, t->spec.next(ScheduledTask::now()));
+                }
+            };
     }
+    if (test_mode) {   // the tests start once the server is listening
+        auto inner = boot;
+        boot = [inner, mod, dispatch, filter = command_name](lux::core::EventLoop& loop) {
+            if (inner) inner(loop);
+            std::thread(run_tests, std::cref(*mod), lux::DispatchFn(dispatch), filter).detach();
+        };
+    }
+    if (boot) app.on_start(boot);
 
     // See App::set_route_probe's comment: router_ only ever holds the two
     // catch-all entries just above, so App::handle_request()'s own default
@@ -420,6 +613,8 @@ int main(int argc, char** argv) {
         if (it == mod->error_handlers.end()) return;   // no handler: whatever is there is left alone
 
         lux_script::NativeCtx ctx{req, res};
+        ctx.templates      = &mod->templates;   // render() inside the handler
+        ctx.functions      = &mod->functions;
         ctx.error_code     = code;
         // The real runtime-error text (division by zero, an out-of-range
         // index, ...) that project.cpp/native_gen.cpp already put in
@@ -445,6 +640,7 @@ int main(int argc, char** argv) {
         } else {
             ctx.error_message = "invalid request";
         }
+        if (!res.error_message().empty()) ctx.error_message = res.error_message();   // status(code, "why")
         ctx.error_messages = &lux_script::last_validation_messages();
 
         lux_script::VM  vm;
@@ -461,8 +657,10 @@ int main(int argc, char** argv) {
             res.header("Content-Type", "application/json; charset=utf-8")
                .send(result.value.to_json_text());
 
-        // The handler describes the failure; it cannot turn it into a success.
-        res.status(code);
+        // The handler describes the failure; it may redirect (a 3xx, e.g. a 401
+        // to the login page) or pick another error, but not turn it into a success.
+        const int now = res.status_code();
+        if (!((now >= 300 && now < 400) || (now >= 400 && now < 600))) res.status(code);
     });
 
     std::thread watcher;
@@ -478,10 +676,12 @@ int main(int argc, char** argv) {
         }).detach();
     }
 
-    app.run(port_override ? static_cast<uint16_t>(port_override)
-                          : static_cast<uint16_t>(cfg.port));
+    lux::http::g_max_body_size = cfg.max_body;
+    lux::global_headers() = cfg.headers;
+    app.run(test_mode ? std::string("127.0.0.1") : cfg.host, port_override ? static_cast<uint16_t>(port_override)
+                                    : static_cast<uint16_t>(cfg.port));
 
     g_stop.store(true);
     if (watcher.joinable()) watcher.join();
-    return 0;
+    return test_mode ? g_test_rc.load() : 0;
 }

@@ -146,6 +146,7 @@ void Parser::parse_declaration(Program& out) {
             parse_enum(out);
             return;
         case Tok::KwOn:
+            if (peek(1).kind == Tok::Ident && peek(1).text == "start") { parse_start(out); return; }
             parse_error(out);
             return;
         case Tok::KwFn:
@@ -172,6 +173,7 @@ void Parser::parse_declaration(Program& out) {
             // `every` is a keyword only here, so a variable may still be
             // called that.
             if (check(Tok::Ident) && peek().text == "every") { parse_every(out); return; }
+            if (check(Tok::Ident) && (peek().text == "command" || peek().text == "test") && peek(1).is(Tok::String)) { parse_command(out); return; }
             error_here("expected a declaration (get/post/... endpoint, or app)");
             synchronize();
             return;
@@ -296,13 +298,14 @@ void Parser::parse_every(Program& out) {
     RouteDecl r;
     r.loc    = advance().loc;                   // 'every'
     r.method = "EVERY";
-    if (!check(Tok::String)) {
+    // A string, or env("VAR", "5m") to set the beat at deploy time.
+    r.pattern_loc = peek().loc;
+    long long num = 0; bool flag = false; int kind = -1;
+    if (!config_value(r.every, num, flag, kind) || kind != 0) {
         error_here("expected the schedule after 'every', in quotes: \"30s\", \"5m\", \"1h\", \"1d\" or \"03:00\"");
         synchronize();
         return;
     }
-    r.pattern_loc = peek().loc;
-    r.every       = advance().text;
     EverySpec spec;
     if (!parse_every_spec(r.every, spec))
         diags_.error(r.pattern_loc, "'" + r.every + "' is not a schedule: an interval (\"30s\", \"5m\", "
@@ -311,6 +314,40 @@ void Parser::parse_every(Program& out) {
     for (const auto& other : out.routes) n += other.method == "EVERY";
     r.pattern = "/__every/" + std::to_string(n);
     if (!expect(Tok::Colon, "opening the task")) { synchronize(); return; }
+    r.body = parse_block();
+    out.routes.push_back(std::move(r));
+}
+
+// `command "name":` -- a task for `lux run <files> -- name args...`: the same
+// shape as `every`, run once from the command line instead of on a schedule.
+void Parser::parse_command(Program& out) {
+    RouteDecl r;
+    const Token kw = advance();                 // 'command' or 'test' (run by `lux test`)
+    r.loc    = kw.loc;
+    r.method = "EVERY";
+    r.pattern_loc = peek().loc;
+    r.every  = (kw.text == "test" ? "test:" : "cmd:") + advance().text;
+    for (const auto& other : out.routes)
+        if (other.every == r.every) diags_.error(r.pattern_loc, "'" + r.every + "' is defined twice");
+    int n = 0;
+    for (const auto& other : out.routes) n += other.method == "EVERY";
+    r.pattern = "/__every/" + std::to_string(n);
+    if (!expect(Tok::Colon, "opening the command")) { synchronize(); return; }
+    r.body = parse_block();
+    out.routes.push_back(std::move(r));
+}
+
+// `on start:` is an `every` that runs once, as the server comes up.
+void Parser::parse_start(Program& out) {
+    RouteDecl r;
+    r.loc    = advance().loc;                   // 'on'
+    advance();                                  // 'start'
+    r.method = "EVERY";
+    r.every  = "start";
+    int n = 0;
+    for (const auto& other : out.routes) n += other.method == "EVERY";
+    r.pattern = "/__every/" + std::to_string(n);
+    if (!expect(Tok::Colon, "opening the start block")) { synchronize(); return; }
     r.body = parse_block();
     out.routes.push_back(std::move(r));
 }
@@ -600,8 +637,17 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
         if (!check(Tok::String)) { error_here("env() expects the name in quotes"); return false; }
         Token name_tok = advance();
         const std::string& name = name_tok.text;
+        // env("VAR", "fallback"): used, without the warning, when VAR is unset.
+        std::string fallback;
+        bool has_fallback = false;
+        if (match(Tok::Comma)) {
+            if (!check(Tok::String)) { error_here("the fallback of env() is a string in quotes"); return false; }
+            fallback = advance().text;
+            has_fallback = true;
+        }
         expect(Tok::RParen, "closing env()");
         const char* v = std::getenv(name.c_str());
+        if (!v && has_fallback) { text = fallback; kind = 0; return true; }
         // Without this, a forgotten environment variable turns into "" with
         // nobody noticing until production: for session/jwt an empty secret
         // fails closed (it is treated the same as "not configured"), but the
@@ -619,6 +665,33 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
         return true;
     }
     return false;
+}
+
+// A size: bytes, "512KB", "16MB", "2GB" or env("VAR"). Reports its own errors.
+bool Parser::size_config(const std::string& key, size_t& out) {
+    SourceLoc   loc = peek().loc;
+    std::string text; long long number = 0; bool flag = false; int kind = -1;
+    if (!config_value(text, number, flag, kind) || kind == 2) {
+        diags_.error(loc, key + ": expected a size such as 16MB or 2GB");
+        return false;
+    }
+    unsigned long long n = 0, mult = 1;
+    if (kind == 1) n = number < 0 ? 0 : number;
+    else {
+        size_t pos = 0;
+        try { n = std::stoull(text, &pos); } catch (...) { pos = std::string::npos; }
+        std::string u = pos == std::string::npos ? "?" : text.substr(pos);
+        u.erase(0, u.find_first_not_of(' '));
+        for (auto& ch : u) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+        if (u.empty() || u == "B") mult = 1;
+        else if (u == "KB" || u == "K") mult = 1ull << 10;
+        else if (u == "MB" || u == "M") mult = 1ull << 20;
+        else if (u == "GB" || u == "G") mult = 1ull << 30;
+        else n = 0;
+    }
+    if (n == 0 || n > (1ull << 40) / mult) { diags_.error(loc, key + ": invalid size"); return false; }
+    out = static_cast<size_t>(n * mult);
+    return true;
 }
 
 void Parser::parse_app(Program& out) {
@@ -691,6 +764,57 @@ void Parser::parse_app(Program& out) {
                 } else {
                     diags_.error(port_loc, "expected a port number");
                 }
+            } else if (k == "host") {
+                std::string text; long long number = 0; bool flag = false; int kind = -1;
+                if (!config_value(text, number, flag, kind) || kind != 0)
+                    error_here("host: expected an address in quotes, e.g. \"127.0.0.1\"");
+                else out.app.host = text;
+            } else if (k == "log") {
+                expect(Tok::Colon, "after 'log'");
+                skip_newlines();
+                if (!expect(Tok::Indent, "opening the log block")) break;
+                out.app.log.present = true;
+                while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+                    skip_newlines();
+                    if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+                    if (!check(Tok::Ident)) { error_here("expected a key"); advance(); continue; }
+                    SourceLoc   lk_loc = peek().loc;
+                    std::string lk = advance().text;
+                    if (lk == "max_size") { size_config("log max_size", out.app.log.max_size); skip_newlines(); continue; }
+                    std::string text; long long number = 0; bool flag = false; int kind = -1;
+                    if (!config_value(text, number, flag, kind)) {
+                        error_here("invalid value: expected a string, a number, true/false or env(\"VAR\")");
+                        skip_to_eol();
+                    } else if (lk == "file" && kind == 0)    out.app.log.file = text;
+                    else if (lk == "level" && kind == 0 &&
+                             (text == "debug" || text == "info" || text == "warn" || text == "error" || text == "off"))
+                        out.app.log.level = text;
+                    else if (lk == "keep" && kind == 1)       out.app.log.keep = static_cast<int>(number);
+                    else if (lk == "console" && kind == 2)    out.app.log.console = flag;
+                    else if (lk == "access" && kind == 2)     out.app.log.access = flag;
+                    else diags_.error(lk_loc, "log: unknown key or wrong value for '" + lk + "' (file, level, max_size, keep, console, access)");
+                    skip_newlines();
+                }
+                match(Tok::Dedent);
+            } else if (k == "headers") {
+                expect(Tok::Colon, "after 'headers'");
+                skip_newlines();
+                if (!expect(Tok::Indent, "opening the headers block")) break;
+                while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+                    skip_newlines();
+                    if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+                    if (!check(Tok::String)) { error_here("expected a header name in quotes"); advance(); continue; }
+                    std::string name = advance().text;
+                    std::string text; long long number = 0; bool flag = false; int kind = -1;
+                    if (!config_value(text, number, flag, kind) || kind != 0) {
+                        error_here("expected the header value in quotes");
+                        skip_to_eol();
+                    } else out.app.headers.emplace_back(std::move(name), std::move(text));
+                    skip_newlines();
+                }
+                match(Tok::Dedent);
+            } else if (k == "max_body") {
+                size_config("max_body", out.app.max_body);
             } else if (k == "docs")    { out.app.docs    = true; }
             else if   (k == "health")  { out.app.health  = true; }
             else if   (k == "metrics") { out.app.metrics = true; }

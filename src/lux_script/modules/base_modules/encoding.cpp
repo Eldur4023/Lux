@@ -127,9 +127,22 @@ Value fn_url_parse(NativeCtx& c, std::vector<Value>& a, std::string& e) {
     return Value::dict(std::move(d));
 }
 
+
+Value fn_base32_encode(NativeCtx&, std::vector<Value>& a, std::string&) {
+    return Value::str(crypto::base32_encode(a[0].as_str()));
+}
+
+Value fn_base32_decode(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    std::string out;
+    if (!crypto::base32_decode(a[0].as_str(), out)) { error = "encoding.base32_decode(): invalid base32"; return Value::null(); }
+    return Value::str(std::move(out));
+}
+
 } // namespace
 
 LUX_MODULE(encoding, {
+    {"base32_encode", "s>s",   fn_base32_encode},
+    {"base32_decode", "s>s",   fn_base32_decode},
     {"base64_encode", "s|b>s", fn_base64_encode},
     {"base64_decode", "s>s",   fn_base64_decode},
     {"hex_encode",    "s>s",   fn_hex_encode},

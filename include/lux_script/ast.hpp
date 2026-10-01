@@ -191,10 +191,25 @@ struct StaticMount {
     SourceLoc   loc;
 };
 
+// app: log: -- the logger's file, level and rotation, and the access log.
+struct LogConfig {
+    bool        present = false;
+    std::string file;                    // empty: console only
+    std::string level   = "info";        // debug | info | warn | error | off
+    size_t      max_size = 10u * 1024 * 1024;   // rotate the file at this size
+    int         keep    = 0;             // rotated files kept (0 = all)
+    bool        console = true;
+    bool        access  = false;         // one line per request (same as --verbose)
+};
+
 struct AppDecl {
     std::string              name;
     std::string              version;
     int                      port = 8080;
+    LogConfig                log;
+    std::string              host = "0.0.0.0";
+    std::vector<std::pair<std::string, std::string>> headers;   // sent on every response
+    size_t                   max_body = 16u * 1024 * 1024;   // request body cap, bytes
     std::string              templates_dir = "./templates";
     std::vector<StaticMount> statics;
     bool                     docs = false, health = false, metrics = false;

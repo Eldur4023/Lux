@@ -2791,6 +2791,7 @@ public:
                 const std::string n = std::to_string(n_try_++);
                 std::string r = "bool l__caught" + n + " = false;\n" + pad(indent) + "std::string l__error" + n + ";\n";
                 r += pad(indent) + "try {\n" + block(s.body, indent + 1) + pad(indent) + "} catch (const LuxNativeError&) {\n";
+                r += pad(indent + 1) + "if (std::string_view(g_lux_native_error) == lux_script::kAbortMessage) throw;   // abort() is not catchable\n";
                 r += pad(indent + 1) + "l__caught" + n + " = true;\n" + pad(indent + 1) + "l__error" + n + " = g_lux_native_error;\n";
                 r += pad(indent) + "}\n" + pad(indent) + "if (l__caught" + n + ") {\n";
                 if (!s.name.empty()) {
@@ -2985,7 +2986,7 @@ public:
             return "res.status(" + codigo + ").header(\"Location\", " + expr(*a[0].value) +
                    ").send(\"\")";
         }
-        if (e.call_name == "send_file") return "res.send_file(" + expr(*a[0].value) + ")";
+        if (e.call_name == "send_file") return "lux_script::send_file_checked(req, res, " + expr(*a[0].value) + ")";
         return ""; // inalcanzable: es_llamada_respuesta() ya lo descarto
     }
 
@@ -3932,7 +3933,13 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     }
 
     for (size_t i = 0; i < params.size(); ++i) gen.registrar(static_cast<int>(i), params[i].nombre);
-    cuerpo += gen.block(body, 1);
+    // abort() raises LuxNativeError(kAbortMessage) from any depth; here it ends the
+    // body like falling off its end, so the closing below (transaction, session,
+    // 204 if nothing was written) still runs -- it cannot run inside a catch.
+    cuerpo += "    try {\n" + gen.block(body, 1) +
+              "    } catch (const LuxNativeError&) {\n"
+              "        if (std::string_view(g_lux_native_error) != lux_script::kAbortMessage) throw;\n"
+              "    }\n";
     // A diferencia de una funcion, aqui NO hace falta bloque_siempre_retorna:
     // la funcion generada es `void`/`Task<void>`, asi que "caer al final"
     // es C++ perfectamente valido en los dos casos (nunca comportamiento

@@ -122,7 +122,8 @@ int only_public(void*, char* ip, char*, int, int) {
 
 struct Options {
     long         timeout_ms = kDefaultTimeoutMs;
-    bool         public_only = false, form = false;
+    bool         public_only = false, form = false, follow = true;
+    std::string  cookies;   // "a=1; b=2" sent with every hop
     std::string  save_to;
     const Value* files = nullptr;
 };
@@ -139,6 +140,12 @@ bool read_options(const Value* v, Options& o, const std::string& method, std::st
     }
     if (auto it = d.find("public_only"); it != d.end()) o.public_only = it->second.truthy();
     if (auto it = d.find("form"); it != d.end()) o.form = it->second.truthy();
+    if (auto it = d.find("follow_redirects"); it != d.end()) o.follow = it->second.truthy();
+    if (auto it = d.find("cookies"); it != d.end() && it->second.is_dict())
+        for (const auto& [k, v] : it->second.as_dict()) {
+            if (!o.cookies.empty()) o.cookies += "; ";
+            o.cookies += k + "=" + v.to_string();
+        }
     if (auto it = d.find("save_to"); it != d.end()) o.save_to = it->second.to_string();
     if (auto it = d.find("files"); it != d.end() && it->second.is_dict()) o.files = &it->second;
     return true;
@@ -253,7 +260,11 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, opts.timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, opts.timeout_ms);
     if (opts.public_only) curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, only_public);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, opts.follow ? 1L : 0L);
+    // Cookie engine on: cookies set along a redirect chain travel with the next
+    // hop, and come back in the result's `cookies`.
+    curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
+    if (!opts.cookies.empty()) curl_easy_setopt(curl, CURLOPT_COOKIE, opts.cookies.c_str());
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, kMaxRedirects);
     // A redirect is server-controlled: only ever to http/https, never
     // file:// or whatever else curl speaks. (The bitmask form keeps older
@@ -278,8 +289,24 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     long status = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 
+    // Netscape jar lines: domain, flag, path, secure, expiry, name, value.
+    Value::Dict jar;
+    curl_slist* list = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_COOKIELIST, &list);
+    for (curl_slist* c = list; c; c = c->next) {
+        std::string line = c->data;
+        int tabs = 0;
+        size_t pos = 0, start = 0;
+        for (; tabs < 5 && (pos = line.find('\t', start)) != std::string::npos; ++tabs) start = pos + 1;
+        const size_t sep = line.find('\t', start);
+        if (tabs == 5 && sep != std::string::npos)
+            jar[line.substr(start, sep - start)] = Value::str(line.substr(sep + 1));
+    }
+    curl_slist_free_all(list);
+
     Value::Dict out;
     out["status"] = Value::integer(status);
+    out["cookies"] = Value::dict(std::move(jar));
     out["headers"] = Value::dict(std::move(response_headers.headers));
     // Parsed when it is JSON, the raw text otherwise; with save_to, the
     // body is in the file and `saved` says how many bytes.

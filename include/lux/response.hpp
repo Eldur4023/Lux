@@ -19,6 +19,13 @@
 
 namespace lux {
 
+// Headers added to every response (set once at startup from `app: headers:`).
+inline std::vector<std::pair<std::string, std::string>>& global_headers() {
+    static std::vector<std::pair<std::string, std::string>> h;
+    return h;
+}
+
+
 class Response {
     struct State {
         int         status_code = 200;
@@ -33,6 +40,7 @@ class Response {
         // sendfile path: when set, build() emits only headers; the connection
         // uses sendfile(2) to stream the file body directly to the socket.
         std::string     sendfile_path;
+        std::string     error_message;   // status(code, "why"): what `error.message` shows
         std::uintmax_t  sendfile_size = 0;
         // Already open (the static mounts resolve it with openat2): the
         // connection sends this one instead of opening the path again.
@@ -283,6 +291,8 @@ public:
     std::uintmax_t         sendfile_size()  const { return state_->sendfile_size; }
     bool                   is_committed()   const { return state_->body_committed; }
     bool                   route_body()     const { return state_->route_body; }
+    const std::string&     error_message()  const { return state_->error_message; }
+    Response&              set_error_message(std::string m) { state_->error_message = std::move(m); return *this; }
     Response&              mark_route_body()      { state_->route_body = true; return *this; }
     bool                   sse_started()    const { return state_->sse_started; }
     void                   mark_sse_started()    { state_->sse_started = true; }
@@ -370,7 +380,7 @@ private:
     }
     static bool has_header_ci(
         const std::vector<std::pair<std::string, std::string>>& headers,
-        const char* name) {
+        std::string_view name) {
         for (const auto& [k, v] : headers) if (iequals(k, name)) return true;
         return false;
     }
@@ -409,8 +419,12 @@ private:
             out += k; out += ": "; out += v; out += "\r\n";
         };
         for (const auto& [k, v] : state_->headers) line(k, v);
-        for (const auto& [k, v] : kDefaults)
+        // app: headers: -- on every response, under what the handler set.
+        const auto& configured = global_headers();
+        for (const auto& [k, v] : configured)
             if (!has_header_ci(state_->headers, k)) line(k, v);
+        for (const auto& [k, v] : kDefaults)
+            if (!has_header_ci(state_->headers, k) && !has_header_ci(configured, k)) line(k, v);
         for (const auto& c : state_->cookies) line("Set-Cookie", c);
     }
 
@@ -423,6 +437,7 @@ private:
             case 206: return "Partial Content";
             case 301: return "Moved Permanently";
             case 302: return "Found";
+            case 303: return "See Other";
             case 304: return "Not Modified";
             case 307: return "Temporary Redirect";
             case 308: return "Permanent Redirect";

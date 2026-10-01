@@ -23,6 +23,7 @@
 #include <fstream>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 namespace lux_script {
 
@@ -90,12 +91,39 @@ Value fn_render_tpl(NativeCtx& ctx, std::vector<Value>& args, std::string& error
     return Value::null();
 }
 
+// status(code) or status(code, "message"): the message is what `error.message`
+// holds in an `on error` handler; without a handler it is the JSON body.
+Value fn_status(NativeCtx& ctx, std::vector<Value>& args, std::string& error);
+
+// abort(404), abort(403, "why"), abort(redirect("/login", 303)), abort(render(...)):
+// writes the answer (the argument call already did, when it is one) and stops the
+// handler right there, from any depth of helper calls.
+Value fn_abort(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!args.empty() && !args[0].is_null()) {
+        if (!args[0].is_int()) {
+            error = "abort() expects a status code, or a call that writes the response: abort(redirect(\"/login\"))";
+            return Value::null();
+        }
+        fn_status(ctx, args, error);
+        if (!error.empty()) return Value::null();
+    }
+    error = kAbortMessage;
+    return Value::null();
+}
+
 Value fn_status(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
-    if (!args[0].is_int()) {
-        error = "status() expects an integer status code";
+    if (!args[0].is_int() || (args.size() > 1 && !args[1].is_str())) {
+        error = "status() expects an integer status code and, optionally, a message string";
         return Value::null();
     }
-    ctx.res.status(static_cast<int>(args[0].as_int())).send("");
+    if (args.size() > 1) {
+        Value::Dict d;
+        d["error"] = args[1];
+        ctx.res.set_error_message(args[1].as_str()).status(static_cast<int>(args[0].as_int()))
+            .header("Content-Type", "application/json; charset=utf-8").send(Value::dict(std::move(d)).to_json_text());
+    } else {
+        ctx.res.status(static_cast<int>(args[0].as_int())).send("");
+    }
     ctx.response_written = true;
     return Value::null();
 }
@@ -127,10 +155,85 @@ Value fn_redirect(NativeCtx& ctx, std::vector<Value>& args, std::string& error) 
     return Value::null();
 }
 
+namespace {
+std::string quoted(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) { if (c == '"' || c == '\\') out += '\\'; if (c != '\r' && c != '\n') out += c; }
+    return out + "\"";
+}
+
+std::string percent(const std::string& s) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : s) {
+        if (std::isalnum(c) || c == '.' || c == '-' || c == '_') out += static_cast<char>(c);
+        else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+    }
+    return out;
+}
+
+// Is `etag` listed in an If-None-Match value ("*", or a comma list, W/ ignored)?
+bool etag_listed(const std::string& header, const std::string& etag) {
+    if (header == "*") return true;
+    size_t pos = 0;
+    while (pos < header.size()) {
+        size_t comma = header.find(',', pos);
+        if (comma == std::string::npos) comma = header.size();
+        std::string t = header.substr(pos, comma - pos);
+        t.erase(0, t.find_first_not_of(' '));
+        t.erase(t.find_last_not_of(' ') + 1);
+        if (t.rfind("W/", 0) == 0) t.erase(0, 2);
+        if (t == etag) return true;
+        pos = comma + 1;
+    }
+    return false;
+}
+} // namespace
+
+} // namespace (the file-wide anonymous one: send_file_checked is public)
+
+void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
+                       const std::string* root, const std::string& filename, bool inline_) {
+    if (root) res.serve_file_from(*root, path); else res.send_file(path);
+    const std::string file = res.sendfile_path();
+    if (file.empty()) return;   // an error response (403, 404, ...)
+
+    if (!filename.empty())
+        res.header("Content-Disposition", std::string(inline_ ? "inline" : "attachment") +
+                   "; filename=" + quoted(filename) + "; filename*=UTF-8''" + percent(filename));
+
+    struct stat st{};
+    if (::stat(file.c_str(), &st) != 0) return;
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "\"%llx-%llx\"",
+                  static_cast<unsigned long long>(st.st_mtim.tv_sec) * 1000000000ull + static_cast<unsigned long long>(st.st_mtim.tv_nsec),
+                  static_cast<unsigned long long>(st.st_size));
+    const std::string etag = buf;
+    res.header("ETag", etag);
+    if (!res.header_value("Cache-Control")) res.header("Cache-Control", "no-cache");   // revalidate with the ETag every time
+    const std::string* inm = req.header("if-none-match");
+    if (inm && etag_listed(*inm, etag)) {
+        res.take_body();
+        res.status(304).send("");
+    }
+}
+
+namespace {
+
 Value fn_send_file(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) {
         error = "send_file() expects a path as a string";
         return Value::null();
+    }
+    // send_file(path[, root][, options]): options is {filename, inline}.
+    Value opts;
+    if (args.size() > 1 && args.back().is_dict()) { opts = args.back(); args.pop_back(); }
+    std::string filename;
+    bool        inline_ = false;
+    if (opts.is_dict()) {
+        const auto& d = opts.as_dict();
+        if (auto it = d.find("filename"); it != d.end()) filename = it->second.to_string();
+        if (auto it = d.find("inline"); it != d.end()) inline_ = it->second.truthy();
     }
     if (args.size() == 2) {
         // Two-argument form: send_file(path, root) confines `path` inside
@@ -144,9 +247,9 @@ Value fn_send_file(NativeCtx& ctx, std::vector<Value>& args, std::string& error)
             error = "the second argument of send_file() is the root directory";
             return Value::null();
         }
-        ctx.res.serve_file_from(args[1].as_str(), args[0].as_str());
+        send_file_checked(ctx.req, ctx.res, args[0].as_str(), &args[1].as_str(), filename, inline_);
     } else {
-        ctx.res.send_file(args[0].as_str());
+        send_file_checked(ctx.req, ctx.res, args[0].as_str(), nullptr, filename, inline_);
     }
     ctx.response_written = true;
     return Value::null();
@@ -403,6 +506,21 @@ Value fn_state_set(NativeCtx&, std::vector<Value>& args, std::string& error) {
     return args[1];
 }
 
+Value fn_state_hit(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str() || !args[1].is_int() || args[1].as_int() < 1) {
+        error = "state.hit() expects the key and the window in milliseconds";
+        return Value::null();
+    }
+    return Value::integer(SharedState::instance().hit(args[0].as_str(), args[1].as_int()));
+}
+
+// Milliseconds left, -1 if the key never expires, null if it does not exist.
+Value fn_state_ttl(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "state.ttl() expects the key as a string"; return Value::null(); }
+    const long long t = SharedState::instance().ttl(args[0].as_str());
+    return t == -2 ? Value::null() : Value::integer(t);
+}
+
 Value fn_state_remove(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!args[0].is_str()) { error = "state.remove() expects the key as a string"; return Value::null(); }
     return Value::boolean(SharedState::instance().remove(args[0].as_str()));
@@ -469,6 +587,59 @@ Value fn_req_ip(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.remote_ip);
 }
 
+std::string hdr(NativeCtx& ctx, std::string_view name) {
+    const std::string* v = ctx.req.header(name);
+    return v ? *v : std::string();
+}
+
+// Every value of a repeated field (checkboxes sharing a name), in order.
+Value::List all_values(const std::string& encoded, const std::string& name) {
+    Value::List out;
+    lux::for_each_form_pair(encoded, [&](std::string k, std::string v) {
+        if (k == name) out.push_back(Value::str(std::move(v)));
+    });
+    return out;
+}
+
+Value fn_form_list(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "form_list() expects the name as a string"; return Value::null(); }
+    Value::List out;
+    if (ctx.parts) {   // multipart: its text fields
+        for (const auto& p : *ctx.parts)
+            if (p.name == args[0].as_str() && p.filename.empty()) out.push_back(Value::str(std::string(p.body)));
+    } else if (hdr(ctx, "content-type").rfind("application/x-www-form-urlencoded", 0) == 0) {
+        out = all_values(ctx.req.body, args[0].as_str());
+    }
+    return Value::list(std::move(out));
+}
+
+Value fn_query_list(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!args[0].is_str()) { error = "query_list() expects the name as a string"; return Value::null(); }
+    return Value::list(all_values(ctx.req.raw_query, args[0].as_str()));
+}
+
+Value fn_req_query(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(ctx.req.raw_query);
+}
+
+Value fn_req_host(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    return Value::str(hdr(ctx, "host"));
+}
+
+// "https" only when a proxy on this machine says so (TLS ends at the proxy):
+// from anyone else the header is just a claim.
+Value fn_req_scheme(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    const auto& ip = ctx.req.remote_ip;
+    const bool local = ip == "127.0.0.1" || ip == "::1";
+    return Value::str(local && hdr(ctx, "x-forwarded-proto") == "https" ? "https" : "http");
+}
+
+Value fn_req_headers(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    Value::Dict d;
+    for (const auto& [k, v] : ctx.req.headers) d[k] = Value::str(v);
+    return Value::dict(std::move(d));
+}
+
 // The raw, unparsed request body -- added for webhook signature
 // verification (Stripe/GitHub/etc. HMAC-sign the exact bytes they sent, so
 // a handler has to hash the SAME bytes, not a re-serialization of whatever
@@ -482,16 +653,17 @@ Value fn_req_body(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.body);
 }
 
-const std::array<NativeDef, 53> kNatives = {{
+const std::array<NativeDef, 62> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
     {"json",      1, 1,  fn_json},
     {"render",    1, 2,  fn_render},
     {"__render_tpl", 2, 2, fn_render_tpl},
-    {"status",    1, 1,  fn_status},
+    {"status",    1, 2,  fn_status},
+    {"abort",     0, 2,  fn_abort},
     {"redirect",  1, 2,  fn_redirect},
-    {"send_file", 1, 2,  fn_send_file},
+    {"send_file", 1, 3,  fn_send_file},
     // Utilities
     {"len",       1, 1,  fn_len},
     {"str",       1, 1,  fn_str},
@@ -529,11 +701,19 @@ const std::array<NativeDef, 53> kNatives = {{
     {"__state_get",     1, 2,  fn_state_get},
     {"__state_set",     2, 3,  fn_state_set},
     {"__state_remove",  1, 1,  fn_state_remove},
+    {"__state_hit",     2, 2,  fn_state_hit},
+    {"__state_ttl",     1, 1,  fn_state_ttl},
     {"__log_info",      1, 1,  fn_log_info},
     {"__log_warn",      1, 1,  fn_log_warn},
     {"__log_error",     1, 1,  fn_log_error},
     {"cookie",          1, 2,  fn_cookie},
     {"form",            1, 2,  fn_form},
+    {"form_list",       1, 1,  fn_form_list},
+    {"query_list",      1, 1,  fn_query_list},
+    {"__req_query",     0, 0,  fn_req_query},
+    {"__req_host",      0, 0,  fn_req_host},
+    {"__req_scheme",    0, 0,  fn_req_scheme},
+    {"__req_headers",   0, 0,  fn_req_headers},
     // Asynchronous: with no fn, the handler's driver resolves them.
     {"sleep",     1, 1,  nullptr, true},
     {"__ws_recv", 0, 0,  nullptr, true},
@@ -618,9 +798,35 @@ void SharedState::set(const std::string& key, Value v, long long ttl_ms) {
     data_[key] = Entry{std::move(v), ttl_ms > 0 ? now + ttl_ms : 0};
 }
 
+long long SharedState::hit(const std::string& key, long long window_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const long long now = now_ms();
+    if (hits_.size() > 4096 && ++writes_ % 256 == 0)
+        std::erase_if(hits_, [now](auto& kv) { return kv.second.times.empty() || now - kv.second.times.back() >= kv.second.window_ms; });
+    Hits& h = hits_[key];
+    h.window_ms = window_ms;
+    while (!h.times.empty() && now - h.times.front() >= window_ms) h.times.pop_front();
+    h.times.push_back(now);
+    return static_cast<long long>(h.times.size());
+}
+
+long long SharedState::ttl(const std::string& key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const long long now = now_ms();
+    if (auto h = hits_.find(key); h != hits_.end()) {
+        auto& t = h->second.times;
+        while (!t.empty() && now - t.front() >= h->second.window_ms) t.pop_front();
+        if (!t.empty()) return t.front() + h->second.window_ms - now;
+    }
+    auto it = live(key, now);
+    if (it == data_.end()) return -2;
+    return it->second.expires_ms ? it->second.expires_ms - now : -1;
+}
+
 bool SharedState::remove(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return data_.erase(key) > 0;
+    const bool had = hits_.erase(key) > 0;
+    return data_.erase(key) > 0 || had;
 }
 
 int native_id(const std::string& name) {
@@ -1179,8 +1385,9 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                 error = "save() only exists on an uploaded File";
                 return Value::null();
             }
-            if (!want(args.size(), 1, 1, name, error)) return Value::null();
+            if (!want(args.size(), 1, 2, name, error)) return Value::null();
             if (!args[0].is_str()) { error = "save() expects the directory as a string"; return Value::null(); }
+            if (args.size() > 1 && !args[1].is_str()) { error = "save() expects the file name as a string"; return Value::null(); }
 
             size_t i = static_cast<size_t>(idx->second.as_int());
             if (!ctx.parts || i >= ctx.parts->size()) {
@@ -1189,7 +1396,8 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             }
 
             auto  fn   = d.find("filename");
-            std::string base = safe_name(fn == d.end() ? "" : fn->second.to_string());
+            // save(dir, name) picks the name (still cut to a bare file name); the client's is the default.
+            std::string base = safe_name(args.size() > 1 ? args[1].as_str() : fn == d.end() ? "" : fn->second.to_string());
             std::string dir  = args[0].as_str();
             if (!dir.empty() && dir.back() != '/') dir += "/";
 
@@ -1245,7 +1453,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                 return Value::null();
             }
 
-            const std::string& bytes = (*ctx.parts)[i].body;
+            std::string_view bytes = (*ctx.parts)[i].body;
             size_t written = 0;
             while (written < bytes.size()) {
                 ssize_t n = ::write(fd, bytes.data() + written, bytes.size() - written);
@@ -1358,7 +1566,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
         {"chunk", 1, 1, "List"},
     });
     static const std::vector<BuiltinMethod> kDict = with_own({
-        {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 1, "string"},
+        {"has", 1, 1, "bool"},   {"keys", 0, 0, "List"}, {"save", 1, 2, "string"},
         {"sha256", 0, 0, "string"},
         {"values", 0, 0, "List"}, {"get", 1, 2, "Json"}, {"remove", 1, 1, "bool"},
         {"merge", 1, 1, nullptr}, {"items", 0, 0, "List"},
@@ -1377,7 +1585,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 33> kMembers = {{
+const std::array<MemberMap, 39> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -1403,11 +1611,17 @@ const std::array<MemberMap, 33> kMembers = {{
     {"request", "method",  "__req_method"},
     {"request", "ip",      "__req_ip"},
     {"request", "body",    "__req_body"},
+    {"request", "query",   "__req_query"},
+    {"request", "host",    "__req_host"},
+    {"request", "scheme",  "__req_scheme"},
+    {"request", "headers", "__req_headers"},
     {"state",   "incr",    "__state_incr"},
     {"state",   "decr",    "__state_decr"},
     {"state",   "get",     "__state_get"},
     {"state",   "set",     "__state_set"},
     {"state",   "remove",  "__state_remove"},
+    {"state",   "hit",     "__state_hit"},
+    {"state",   "ttl",     "__state_ttl"},
     {"log",     "info",    "__log_info"},
     {"log",     "warn",    "__log_warn"},
     {"log",     "error",   "__log_error"},

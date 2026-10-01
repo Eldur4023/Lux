@@ -1,0 +1,102 @@
+# Regression cases for the things a real application (Drive) needed from Lux:
+# abort(), status(code, message), render()/redirect in `on error`, form_list(),
+# state.hit/ttl, List parameters in SQL, `on start:`, TOTP/SHA-1/base32, time zones,
+# templates calling fn, app headers, send_file validators, http follow_redirects.
+import hash
+import encoding
+import otp
+import time
+import sqlite
+
+app:
+    templates "./wishlist-templates"
+    headers:
+        "X-Wishlist" "yes"
+    sqlite:
+        file "./wishlist-tests.db"
+
+on start:
+    await sqlite.exec("drop table if exists t")
+    await sqlite.exec("create table t (id integer primary key, name text)")
+    for int i in range(1, 6):
+        await sqlite.exec("insert into t (id, name) values (?, ?)", i, "n" + str(i))
+
+on error 401:
+    return redirect("/hello")
+
+on error:
+    return render("err.html", c={ "code": error.code, "msg": error.message })
+
+fn string fmt_size(int n):
+    return n < 1024 ? str(n) + " B" : str(int(n / 1024)) + " KB"
+
+fn string guard(string who):
+    if who == "":
+        abort(401)
+    if who == "banned":
+        abort(403, "banned user")
+    return who
+
+get endpoint("/hello"):
+    return { "hello": "world" }
+
+get endpoint("/abort", string who = ""):
+    string x = ""
+    try:
+        x = guard(who)
+    catch e:
+        return { "caught": e.message }
+    return { "who": x }
+
+get endpoint("/msg"):
+    return status(409, "already there")
+
+get endpoint("/form"):
+    return { "q": query_list("t"), "rq": request.query, "scheme": request.scheme }
+
+post endpoint("/form"):
+    return { "scopes": form_list("scopes"), "last": form("scopes") }
+
+get endpoint("/hit"):
+    int n = state.hit("wl", 60000)
+    return { "n": n, "ttl_ok": state.ttl("wl") > 0 }
+
+get endpoint("/in"):
+    List<int> ids = [2, 4, 9]
+    List<Json> r = await sqlite.query("select name from t where id in (?) and name != ? order by id", ids, "n4")
+    List<int> none = []
+    List<Json> e = await sqlite.query("select name from t where id in (?)", none)
+    return { "r": r, "e": e }
+
+get endpoint("/crypto"):
+    return {
+        "sha1": hash.sha1("abc"),
+        "hmac": hash.hmac_sha1("Jefe", "what do ya want for nothing?"),
+        "b32": encoding.base32_encode("foobar"),
+        "totp": otp.code("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", 59),
+        "verify_bad": otp.verify("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "000000")
+    }
+
+get endpoint("/pw"):
+    string a = await hash.argon2("hunter2")
+    string b = await hash.bcrypt("hunter2", 4)
+    return {
+        "a_ok": await hash.verify("hunter2", a), "a_bad": await hash.verify("nope", a),
+        "b_ok": await hash.verify("hunter2", b), "b_bad": await hash.verify("nope", b),
+        "ref_bcrypt": await hash.verify("U*U", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW")
+    }
+
+get endpoint("/tz"):
+    int summer = 1782820800000
+    int winter = 1768478400000
+    return {
+        "summer": time.format(summer, "%H:%M", "Europe/Madrid"),
+        "winter": time.format(winter, "%H:%M", "Europe/Madrid"),
+        "dst_day": time.format(time.start_of(1774782000000, "day", "Europe/Madrid"), "%Y-%m-%d %H:%M", "Europe/Madrid")
+    }
+
+get endpoint("/tpl"):
+    return render("fn.html", n=5000, ts=1782820800000)
+
+get endpoint("/file"):
+    return send_file("wishlist.lux", ".", { "filename": "w.lux" })

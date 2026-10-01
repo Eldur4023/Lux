@@ -26,7 +26,8 @@ struct MultipartPart {
     std::string name;            // Content-Disposition: form-data; name="..."
     std::string filename;        // present only for file-input fields
     std::string content_type;    // Content-Type of this part (may be empty)
-    std::string body;            // raw bytes of this part
+    std::string_view body;       // raw bytes of this part, a view into the Request body
+                                 // (valid while the Request lives)
 
     // All part headers, lowercase-keyed.
     std::unordered_map<std::string, std::string> headers;
@@ -72,7 +73,7 @@ parse_multipart(const Request& req) {
 
     // RFC 2046 §5.1.1: delimiter = "--" + boundary
     const std::string delim     = "--" + boundary_val;
-    const std::string& body     = req.body;
+    std::string_view body        = req.body_view();
 
     // ── 2. Find the first delimiter ──────────────────────────────────────────
     size_t pos = body.find(delim);
@@ -99,7 +100,7 @@ parse_multipart(const Request& req) {
         std::string_view part_body  = part_view.substr(blank + 4);
 
         MultipartPart part;
-        part.body = std::string(part_body);
+        part.body = part_body;
 
         // ── Parse part headers ─────────────────────────────────────────────
         std::string hdr_str(hdr_block);

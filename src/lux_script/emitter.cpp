@@ -1929,7 +1929,8 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
     }
 
     Template tpl;
-    if (!compile_template(*source, name, templates_->dir, keys, diags_, tpl)) {
+    if (!compile_template(*source, name, templates_->dir, keys, diags_, tpl,
+                          TemplateEnv{functions_, classes_, imports_, enums_})) {
         failed_ = true;
         return;
     }

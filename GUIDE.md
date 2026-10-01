@@ -65,6 +65,35 @@ The argument decides what gets compiled, with no surprises:
 | `--autotest` | Walk the endpoints on startup and on every reload |
 | `--autotest=all` | Also include POST/PUT/PATCH/DELETE |
 
+`lux run <files> -- <command> [args]` runs a `command` (§4, *Commands*) and `lux test <files> [-- filter]` the `test` blocks (*Tests*), both below.
+
+### Tests: `lux test`
+
+`lux test ./my-app` starts the app on a free port and runs its `test "name":` blocks against it —
+real HTTP, the real routes, the real `on start:`. Inside a test, `test.eq`, `test.ok`,
+`test.contains` and `test.fail` end it at the first failure; `test.base_url()` is the instance. The
+`http` client can see a `303` (`"follow_redirects": false`) and keep cookies (`"cookies"`), which is
+what a login flow needs.
+
+```lux
+test "login redirects to the dashboard":
+    Json r = await http.post(test.base_url() + "/login", { "user": "ana", "pw": "x" },
+                             null, { "form": true, "follow_redirects": false })
+    test.eq(r["status"], 303)
+    test.eq(r["headers"]["location"], "/")
+    test.ok(r["cookies"]["session"] != null)
+```
+
+```
+  ok    login redirects to the dashboard
+  FAIL  uploads over quota: expected 413, got 200
+FAILED: 1 of 2 tests
+```
+
+`lux test ./my-app -- upload` runs only the tests whose name contains `upload`. Exit code `0` if all
+pass, `1` otherwise. Tests run in the order written, against the same instance and databases, so point
+`sqlite: file` at a scratch path (`env("DB", "./test.db")`) and clean it in an `on start:`.
+
 ### Self-test
 
 With `--autotest`, after startup and after **every successful reload**, Lux talks to itself
@@ -154,7 +183,20 @@ app:
     name      "My application"
     version   "1.0.0"
     port      8080
+    host      "127.0.0.1"     # listen address; default 0.0.0.0
+    max_body  "16MB"          # request body cap (see §16 for bigger uploads)
     templates "./templates"
+
+    log:                      # optional; without it, console only
+        file     "./logs/app.log"
+        level    "info"           # debug | info | warn | error | off
+        max_size "10MB"           # rotate at this size: app.1.log, app.2.log, ...
+        keep     5                # rotated files kept (0 = all)
+        console  true
+        access   false           # one line per request (what --verbose does)
+
+    headers:                  # on every response; a handler's own header of the same name wins
+        "Content-Security-Policy" "default-src 'self'"
 
     static "/static" -> "./public"
     static "/"       -> "./dist" spa
@@ -279,6 +321,18 @@ every "03:00":                      # daily, 03:00 UTC
         await mail.send({ "to": r["email"], "subject": "Your digest", "text": "..." })
 ```
 
+`on start:` is a task that runs once, as the server comes up: create tables, check the configuration.
+Requests get a `503` (`Retry-After: 1`) until every `on start:` block has finished, so no route sees a
+half-initialised app. A failing block is logged and the server starts anyway.
+
+```lux
+on start:
+    await sqlite.exec("create table if not exists notes (id integer primary key, body text)")
+```
+
+The schedule may be `env("VAR", "5m")`: resolved at compile time, with the fallback used when the
+variable is not set (`env()` takes that second argument anywhere `app:` accepts it).
+
 The schedule is an interval (`"100ms"`, `"30s"`, `"5m"`, `"2h"`, `"1d"`) or a daily UTC time (`"HH:MM"`);
 anything else is a compile error. An interval's first run is one interval after startup. A run
 that is still going when the next one is due makes that one skip, with a warning. A task that
@@ -288,6 +342,35 @@ request, so `query()`, `header()`, `session` and the like are empty in it.
 Tasks run in the process, on one event loop: with several instances of the app behind a load
 balancer, each instance runs them. A hot reload changes what a task does; adding a task or
 changing its schedule needs a restart.
+
+### Commands: `lux run`
+
+A `command` is a task you run by hand — create an admin, reset a password, recompute a table —
+with the whole project at hand (`lib/`, the `app:` databases, `on start:`):
+
+```lux
+command "createuser":
+    List<string> a = os.argv()                       # what follows the command's name
+    if len(a) < 1:
+        os.eprint("usage: createuser EMAIL")
+        os.exit(2)                                   # the exit code, from any function
+    string pw = await os.input_secret("Password: ")  # no echo; os.input("prompt") echoes
+    await sqlite.exec("insert into users (email, pw) values (?, ?)", a[0], await hash.password(pw))
+    os.print("created " + a[0])
+
+command "listusers":
+    return await sqlite.query("select email from users")   # a returned value is printed (JSON)
+```
+
+```
+lux run app/ -- createuser ana@example.com
+lux run app/ -- listusers | jq .
+```
+
+The `on start:` blocks run first, then the command; nothing listens on a port. Exit code `0`, `1` if
+the command failed (the error goes to stderr), `2` for an unknown command, or the one given to
+`os.exit(n)`. stdout holds only the command's own output (`os.print`, a returned value), so it pipes.
+The prompts go to stderr.
 
 ## 5. Parameters
 
@@ -332,6 +415,12 @@ valid empty spelling of a number or a boolean to reject, and this is the ordinar
 browser submits "nothing was entered" for one. A `bool` parameter also accepts `"on"`/`"off"`
 alongside `"true"`/`"false"`/`"1"`/`"0"`, since `"on"` is the literal value an HTML
 `<input type="checkbox">` sends when checked and given no explicit `value=`.
+
+More of the request: `request.query` (the raw query string, without the `?`), `request.host`,
+`request.scheme` (`"https"` only when a proxy on the same machine sends `X-Forwarded-Proto: https`) and
+`request.headers` (a `Dict`, lowercase keys). A field that repeats (several checkboxes with one
+`name`) gives its last value with `form("x")` / `query("x")`; `form_list("x")` and `query_list("x")`
+return every value, in order, as a `List<string>` (empty if absent).
 
 `request.body` holds the raw, unparsed request body as a `string`, whatever the
 `Content-Type`. Use it instead of a `class` body parameter when the shape is not fixed
@@ -583,6 +672,31 @@ get endpoint("/file/:name", string name):
     string? path = resolve_path(name)
     return path == null ? status(404) : send_file(path).header("Content-Type", "text/plain")
 ```
+
+### `abort()`: stop the request from any function
+
+A helper cannot return a response, but it can end the request: `abort(...)` writes the answer and
+stops the whole handler, from any depth of calls. A `try` does not catch it.
+
+```lux
+fn User require_user():
+    Json u = session.user
+    if u == null:
+        abort(redirect("/login", 303))          # any call that writes the response
+    return u
+
+fn void can(Json node, string perm):
+    if not allowed(node, perm):
+        abort(403, "no tienes permiso")         # status + message (see `on error`)
+
+get endpoint("/files/:id", int id):
+    User me = require_user()                    # one line instead of a guard block per route
+    ...
+```
+
+`abort(404)`, `abort(403, "message")`, `abort(redirect(...))`, `abort(render(...))`, or `abort()`
+alone when the response was already written (an empty one is a `204`). Open database transactions
+are rolled back, as at the end of any request.
 
 ---
 
@@ -889,6 +1003,16 @@ await mysql.query(   "select title from articles where id = ?", id)
 await postgres.query("select title from articles where id = ?", id)
 ```
 
+**A `List` is a list of values.** Given for one `?`, it becomes one `?` per item, so a variable
+number of values stays a parameter: `where id in (?)` with `[1, 2, 3]` runs `where id in (?, ?, ?)`
+(an empty list becomes `NULL`, which matches nothing). Optional filters are the same idea:
+build the `where` from fixed fragments and pass only the values that apply.
+
+```lux
+List<int> ids = [2, 4, 9]
+List<Json> rows = await sqlite.query("select name from files where id in (?) and owner = ?", ids, me)
+```
+
 Three details of the translation, which only matter in postgres:
 
 - A query written with `$1` comes out untouched, so code written before this keeps working.
@@ -1084,6 +1208,8 @@ get endpoint("/counter"):
 | | |
 |---|---|
 | `state.incr(key)` / `state.incr(key, n)` / `state.incr(key, n, ttl_ms)` | Adds and returns the new value; a TTL starts when the key is created |
+| `state.hit(key, window_ms)` | Sliding window: records a hit now and returns how many the key had in the last `window_ms` (this one included) |
+| `state.ttl(key)` | Milliseconds until the key expires (for a `hit` key: until the oldest hit leaves the window, the `Retry-After` once over the limit); `-1` if it never expires, `null` if absent |
 | `state.decr(key)` / `state.decr(key, n)` | Subtracts |
 | `state.get(key)` / `state.get(key, default)` | Reads |
 | `state.set(key, value)` / `state.set(key, value, ttl_ms)` | Writes; with a TTL the key expires |
@@ -1108,11 +1234,13 @@ It lives in process memory: it is lost on restart, and is not shared between mac
 
 ## 16. File uploads
 
+Uploads over 16 MB: raise `max_body` in `app:` (e.g. `max_body "2GB"`). Past 16 MB the body is spooled to a temp file (`$TMPDIR`) as it arrives, so memory stays flat; only `multipart/form-data` bodies may exceed 16 MB, and a request whose `Content-Length` is over the cap gets a 413 before its body is read.
+
 ```lux
 post endpoint("/avatar", File image):
     require image.content_type.starts_with("image/") else status(415)
     require image.size <= 5 * 1024 * 1024             else status(413)
-    string name = image.save("./public/uploads")
+    string name = image.save("./public/uploads")        # or image.save(dir, "avatar.png") to choose the name
     return { "url": "/static/uploads/" + name }
 
 post endpoint("/gallery", List<File> photos):
@@ -1164,7 +1292,13 @@ Without a code, it is the global handler. **It only covers 400–599**: with a 2
 handler has already written the response, and replacing it would be a response filter — that
 is, middleware, which Lux delegates to the proxy on purpose.
 
-The status code is preserved. If the handler writes nothing, the default body is kept.
+The status code is preserved, unless the handler redirects (a 3xx) or picks another error code.
+`on error 401: return redirect("/login")` sends the browser to the login page. If the handler writes
+nothing, the default body is kept.
+
+`status(403, "no tienes permiso")` carries a message: it is the JSON body (`{"error": "..."}`) when
+no handler replaces it, and `error.message` inside `on error`, so one handler can tell a missing
+permission from a blocked network. `render()` and the project's `fn`s work inside a handler.
 
 A handler covers the errors Lux produces (a route that does not exist, a body that fails
 validation, a crash) and a bare `status(...)`, such as `require ... else status(403)`. It does
@@ -1328,6 +1462,12 @@ above is exactly `select id, title\nfrom posts\norder by date desc`.
 
 The escapes are the same as in a normal string: `\n`, `\t`, `\r`, `\0`, `\"`, `\\`.
 
+### Division
+
+`/` on two `int`s gives an `int` when it divides exactly (`6 / 3` is `3`) and a `float` when it does
+not (`7 / 2` is `3.5`). For an integer quotient — a page count, an index for `slice()` — truncate it:
+`int(7 / 2)` is `3` (or `math.floor(7 / 2)`, which also rounds negatives down). `%` is the remainder.
+
 ### Truthiness
 
 **False** are `null`, `false`, `0`, `0.0`, `""`, and the empty list and dictionary. It is
@@ -1418,7 +1558,8 @@ string role = age >= 18 ? "adult" : "minor"
 |---|---|
 | `text(v)` `html(v)` `json(v)` | Write the response |
 | `render(template, k=v, ...)` | Renders a Lux Script template |
-| `status(code)` `redirect(target[, code])` `send_file(path)` | |
+| `status(code[, message])` `redirect(target[, code])` | |
+| `send_file(path[, root][, options])` | Adds an `ETag` (and answers `304` to `If-None-Match`) and `Cache-Control: no-cache`; `options` `{"filename": "report.pdf", "inline": false}` sets `Content-Disposition` |
 | `len(v)` | Size of a string, List or Dict |
 | `str(v)` `int(v)` `float(v)` | Explicit conversion |
 | `range(n)` `range(start, end)` `range(start, end, step)` | A `List<int>`, Python's `range()` shape |
@@ -1485,6 +1626,11 @@ The check continues down the chain, because every method knows what it returns:
 This reaches **inside the templates** too, because `render()` passes its argument types to
 the template compiler: `{{ who.uppercase() }}` is a `lux --check` error, with the
 template's file and line.
+
+A template expression can also call the project's own `fn`s and the modules the project imports:
+`{{ fmt_size(f["size"]) }}`, `{{ time.format(f["mtime"], "%d/%m/%Y", "Europe/Madrid") }}` — so the
+formatting does not have to be precomputed in the handler and carried in the data. They are checked
+at compile time like any other call.
 
 Where the type is not known —the variable of a `{% for %}`, a field of a `Json`— nothing is
 checked and dispatch stays at run time, as before.
@@ -1621,15 +1767,28 @@ catch e:
     return { "cached": true, "items": state.get("last_items", []) }
 ```
 
+### otp
+
+Two-factor codes for authenticator apps (TOTP, RFC 6238: SHA-1, 6 digits, 30 s).
+
+| | |
+|---|---|
+| `new_secret()` | A random base32 secret (160 bits) to store per user |
+| `uri(secret, account[, issuer])` | The `otpauth://` URI to show as a QR code |
+| `code(secret[, unix_seconds])` | The code for now, or for a given moment |
+| `verify(secret, code[, window])` | `true` if the code is valid; `window` steps of 30 s either side are tolerated (default 1) |
+
 ### hash
 
 | | |
 |---|---|
 | `sha256(s)` `hmac_sha256(key, msg)` | Hex digests |
+| `sha1(s)` `hmac_sha1(key, msg)` | Hex digests, only for protocols that still speak SHA-1 (TOTP, legacy webhooks) |
 | `equal(a, b)` | Constant-time comparison — use it for signatures and tokens, never `==` |
 | `random_hex(n)` `token([n])` | Random: `n` bytes as hex; a URL-safe token (default 32 bytes) for API keys and one-time links |
 | `uuid()` `uuid(7)` | UUID v4, or v7 (time-ordered — kinder to a database index) |
 | **await** `password(pw)` `verify(pw, stored)` | PBKDF2-HMAC-SHA256, 600k iterations, in Django's `pbkdf2_sha256$...` format |
+| **await** `argon2(pw)` `bcrypt(pw[, cost])` | Argon2id (3 passes, 64 MiB, 4 lanes) or bcrypt (`$2b$`, cost 12). `verify()` also accepts `$argon2…` and `$2a/2b/2y$` hashes, so users from another stack keep their passwords. They load the system's `libargon2.so.1` / `libcrypt.so.1` on first use (`apt install libargon2-1`); without them only these hashes fail |
 | `sign(value, key)` `unsign(token, key[, max_age_s])` | A tamper-proof token carrying any value; `unsign` is `null` if it was altered or is older than `max_age_s` |
 
 ```lux
@@ -1648,7 +1807,7 @@ get endpoint("/reset/:token", string token):
 
 ### encoding
 
-`base64_encode(s[, url_safe])` `base64_decode(s)` (either alphabet) · `hex_encode(s)`
+`base64_encode(s[, url_safe])` `base64_decode(s)` (either alphabet) · `base32_encode(s)` `base32_decode(s)` · `hex_encode(s)`
 `hex_decode(s)` · `url_encode(s)` `url_decode(s)` (RFC 3986: a space is `%20`) ·
 `query_encode(dict)` (`{"q": "a b", "tag": ["x", "y"]}` → `q=a%20b&tag=x&tag=y`) ·
 `query_decode(s)` · `html_escape(s)` · `url_parse(url)` → `{scheme, host, port, path, query,
@@ -1686,16 +1845,17 @@ return redirect(next)
 ### time
 
 A time is a plain `int`: milliseconds since the Unix epoch, UTC. So "in 5 minutes" is
-`time.now() + 5 * 60 * 1000`. Where a function takes an offset it is a fixed number of minutes
-(`60` for CET), never a server timezone.
+`time.now() + 5 * 60 * 1000`. Where a function takes a zone it is a fixed offset in minutes
+(`60` for CET) or an IANA name (`"Europe/Madrid"`, daylight saving included; needs the system's
+`tzdata`), never an implicit server timezone.
 
 | | |
 |---|---|
 | `now()` `now_seconds()` | |
-| `format(ts, fmt[, offset])` `format_iso(ts)` | strftime formats |
+| `format(ts, fmt[, zone])` `format_iso(ts)` | strftime formats |
 | `parse(s, fmt)` `parse_iso(s)` | `null` when it does not match. `parse_iso` takes a bare date, `T` or a space, milliseconds and `Z`/`+02:00` |
-| `parts(ts[, offset])` | `{year, month, day, hour, minute, second, weekday (1 = Monday), yearday}` |
-| `start_of(ts, unit[, offset])` | Start of the `"day"`, `"week"`, `"month"` or `"year"` |
+| `parts(ts[, zone])` | `{year, month, day, hour, minute, second, weekday (1 = Monday), yearday}` |
+| `start_of(ts, unit[, zone])` | Start of the `"day"`, `"week"`, `"month"` or `"year"` |
 | `add_months(ts, n)` | Calendar months: Jan 31 + 1 is Feb 28/29 |
 | `ago(ts[, from, lang])` | `"3 minutes ago"`, `"in 2 hours"`; `lang` `"es"` gives `"hace 3 minutos"` |
 
@@ -1736,11 +1896,15 @@ The handle-based `parse`/`rows`/`columns`/`row_count`/`to_csv`/`close` still wor
 | | |
 |---|---|
 | `getenv(name[, default])` `cwd()` | |
+| `argv()` `exit([code])` `print(x)` `eprint(x)` | For `command`s (`lux run`): the arguments, the exit code, stdout / stderr |
+| **await** `input([prompt])` `input_secret([prompt])` | A line from stdin (`null` at the end); the prompt goes to stderr, `input_secret` does not echo |
 | `path_join(...)` `path_basename` `path_dirname` `path_ext` `path_abs` | |
 | `path_exists` `is_dir` `is_file` `file_size` `mtime_ms` | `-1` size/time for a missing path |
 | `mime(path)` | `"image/jpeg"` for `"IMG_01.JPG"` |
 | `list_dir(dir[, recursive])` `glob("uploads/*.jpg")` | Names (paths relative to `dir` when recursive), sorted glob matches |
 | `make_dir` `remove_file` `remove_dir(dir[, recursive])` | `remove_dir` refuses a non-empty directory unless told |
+| `disk_usage(path)` | `{total, free, used}` bytes of the filesystem holding `path` |
+| `chmod(path, mode)` `umask(mask)` | Modes are octal strings (`"640"`); `umask` returns the previous mask |
 | `temp_dir()` `temp_file([suffix])` | A new private (0600) temporary file |
 | **await** `read_file` `write_file` `append_file` `copy_file(from, to[, overwrite])` `move(from, to)` | `move` works across filesystems |
 | **await** `run(cmd[, args, options])` | `{status, stdout, stderr}`; options `input` (stdin), `cwd`, `env` (a `null` value unsets), `timeout_ms` (default 15 s, up to 120 s) |
@@ -1851,6 +2015,8 @@ parsed when it is JSON. A `Dict` body is sent as JSON. `options`:
 |---|---|
 | `timeout_ms` | Default 15 s, up to 120 s |
 | `public_only` | Refuse private, loopback and link-local addresses (checked on the address connected to, redirects included) — for a URL that comes from a user |
+| `follow_redirects` | `false` to get the `3xx` itself (and its `location` header) instead of following it; default `true` |
+| `cookies` | `{name: value}` sent as the `Cookie` header on every hop; the result's `cookies` holds what the server set (also across redirects) |
 | `form` | Send the `Dict` body as `application/x-www-form-urlencoded` (OAuth token endpoints) |
 | `files` | `{field: path}`: a `multipart/form-data` upload, the body `Dict`'s fields alongside |
 | `save_to` | Stream the response body to this file (up to 4 GB; in memory the cap is 16 MB); the result has `saved` bytes |

@@ -632,6 +632,41 @@ fails_to_compile "'Response' as a return type" "$HERE/cases/bad/response_type.lu
 # whose type it knows -- but not that `s - 1` adds up.
 # That is already covered by the "no coercion" test of the language suite.
 
+# ─── What a real application needed (abort, errors, forms, state, SQL, ...) ─────────
+cd "$HERE/cases"
+next_server "$HERE/cases/wishlist.lux" /hello || exit 1
+check "on start: ran before the first request"  GET /in 200 '"r":[{"name":"n2"}],"e":[]'
+check "abort() from a helper, status only"  GET '/abort?who=' 302
+check "abort() with a message reaches on error" GET '/abort?who=banned' 403 'Oops 403: banned user'
+check "abort() is not catchable by try"     GET '/abort?who=banned' 403 'Oops 403'
+check "abort() lets a normal call through"  GET '/abort?who=ana' 200 '"who":"ana"'
+check "status(code, message) feeds error.message" GET /msg 409 'Oops 409: already there'
+check "render() works inside on error"      GET /nowhere 404 'Oops 404'
+check "query_list / request.query"          GET '/form?t=1&t=2&z' 200 '"q":["1","2"],"rq":"t=1\u0026t=2\u0026z"'
+check "request.scheme without a proxy"      GET /form 200 '"scheme":"http"'
+check "state.hit counts a sliding window"   GET /hit 200 '"n":1,"ttl_ok":true'
+check "state.hit counts again"              GET /hit 200 '"n":2'
+check "a List is a list of SQL parameters"  GET /in 200 '"r":[{"name":"n2"}],"e":[]'
+check "sha1, hmac_sha1, base32, totp (RFC vectors)" GET /crypto 200 '"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","hmac":"effcdf6ae5eb2fa2d27416d5f184df9c259a7c79","b32":"MZXW6YTBOI","totp":"287082","verify_bad":false'
+check "argon2 / bcrypt hash and verify"     GET /pw 200 '"a_ok":true,"a_bad":false,"b_ok":true,"b_bad":false,"ref_bcrypt":true'
+check "IANA time zones with daylight saving" GET /tz 200 '"summer":"14:00","winter":"13:00","dst_day":"2026-03-29 00:00"'
+check "a template calls project fns and modules" GET /tpl 200 '4 KB | 14:00'
+check "send_file adds Content-Disposition"  GET /file 200
+for h in 'x-wishlist: yes'; do
+    curl -sI "http://127.0.0.1:$PORT/hello" | tr -d '\r' | grep -qi "^$h" && ok "app: headers on every response" || fail "app: headers" "$h" "missing"
+done
+disp=$(curl -sI "http://127.0.0.1:$PORT/file" | tr -d '\r' | grep -i '^content-disposition')
+[[ "$disp" == *'attachment; filename="w.lux"'* ]] && ok "send_file Content-Disposition" || fail "send_file Content-Disposition" "attachment; filename=\"w.lux\"" "$disp"
+etag=$(curl -sI "http://127.0.0.1:$PORT/file" | tr -d '\r' | grep -i '^etag' | cut -d' ' -f2)
+code=$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" "http://127.0.0.1:$PORT/file")
+[ "$code" = 304 ] && ok "send_file answers 304 to If-None-Match" || fail "send_file 304" "304" "$code"
+# A body past 16 MB is refused at once by its Content-Length; the cap is configurable.
+head -c 20000000 /dev/zero > "$TMP/big.bin"
+code=$(curl -s -o /dev/null -w '%{http_code}' --data-binary @"$TMP/big.bin" "http://127.0.0.1:$PORT/form")
+[ "$code" = 413 ] && ok "a body over max_body is a 413" || fail "max_body" "413" "$code"
+rm -f "$HERE/cases/wishlist-tests.db"*
+cd "$HERE/.."
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 summary

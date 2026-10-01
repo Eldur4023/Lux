@@ -152,6 +152,74 @@ std::string sha256_from(const uint32_t start[8], size_t prefix, std::string_view
 
 std::string sha256(std::string_view data) { return sha256_from(kIV, 0, data); }
 
+std::string sha1(std::string_view data) {
+    auto rol = [](uint32_t v, int n) { return (v << n) | (v >> (32 - n)); };
+    uint32_t h[5] = {0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0};
+    std::string m(data);
+    m += '\x80';
+    while (m.size() % 64 != 56) m += '\0';
+    const uint64_t bits = uint64_t(data.size()) * 8;
+    for (int s = 56; s >= 0; s -= 8) m += static_cast<char>(bits >> s);
+    for (size_t off = 0; off < m.size(); off += 64) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t(uint8_t(m[off + i * 4])) << 24) | (uint32_t(uint8_t(m[off + i * 4 + 1])) << 16) |
+                   (uint32_t(uint8_t(m[off + i * 4 + 2])) << 8) | uint32_t(uint8_t(m[off + i * 4 + 3]));
+        for (int i = 16; i < 80; ++i) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i) {
+            uint32_t f, k;
+            if      (i < 20) { f = (b & c) | (~b & d);           k = 0x5A827999; }
+            else if (i < 40) { f = b ^ c ^ d;                    k = 0x6ED9EBA1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d);  k = 0x8F1BBCDC; }
+            else             { f = b ^ c ^ d;                    k = 0xCA62C1D6; }
+            uint32_t t = rol(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rol(b, 30); b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    std::string out;
+    for (uint32_t v : h) for (int s = 24; s >= 0; s -= 8) out += static_cast<char>(v >> s);
+    return out;
+}
+
+std::string hmac_sha1(std::string_view key, std::string_view message) {
+    std::string k(key);
+    if (k.size() > 64) k = sha1(k);
+    k.resize(64, '\0');
+    std::string ipad(64, '\0'), opad(64, '\0');
+    for (size_t i = 0; i < 64; ++i) { ipad[i] = k[i] ^ 0x36; opad[i] = k[i] ^ 0x5c; }
+    return sha1(opad + sha1(ipad + std::string(message)));
+}
+
+std::string base32_encode(std::string_view raw) {
+    static constexpr char kAlpha[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    std::string out;
+    uint32_t buf = 0; int bits = 0;
+    for (unsigned char ch : raw) {
+        buf = (buf << 8) | ch; bits += 8;
+        while (bits >= 5) { out += kAlpha[(buf >> (bits - 5)) & 31]; bits -= 5; }
+    }
+    if (bits > 0) out += kAlpha[(buf << (5 - bits)) & 31];
+    return out;
+}
+
+bool base32_decode(std::string_view text, std::string& out) {
+    out.clear();
+    uint32_t buf = 0; int bits = 0;
+    for (char ch : text) {
+        int v;
+        if (ch >= 'A' && ch <= 'Z') v = ch - 'A';
+        else if (ch >= 'a' && ch <= 'z') v = ch - 'a';
+        else if (ch >= '2' && ch <= '7') v = ch - '2' + 26;
+        else if (ch == ' ' || ch == '=' || ch == '-') continue;
+        else return false;
+        buf = (buf << 5) | uint32_t(v); bits += 5;
+        if (bits >= 8) { out += static_cast<char>((buf >> (bits - 8)) & 0xFF); bits -= 8; }
+    }
+    return true;
+}
+
 std::string hmac_sha256(std::string_view key, std::string_view message) {
     // RFC 2104: a key longer than the block is replaced by its hash. The two
     // padded-key blocks are compressed once per key, not per call: a JWT

@@ -258,6 +258,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->version      = std::move(req_parsed.version);
     req_ptr->headers      = std::move(req_parsed.headers);
     req_ptr->body         = std::move(req_parsed.body);
+    req_ptr->body_map     = std::move(req_parsed.body_map);
     req_ptr->loop         = &loop_;
     req_ptr->cancel_token = cancel_token_;
 
@@ -265,6 +266,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     req_ptr->_bind_stream = &HttpConnection::bind_stream;
 
     parse_form_encoded(req_parsed.query, req_ptr->query);
+    req_ptr->raw_query = std::move(req_parsed.query);
 
     // Keep a weak ref for WebSocket mode — do_read() routes through it.
     current_req_ = req_ptr;

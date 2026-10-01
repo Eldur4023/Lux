@@ -2,8 +2,8 @@
 // always UTC -- so the language's own arithmetic and comparisons work on it
 // ("5 minutes from now" is `time.now() + 5 * 60 * 1000`). What arithmetic
 // cannot do (calendars, formatting, parsing) lives here. Where a function
-// takes a UTC offset it is a fixed number of minutes, never an implicit
-// server timezone: `time.format(ts, fmt, 60)` is CET.
+// takes a zone it is a fixed number of minutes or an IANA name, never an implicit
+// server timezone: `time.format(ts, fmt, 60)` is CET, `time.format(ts, fmt, "Europe/Madrid")` follows DST.
 #include <lux_script/builtin_module.hpp>
 
 #include <algorithm>
@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
+#include <exception>
 
 namespace lux_script {
 
@@ -21,8 +22,34 @@ long long now_ms() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-long long offset_ms(const std::vector<Value>& a, size_t i) {
-    return a.size() > i ? a[i].as_int() * 60'000 : 0;
+// The zone argument: minutes east of UTC (an int), or an IANA name
+// ("Europe/Madrid") from the system's tz database, DST included. `bad` is
+// set for a name it does not know.
+struct Zone {
+    long long fixed_ms = 0;
+    const std::chrono::time_zone* tz = nullptr;
+    bool bad = false;
+
+    long long at(long long utc_ms) const {
+        if (!tz) return fixed_ms;
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            tz->get_info(std::chrono::sys_time<std::chrono::milliseconds>(std::chrono::milliseconds(utc_ms))).offset).count();
+    }
+    // The UTC instant of a wall-clock reading in this zone.
+    long long to_utc(long long local_ms) const {
+        long long utc = local_ms - at(local_ms);
+        const long long again = local_ms - at(utc);   // the offset may differ across a DST change
+        return again == utc ? utc : again;
+    }
+};
+
+Zone zone_arg(const std::vector<Value>& a, size_t i) {
+    Zone z;
+    if (a.size() <= i || a[i].is_null()) return z;
+    if (a[i].is_int()) { z.fixed_ms = a[i].as_int() * 60'000; return z; }
+    try { z.tz = std::chrono::get_tzdb().locate_zone(a[i].to_string()); }
+    catch (const std::exception&) { z.bad = true; }
+    return z;
 }
 
 // Floor division: a timestamp before 1970 still lands in the right second.
@@ -41,7 +68,9 @@ Value fn_now_seconds(NativeCtx&, std::vector<Value>&, std::string&) { return Val
 // strftime: every specifier (%Y %m %d %H %M %S %A %B ...) done right.
 Value fn_format(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::tm tm{};
-    if (!to_tm(a[0].as_int() + offset_ms(a, 2), tm)) { error = "time.format(): timestamp out of range"; return Value::null(); }
+    const Zone z = zone_arg(a, 2);
+    if (z.bad) { error = "time.format(): unknown time zone '" + a[2].to_string() + "'"; return Value::null(); }
+    if (!to_tm(a[0].as_int() + z.at(a[0].as_int()), tm)) { error = "time.format(): timestamp out of range"; return Value::null(); }
     char buf[256];
     const size_t n = std::strftime(buf, sizeof buf, a[1].as_str().c_str(), &tm);
     if (n == 0) { error = "time.format(): the formatted result is too long"; return Value::null(); }
@@ -111,7 +140,9 @@ Value fn_parse_iso(NativeCtx&, std::vector<Value>& a, std::string&) {
 // (1 = Monday .. 7 = Sunday, ISO), "yearday" (1-366)}
 Value fn_parts(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::tm tm{};
-    if (!to_tm(a[0].as_int() + offset_ms(a, 1), tm)) { error = "time.parts(): timestamp out of range"; return Value::null(); }
+    const Zone z = zone_arg(a, 1);
+    if (z.bad) { error = "time.parts(): unknown time zone '" + a[1].to_string() + "'"; return Value::null(); }
+    if (!to_tm(a[0].as_int() + z.at(a[0].as_int()), tm)) { error = "time.parts(): timestamp out of range"; return Value::null(); }
     Value::Dict d;
     d["year"]    = Value::integer(tm.tm_year + 1900);
     d["month"]   = Value::integer(tm.tm_mon + 1);
@@ -128,7 +159,9 @@ Value fn_parts(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // in the given offset: "today's orders" is `created >= start_of(now, "day")`.
 Value fn_start_of(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const std::string& unit = a[1].as_str();
-    const long long off = offset_ms(a, 2);
+    const Zone z = zone_arg(a, 2);
+    if (z.bad) { error = "time.start_of(): unknown time zone '" + a[2].to_string() + "'"; return Value::null(); }
+    const long long off = z.at(a[0].as_int());
     std::tm tm{};
     if (!to_tm(a[0].as_int() + off, tm)) { error = "time.start_of(): timestamp out of range"; return Value::null(); }
     tm.tm_hour = tm.tm_min = tm.tm_sec = 0;
@@ -136,7 +169,7 @@ Value fn_start_of(NativeCtx&, std::vector<Value>& a, std::string& error) {
     else if (unit == "month") tm.tm_mday = 1;
     else if (unit == "year")  tm.tm_mday = 1, tm.tm_mon = 0;
     else if (unit != "day") { error = "time.start_of(): the unit is \"day\", \"week\", \"month\" or \"year\""; return Value::null(); }
-    return Value::integer(from_tm(tm) - off);
+    return Value::integer(z.to_utc(from_tm(tm)));
 }
 
 // Calendar months, clamped: Jan 31 + 1 month is Feb 28 (or 29). n may be
@@ -191,12 +224,12 @@ Value fn_ago(NativeCtx&, std::vector<Value>& a, std::string& error) {
 LUX_MODULE(time, {
     {"now",         ">i",      fn_now},
     {"now_seconds", ">i",      fn_now_seconds},
-    {"format",      "is|i>s",  fn_format},
+    {"format",      "is|x>s",  fn_format},
     {"format_iso",  "i>s",     fn_format_iso},
     {"parse",       "ss",    fn_parse},
     {"parse_iso",   "s",     fn_parse_iso},
-    {"parts",       "i|i>d",   fn_parts},
-    {"start_of",    "is|i>i",  fn_start_of},
+    {"parts",       "i|x>d",   fn_parts},
+    {"start_of",    "is|x>i",  fn_start_of},
     {"add_months",  "ii>i",    fn_add_months},
     {"ago",         "i|Is>s",  fn_ago},
 })

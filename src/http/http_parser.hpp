@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <functional>
 #include <memory>
+#include <atomic>
+#include <lux/mapped_body.hpp>
 #include <cstddef>
 
 // Forward-declare llhttp types to avoid pulling the header into every TU
@@ -23,13 +25,18 @@ struct ParsedRequest {
     std::string version;  // "HTTP/1.1" or "HTTP/1.0"
     std::vector<std::pair<std::string, std::string>> headers;   // lowercase keys
     std::string body;
+    std::shared_ptr<const MappedBody> body_map;   // multipart bodies past kMemBodyMax
 };
 
 // ── Security limits ────────────────────────────────────────────────────────
 inline constexpr size_t kMaxUrlSize     =  8 * 1024;   //  8 KB
 inline constexpr size_t kMaxHeaderSize  =  8 * 1024;   //  8 KB per field/value
 inline constexpr size_t kMaxHeaderCount =  100;
-inline constexpr size_t kMaxBodySize    = 16 * 1024 * 1024; // 16 MB
+// Bodies up to this size are held in memory; a multipart one may grow past it
+// (up to g_max_body_size) into a temp file, every other body stops here.
+inline constexpr size_t kMemBodyMax = 16 * 1024 * 1024;
+// Request body cap; 16 MB by default, `max_body` in the app: block overrides it.
+inline std::atomic<size_t> g_max_body_size{16 * 1024 * 1024};
 
 // Incremental HTTP/1.1 request parser backed by llhttp.
 //
@@ -64,7 +71,7 @@ public:
     bool is_paused() const;
 
     // True if feed() returned false specifically because the body exceeded
-    // kMaxBodySize — lets the caller answer 413 instead of a generic 400.
+    // g_max_body_size — lets the caller answer 413 instead of a generic 400.
     bool body_too_large() const;
 
     // Bytes from the most recent feed() that the parser did NOT consume.

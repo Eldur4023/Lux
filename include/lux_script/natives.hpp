@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <mutex>
 #include <set>
@@ -60,6 +61,14 @@ public:
     void      set(const std::string& key, Value v, long long ttl_ms = 0);
     bool      remove(const std::string& key);
 
+    // Sliding window: records a hit now and returns how many hits the key
+    // has had in the last window_ms (this one included).
+    long long hit(const std::string& key, long long window_ms);
+    // Milliseconds until the key expires (a TTL key) or until the oldest
+    // hit leaves its window (a hit key, i.e. the Retry-After once over the
+    // limit); -1 if the key has no expiry, null-like -2 if it is absent.
+    long long ttl(const std::string& key);
+
 private:
     struct Entry { Value v; long long expires_ms = 0; };
     using Map = std::map<std::string, Entry>;
@@ -67,8 +76,11 @@ private:
     Map::iterator live(const std::string& key, long long now);   // end() if absent or expired
     void          sweep(long long now);
 
+    struct Hits { std::deque<long long> times; long long window_ms = 0; };
+
     std::mutex mutex_;
     Map        data_;
+    std::map<std::string, Hits> hits_;
     unsigned   writes_ = 0;
 };
 
@@ -215,6 +227,31 @@ bool             is_db_module(const std::string& name);
 // building the 422 and read by the `on error` handler of the same request;
 // there is no suspension between the two moments, so requests cannot cross.
 std::vector<std::string>& last_validation_messages();
+
+// `lux run files -- command args`: the process is running one command, not a
+// server. os.argv() / os.exit() read and write these.
+struct ScriptMode {
+    bool                     on = false;
+    std::vector<std::string> args;
+    int                      exit_code = 0;
+    // `lux test`: the instance the tests talk to, and why the running test failed.
+    std::string              base_url;
+    std::string              failure;
+};
+inline ScriptMode& script_mode() { static ScriptMode s; return s; }
+
+// The "error" abort() raises to unwind a whole handler, helpers included.
+// The VM turns it into a normal end of the request (the response was already
+// written); it is never an error and a `try` cannot catch it.
+inline constexpr const char* kAbortMessage = "\x01" "abort";
+
+// send_file() for every engine: sends `path` (confined to `root` when it is
+// given), then adds what a download needs -- an ETag with a 304 for
+// If-None-Match, and Content-Disposition when `filename` is non-empty
+// (`inline_` shows it in the browser instead of saving it).
+void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
+                       const std::string* root = nullptr, const std::string& filename = {},
+                       bool inline_ = false);
 
 // The request a --native function is running for, on this thread: set by the
 // VM (and by a native route) right before calling one, so that a module call

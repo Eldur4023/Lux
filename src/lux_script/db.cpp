@@ -412,8 +412,48 @@ Value db_error(const std::string& msg) {
     return Value::dict(std::move(d));
 }
 
+// A List given for one `?` becomes one `?` per item: `where id in (?)` with
+// [1, 2, 3] runs `where id in (?, ?, ?)` (an empty list gives NULL, which
+// matches nothing). Quoted text and comments are skipped when counting the `?`s.
+void expand_list_params(std::string& sql, std::vector<Value>& params) {
+    bool any = false;
+    for (const auto& p : params) any |= p.is_list();
+    if (!any) return;
+    std::string out;
+    std::vector<Value> flat;
+    size_t next = 0;
+    for (size_t i = 0; i < sql.size(); ++i) {
+        const char c = sql[i];
+        if (c == '\'' || c == '"' || c == '`') {
+            const size_t start = i;
+            for (++i; i < sql.size() && !(sql[i] == c && (i + 1 >= sql.size() || sql[i + 1] != c)); ++i)
+                if (sql[i] == c) ++i;   // a doubled quote is an escaped one
+            out.append(sql, start, std::min(i + 1, sql.size()) - start);
+        } else if (c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+            const size_t end = sql.find('\n', i);
+            out.append(sql, i, end == std::string::npos ? std::string::npos : end - i);
+            i = end == std::string::npos ? sql.size() : end - 1;
+        } else if (c == '?' && next < params.size()) {
+            const Value& v = params[next++];
+            if (v.is_list()) {
+                const auto& items = v.as_list();
+                for (size_t k = 0; k < items.size(); ++k) { out += k ? ", ?" : "?"; flat.push_back(items[k]); }
+                if (items.empty()) out += "NULL";
+            } else {
+                out += '?';
+                flat.push_back(v);
+            }
+        } else {
+            out += c;
+        }
+    }
+    sql = std::move(out);
+    for (; next < params.size(); ++next) flat.push_back(params[next]);   // leave a count mismatch to the driver
+    params = std::move(flat);
+}
+
 lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLoop* loop,
-                            const std::string& sql, std::vector<Value> params,
+                            const std::string& sql_in, std::vector<Value> params,
                             std::map<std::string, int>& pinned_workers,
                             std::map<std::string, long long>& last_insert_ids,
                             std::set<std::string>& poisoned) {
@@ -423,6 +463,8 @@ lux::Task<Value> await_db(DbOp op, const std::string& module, lux::core::EventLo
     if (!driver || !pool)
         co_return db_error("module '" + module + "' is not configured: "
                            "its block is missing under app:");
+    std::string sql = sql_in;
+    expand_list_params(sql, params);
 
     // Inside a transaction, everything goes through the connection that opened it.
     int  pin   = -1;

@@ -19,6 +19,16 @@ std::string sha256(std::string_view data);
 // Returns the raw 32 bytes of the MAC (RFC 2104).
 std::string hmac_sha256(std::string_view key, std::string_view message);
 
+// SHA-1 and HMAC-SHA1, raw 20 bytes. Only for what the world still speaks it
+// (TOTP/HOTP, RFC 4226; legacy webhooks): never for new signatures.
+std::string sha1(std::string_view data);
+std::string hmac_sha1(std::string_view key, std::string_view message);
+
+// RFC 4648 base32 (A-Z2-7), unpadded on output; the decoder ignores case,
+// spaces and '=' padding and returns false on any other character.
+std::string base32_encode(std::string_view raw);
+bool        base32_decode(std::string_view text, std::string& out);
+
 // PBKDF2-HMAC-SHA256 (RFC 8018), `length` raw bytes: password storage.
 std::string pbkdf2_sha256(std::string_view password, std::string_view salt,
                           unsigned iterations, size_t length);

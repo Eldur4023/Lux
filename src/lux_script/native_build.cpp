@@ -375,7 +375,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
             DiagnosticBag tdiags;
             Template tpl;
             auto source = read_whole_file(std::filesystem::path(prog.app.templates_dir) / name);
-            if (source && compile_template(*source, name, prog.app.templates_dir, keys, tdiags, tpl))
+            if (source && compile_template(*source, name, prog.app.templates_dir, keys, tdiags, tpl,
+                                                  TemplateEnv{&sigs, &clases_sig, &prog.imports, enums}))
                 codigo += generate_native_template(tpl, fnkey) + "\n";
             else   // build_routes reports why; this only has to link
                 codigo += "static void " + native_template_fn(fnkey) + "(lux_script::NativeCtx&, auto&&...) {\n"

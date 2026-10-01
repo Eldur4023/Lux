@@ -313,17 +313,25 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
     }
 
     if (*fn == "send_file") {
+        if (e.args.size() != 1) {   // a root or options: the VM handles those
+            diags.error(e.loc, "send_file() with a root or options: needs the VM");
+            return {};
+        }
         const std::string* p = need_string(0, "the file path");
         if (!p) return {};
         std::string path = *p;
-        return [path](lux::Request&, lux::Response& res) {
-            res.send_file(path);
+        return [path](lux::Request& req, lux::Response& res) {
+            send_file_checked(req, res, path);
         };
     }
 
     if (*fn == "status") {
         if (e.args.empty() || e.args[0].value->kind != ExprKind::IntLit) {
             diags.error(e.loc, "status() expects a numeric status code");
+            return {};
+        }
+        if (e.args.size() > 1) {   // status(code, "message"): the VM carries the message
+            diags.error(e.loc, "status() with a message: needs the VM");
             return {};
         }
         int code = static_cast<int>(e.args[0].value->int_value);
@@ -1236,7 +1244,7 @@ bool prepare_args(const std::vector<ParamBind>& binds, const FunctionTable* fns,
                     // out empty, with no error, because only the query string was read.
                     for (const auto& part : *ctx.parts) {
                         if (part.name == b.name && part.filename.empty()) {
-                            raw = part.body; present = true; break;
+                            raw = std::string(part.body); present = true; break;
                         }
                     }
                 }

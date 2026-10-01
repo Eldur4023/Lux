@@ -59,6 +59,12 @@ int self_test() {
                            "Test Using Larger Than Block-Size Key - Hash Key First")),
            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
 
+    expect("sha1(abc)", hex(sha1("abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    expect("hmac_sha1(Jefe)", hex(hmac_sha1("Jefe", "what do ya want for nothing?")),
+           "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79");
+    std::string b32;
+    expect("base32(foobar)", base32_encode("foobar"), "MZXW6YTBOI");
+    expect("base32 ida y vuelta", base32_decode("mzxw 6ytb oi======", b32) && b32 == "foobar" ? "si" : "no", "si");
     std::string round;
     const std::string raw = std::string("\x00\x01\xfe\xff", 4) + "lux_script";
     expect("base64url ida y vuelta",

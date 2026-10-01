@@ -5,6 +5,7 @@
 #include <lux_script/crypto.hpp>
 
 #include <chrono>
+#include <dlfcn.h>
 
 namespace lux_script {
 
@@ -30,6 +31,14 @@ Value fn_sha256(NativeCtx&, std::vector<Value>& a, std::string&) {
 
 Value fn_hmac_sha256(NativeCtx&, std::vector<Value>& a, std::string&) {
     return Value::str(crypto::hex_encode(crypto::hmac_sha256(a[0].as_str(), a[1].as_str())));
+}
+
+Value fn_sha1(NativeCtx&, std::vector<Value>& a, std::string&) {
+    return Value::str(crypto::hex_encode(crypto::sha1(a[0].as_str())));
+}
+
+Value fn_hmac_sha1(NativeCtx&, std::vector<Value>& a, std::string&) {
+    return Value::str(crypto::hex_encode(crypto::hmac_sha1(a[0].as_str(), a[1].as_str())));
 }
 
 // Constant time: comparing a signature with == tells an attacker, through
@@ -86,8 +95,82 @@ Value fn_password(NativeCtx&, std::vector<Value>& a, std::string& error) {
                       crypto::base64_encode(dk));
 }
 
+// argon2 and bcrypt come from the system's libargon2 / libxcrypt, loaded on
+// first use: Lux does not link them, so a build without them still runs and
+// only these hashes report what to install.
+void* system_lib(const char* name) {
+    return ::dlopen(name, RTLD_NOW | RTLD_LOCAL);
+}
+
+using Argon2Verify = int (*)(const char*, const void*, size_t, int);
+using Argon2Hash   = int (*)(uint32_t, uint32_t, uint32_t, const void*, size_t, const void*, size_t,
+                             size_t, char*, size_t);
+using CryptRn      = char* (*)(const char*, const char*, void*, int);
+using GensaltRn    = char* (*)(const char*, unsigned long, const char*, int, char*, int);
+
+constexpr int kArgon2Id = 2;
+constexpr int kCryptDataSize = 32768;   // sizeof(struct crypt_data) in libxcrypt
+
+template <class F> F symbol(void* lib, const char* name) {
+    return lib ? reinterpret_cast<F>(::dlsym(lib, name)) : nullptr;
+}
+
+Value fn_argon2(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    static Argon2Hash hash_encoded = symbol<Argon2Hash>(system_lib("libargon2.so.1"), "argon2id_hash_encoded");
+    if (!hash_encoded) { error = "hash.argon2(): libargon2 is not installed (apt install libargon2-1)"; return Value::null(); }
+    std::string salt = random_or_fail(16, error);
+    if (!error.empty()) return Value::null();
+    char out[256];
+    // argon2-cffi's defaults: 3 passes, 64 MiB, 4 lanes.
+    const std::string& pw = a[0].as_str();
+    if (hash_encoded(3, 65536, 4, pw.data(), pw.size(), salt.data(), salt.size(), 32, out, sizeof out) != 0) {
+        error = "hash.argon2(): hashing failed";
+        return Value::null();
+    }
+    return Value::str(out);
+}
+
+Value fn_bcrypt(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    void* lib = system_lib("libcrypt.so.1");
+    static GensaltRn gensalt = symbol<GensaltRn>(lib, "crypt_gensalt_rn");
+    static CryptRn   crypt   = symbol<CryptRn>(lib, "crypt_rn");
+    if (!gensalt || !crypt) { error = "hash.bcrypt(): libcrypt (libxcrypt) is not installed"; return Value::null(); }
+    const long long cost = a.size() > 1 ? a[1].as_int() : 12;
+    if (cost < 4 || cost > 20) { error = "hash.bcrypt(): cost must be between 4 and 20"; return Value::null(); }
+    std::string rnd = random_or_fail(16, error);
+    if (!error.empty()) return Value::null();
+    char setting[64];
+    if (!gensalt("$2b$", static_cast<unsigned long>(cost), rnd.data(), 16, setting, sizeof setting)) {
+        error = "hash.bcrypt(): bcrypt is not supported by this libcrypt";
+        return Value::null();
+    }
+    std::string data(kCryptDataSize, '\0');
+    const char* h = crypt(a[0].as_str().c_str(), setting, data.data(), kCryptDataSize);
+    if (!h || h[0] == '*') { error = "hash.bcrypt(): hashing failed"; return Value::null(); }
+    return Value::str(h);
+}
+
+// Hashes made elsewhere ($argon2id$..., $2b$...): the migration path from
+// another stack's user table.
+bool verify_foreign(const std::string& pw, const std::string& stored) {
+    if (stored.rfind("$argon2", 0) == 0) {
+        static Argon2Verify verify = symbol<Argon2Verify>(system_lib("libargon2.so.1"), "argon2_verify");
+        // $argon2i$ / $argon2d$ / $argon2id$
+        const int type = stored.compare(0, 9, "$argon2i$") == 0 ? 1 : stored.compare(0, 9, "$argon2d$") == 0 ? 0 : kArgon2Id;
+        return verify && verify(stored.c_str(), pw.data(), pw.size(), type) == 0;
+    }
+    static CryptRn crypt = symbol<CryptRn>(system_lib("libcrypt.so.1"), "crypt_rn");
+    if (!crypt) return false;
+    std::string data(kCryptDataSize, '\0');
+    const char* h = crypt(pw.c_str(), stored.c_str(), data.data(), kCryptDataSize);
+    return h && h[0] != '*' && crypto::constant_time_equal(h, stored);
+}
+
 Value fn_verify(NativeCtx&, std::vector<Value>& a, std::string&) {
     const std::string& stored = a[1].as_str();
+    if (stored.rfind("$argon2", 0) == 0 ||
+        (stored.size() > 3 && stored[0] == '$' && stored[1] == '2' && stored[3] == '$'))
+        return Value::boolean(verify_foreign(a[0].as_str(), stored));
     const size_t p1 = stored.find('$'), p2 = stored.find('$', p1 + 1), p3 = stored.find('$', p2 + 1);
     if (p3 == std::string::npos || stored.compare(0, p1, "pbkdf2_sha256") != 0) return Value::boolean(false);
     const unsigned long iters = std::strtoul(stored.c_str() + p1 + 1, nullptr, 10);
@@ -135,6 +218,8 @@ Value fn_unsign(NativeCtx&, std::vector<Value>& a, std::string&) {
 LUX_MODULE(hash, {
     {"sha256",      "s>s",   fn_sha256},
     {"hmac_sha256", "ss>s",  fn_hmac_sha256},
+    {"sha1",        "s>s",   fn_sha1},
+    {"hmac_sha1",   "ss>s",  fn_hmac_sha1},
     {"equal",       "ss>b",  fn_equal},
     {"random_hex",  "i>s",   fn_random_hex},
     {"token",       "|i>s",  fn_token},
@@ -144,6 +229,8 @@ LUX_MODULE(hash, {
     // CPU-bound by design: off the event loop.
     {"password",    "s>s",   fn_password, /*is_async=*/true},
     {"verify",      "ss>b",  fn_verify,   /*is_async=*/true},
+    {"argon2",      "s>s",   fn_argon2,   /*is_async=*/true},
+    {"bcrypt",      "s|i>s", fn_bcrypt,   /*is_async=*/true},
 })
 
 } // namespace lux_script

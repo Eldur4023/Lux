@@ -11,8 +11,10 @@
 #include "spawn.hpp"
 
 #include <fcntl.h>
+#include <termios.h>
 #include <fnmatch.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <unistd.h>
 #include <poll.h>
 #include <signal.h>
@@ -24,6 +26,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 
 namespace lux_script {
@@ -182,6 +185,89 @@ Value fn_remove_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const bool removed = fs::remove(path, ec);
     return ec ? fail(error, "remove_file", ec.message()) : Value::boolean(removed);
 }
+
+// {total, free, used}: bytes of the filesystem that holds `path`; `free` is
+// what a non-root user may still write.
+Value fn_disk_usage(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    struct statvfs v{};
+    if (::statvfs(a[0].as_str().c_str(), &v) != 0) return fail(error, "disk_usage", std::strerror(errno));
+    const long long total = static_cast<long long>(v.f_blocks) * static_cast<long long>(v.f_frsize);
+    const long long free_ = static_cast<long long>(v.f_bavail) * static_cast<long long>(v.f_frsize);
+    Value::Dict d;
+    d["total"] = Value::integer(total);
+    d["free"]  = Value::integer(free_);
+    d["used"]  = Value::integer(total - static_cast<long long>(v.f_bfree) * static_cast<long long>(v.f_frsize));
+    return Value::dict(std::move(d));
+}
+
+// A permission mode: an octal string ("640", "0750") or an int taken as is.
+bool parse_mode(const Value& v, mode_t& out) {
+    if (v.is_int()) { out = static_cast<mode_t>(v.as_int()); return v.as_int() >= 0 && v.as_int() <= 07777; }
+    const std::string& s = v.as_str();
+    char* end = nullptr;
+    const unsigned long m = std::strtoul(s.c_str(), &end, 8);
+    out = static_cast<mode_t>(m);
+    return !s.empty() && *end == '\0' && m <= 07777;
+}
+
+Value fn_chmod(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    mode_t m;
+    if (!parse_mode(a[1], m)) return fail(error, "chmod", "the mode is an octal string such as \"640\"");
+    if (::chmod(a[0].as_str().c_str(), m) != 0) return fail(error, "chmod", std::strerror(errno));
+    return Value::boolean(true);
+}
+
+// Sets the process umask; returns the previous one as an octal string.
+Value fn_umask(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    mode_t m;
+    if (!parse_mode(a[0], m)) return fail(error, "umask", "the mask is an octal string such as \"027\"");
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%04o", static_cast<unsigned>(::umask(m)));
+    return Value::str(buf);
+}
+
+// ── commands (`lux run files -- name args`) ─────────────────────────────────
+
+// The arguments after the command's name.
+Value fn_argv(NativeCtx&, std::vector<Value>&, std::string&) {
+    Value::List out;
+    for (const auto& a : script_mode().args) out.push_back(Value::str(a));
+    return Value::list(std::move(out));
+}
+
+// Ends the command with this exit code (from any function, like abort()).
+Value fn_exit(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    if (!script_mode().on) return fail(error, "exit", "only a `command` run with `lux run` can exit; a request ends with return or abort()");
+    script_mode().exit_code = a.empty() ? 0 : static_cast<int>(a[0].as_int());
+    error = kAbortMessage;
+    return Value::null();
+}
+
+Value fn_print(NativeCtx&, std::vector<Value>& a, std::string&) {
+    std::cout << a[0].to_string() << '\n';
+    return Value::null();
+}
+
+Value fn_eprint(NativeCtx&, std::vector<Value>& a, std::string&) {
+    std::cerr << a[0].to_string() << '\n';
+    return Value::null();
+}
+
+// A line from stdin, without its newline; null at end of input. The prompt
+// goes to stderr so stdout stays clean for a pipe.
+Value read_line(const std::string& prompt, bool secret) {
+    if (!prompt.empty()) { std::cerr << prompt; std::cerr.flush(); }
+    termios old{};
+    const bool tty = secret && ::isatty(STDIN_FILENO) && ::tcgetattr(STDIN_FILENO, &old) == 0;
+    if (tty) { termios t = old; t.c_lflag &= ~static_cast<tcflag_t>(ECHO); ::tcsetattr(STDIN_FILENO, TCSANOW, &t); }
+    std::string line;
+    const bool ok = static_cast<bool>(std::getline(std::cin, line));
+    if (tty) { ::tcsetattr(STDIN_FILENO, TCSANOW, &old); std::cerr << '\n'; }
+    return ok ? Value::str(std::move(line)) : Value::null();
+}
+
+Value fn_input(NativeCtx&, std::vector<Value>& a, std::string&)        { return read_line(a.empty() ? "" : a[0].as_str(), false); }
+Value fn_input_secret(NativeCtx&, std::vector<Value>& a, std::string&) { return read_line(a.empty() ? "" : a[0].as_str(), true); }
 
 // Parents too, like os.makedirs(). false if it already existed.
 Value fn_make_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
@@ -343,6 +429,13 @@ LUX_MODULE(os, {
     {"remove_file",   "s>b",    fn_remove_file},
     {"remove_dir",    "s|b>b",  fn_remove_dir},
     {"make_dir",      "s>b",    fn_make_dir},
+    {"disk_usage",    "s>d",    fn_disk_usage},
+    {"argv",          ">l",     fn_argv},
+    {"exit",          "|i",     fn_exit},
+    {"print",         "x",      fn_print},
+    {"eprint",        "x",      fn_eprint},
+    {"chmod",         "sx>b",   fn_chmod},
+    {"umask",         "x>s",    fn_umask},
     {"temp_dir",      ">s",     fn_temp_dir},
     {"temp_file",     "|s>s",   fn_temp_file},
     // Moving file content or waiting on a process: off the event loop.
@@ -352,6 +445,9 @@ LUX_MODULE(os, {
     {"copy_file",     "ss|b>b", fn_copy_file,   /*is_async=*/true},
     {"move",          "ss>b",   fn_move,        /*is_async=*/true},
     {"run",           "s|ld>d", fn_run,         /*is_async=*/true},
+    // Waiting on the terminal: off the event loop.
+    {"input",         "|s",     fn_input,        /*is_async=*/true},
+    {"input_secret",  "|s",     fn_input_secret, /*is_async=*/true},
 })
 
 } // namespace lux_script

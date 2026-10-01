@@ -68,6 +68,9 @@ private:
     void parse_enum(Program& out);
     void parse_error(Program& out);
     void parse_every(Program& out);
+    void parse_start(Program& out);
+    void parse_command(Program& out);
+    bool size_config(const std::string& key, size_t& out);
     void parse_fn(Program& out);
 
     // ── Statements ───────────────────────────────────────────────────────────

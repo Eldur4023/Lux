@@ -66,8 +66,8 @@ std::string trim(std::string s) { return trim_ascii_ws(s); }
 
 class Compiler {
 public:
-    Compiler(const std::string& dir, DiagnosticBag& diags, Template& out)
-        : dir_(dir), diags_(diags), out_(out) {}
+    Compiler(const std::string& dir, DiagnosticBag& diags, Template& out, const TemplateEnv& env)
+        : dir_(dir), diags_(diags), out_(out), env_(env) {}
 
     bool compile(const std::string& source, const std::string& file,
                   const std::vector<TypedName>& data) {
@@ -133,6 +133,7 @@ private:
     const std::string&   dir_;
     DiagnosticBag&       diags_;
     Template&           out_;
+    TemplateEnv         env_;
     bool                 failed_ = false;
     std::vector<Open> open_;
     std::vector<std::string> file_stack_;   // to detect include cycles
@@ -189,7 +190,7 @@ private:
         }
 
         Chunk   ch;
-        Emitter em(own_diags);
+        Emitter em(own_diags, env_.fns, env_.classes, env_.imports, nullptr, env_.enums);
         if (!em.emit_condition(*e, out_.names, ch) || !own_diags.empty()) {
             error(loc, "in the template expression: " +
                   (own_diags.empty() ? std::string("cannot be compiled")
@@ -543,8 +544,8 @@ void Compiler::body(const std::string& src, const std::string& file,
 bool compile_template(const std::string& source, const std::string& file,
                         const std::string& dir,
                         const std::vector<TypedName>& data,
-                        DiagnosticBag& diags, Template& out) {
-    Compiler c(dir, diags, out);
+                        DiagnosticBag& diags, Template& out, const TemplateEnv& env) {
+    Compiler c(dir, diags, out, env);
     return c.compile(source, file, data);
 }
 

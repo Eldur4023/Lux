@@ -3,8 +3,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstring>
 #include <stdexcept>
+#include <filesystem>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 namespace lux::http {
 
@@ -28,6 +33,18 @@ struct HttpParser::ParseContext {
     bool body_too_large = false;
 
     bool in_message = false;   // see HttpParser::in_message()
+
+    // A multipart body that outgrew kMemBodyMax is written to an unnamed temp
+    // file as it arrives, so a big upload never sits in memory.
+    bool   multipart  = false;
+    int    spool_fd   = -1;
+    size_t spool_size = 0;
+
+    ~ParseContext() { if (spool_fd >= 0) ::close(spool_fd); }
+    size_t body_limit() const {
+        size_t cap = g_max_body_size.load(std::memory_order_relaxed);
+        return multipart ? cap : std::min(cap, kMemBodyMax);
+    }
 
     // Back-pointer to the owning parser's callbacks (stable address)
     OnComplete*        on_complete         = nullptr;
@@ -125,6 +142,16 @@ static int cb_on_headers_complete(llhttp_t* p) {
     int minor = llhttp_get_http_minor(p);
     c->current.version = (major == 1 && minor == 0) ? "HTTP/1.0" : "HTTP/1.1";
 
+    // A declared Content-Length over the cap is refused now, before a byte of
+    // the body is read (chunked bodies are still caught in cb_on_body).
+    for (const auto& h : c->current.headers)
+        if (h.first == "content-type") c->multipart = h.second.rfind("multipart/form-data", 0) == 0;
+    if (!(p->flags & F_CHUNKED) && p->content_length > c->body_limit()) {
+        c->error = true;
+        c->body_too_large = true;
+        return HPE_USER;
+    }
+
     // Headers are done; the body (if any) starts next. Let the connection
     // layer swap the Slowloris header timer for the request timer HERE,
     // not once the body has also fully arrived (see OnHeadersComplete's
@@ -133,12 +160,37 @@ static int cb_on_headers_complete(llhttp_t* p) {
     return HPE_OK;
 }
 
+static bool spool_write(HttpParser::ParseContext* c, const char* at, size_t len) {
+    while (len > 0) {
+        ssize_t n = ::write(c->spool_fd, at, len);
+        if (n < 0) { if (errno == EINTR) continue; return false; }
+        at += n; len -= static_cast<size_t>(n);
+        c->spool_size += static_cast<size_t>(n);
+    }
+    return true;
+}
+
 static int cb_on_body(llhttp_t* p, const char* at, size_t len) {
     auto* c = ctx(p);
-    if (c->current.body.size() + len > kMaxBodySize) {
+    size_t have = c->spool_fd >= 0 ? c->spool_size : c->current.body.size();
+    if (have + len > c->body_limit()) {
         c->error = true;
         c->body_too_large = true;
         return HPE_USER;
+    }
+    if (c->spool_fd < 0 && c->multipart && have + len > kMemBodyMax) {
+        std::error_code ec;
+        std::string dir = std::filesystem::temp_directory_path(ec).string();
+        c->spool_fd = ::open(dir.c_str(), O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+        if (c->spool_fd < 0 || !spool_write(c, c->current.body.data(), c->current.body.size())) {
+            c->error = true;
+            return HPE_USER;
+        }
+        std::string().swap(c->current.body);
+    }
+    if (c->spool_fd >= 0) {
+        if (!spool_write(c, at, len)) { c->error = true; return HPE_USER; }
+        return HPE_OK;
     }
     c->current.body.append(at, len);
     return HPE_OK;
@@ -154,6 +206,16 @@ static int cb_on_message_complete(llhttp_t* p) {
         c->current.query = c->current.path.substr(q + 1);
         c->current.path  = c->current.path.substr(0, q);
     }
+
+    if (c->spool_fd >= 0) {
+        void* m = ::mmap(nullptr, c->spool_size, PROT_READ, MAP_PRIVATE, c->spool_fd, 0);
+        if (m == MAP_FAILED) { c->error = true; return HPE_USER; }
+        c->current.body_map = std::make_shared<const MappedBody>(m, c->spool_size);
+        ::close(c->spool_fd);
+        c->spool_fd = -1;
+        c->spool_size = 0;
+    }
+    c->multipart = false;
 
     // Method name
     c->current.method = llhttp_method_name(

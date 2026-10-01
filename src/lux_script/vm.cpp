@@ -132,6 +132,14 @@ VM::Result VM::resume_error(std::string message, SourceLoc loc, NativeCtx& ctx) 
 
 VM::Result VM::unwind(Result r, NativeCtx& ctx) {
     while (r.status == Status::Error) {
+        // abort(): the whole handler ends here -- no `try` sees it -- and, the
+        // response being written already, it is an ordinary finish.
+        if (r.error == kAbortMessage) {
+            frames_.clear(); stack_.clear(); locals_.clear();
+            Result done;
+            done.status = Status::Done;
+            return done;
+        }
         // The frame's pc already points at the next instruction, so the one
         // that failed is the previous one.  An error climbs the frames until it
         // finds a try covering it: if the callee does not handle it, the caller may.
