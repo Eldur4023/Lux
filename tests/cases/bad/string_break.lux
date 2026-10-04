@@ -1,0 +1,6 @@
+# A single-line string cannot span lines (grammar §5): a backslash before the
+# line break used to be eaten as an "unknown escape", consuming the break and
+# silently welding the next line onto this statement.
+get endpoint("/a"):
+    return { "s": "corta\
+mas" }

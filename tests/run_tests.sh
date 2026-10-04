@@ -627,6 +627,7 @@ fails_to_compile "native module not imported" "$HERE/cases/bad/module_import.lux
 fails_to_compile "a module's return type is checked" "$HERE/cases/bad/module_return.lux" "have no method 'uppercase'"
 fails_to_compile "a bad schedule"        "$HERE/cases/bad/every.lux"    "is not a schedule"
 fails_to_compile "'Response' as a return type" "$HERE/cases/bad/response_type.lux" "cannot be used as a return type"
+fails_to_compile "backslash-newline in a string" "$HERE/cases/bad/string_break.lux" "use triple quotes"
 # Expression types are checked at RUN TIME: the compiler
 # it verifies names, arity, context, and the methods and fields of a receiver
 # whose type it knows -- but not that `s - 1` adds up.
@@ -642,6 +643,8 @@ check "abort() is not catchable by try"     GET '/abort?who=banned' 403 'Oops 40
 check "abort() lets a normal call through"  GET '/abort?who=ana' 200 '"who":"ana"'
 check "status(code, message) feeds error.message" GET /msg 409 'Oops 409: already there'
 check "render() works inside on error"      GET /nowhere 404 'Oops 404'
+check "on error may await (a database read)" GET /teapot 418 'Oops 418: n3'
+check "an on error that fails keeps the original response" GET /full 507 '"error":"disk full"'
 check "query_list / request.query"          GET '/form?t=1&t=2&z' 200 '"q":["1","2"],"rq":"t=1\u0026t=2\u0026z"'
 check "request.scheme without a proxy"      GET /form 200 '"scheme":"http"'
 check "state.hit counts a sliding window"   GET /hit 200 '"n":1,"ttl_ok":true'

@@ -200,6 +200,17 @@ void Lexer::lex_string(SourceLoc loc) {
         if (c != '\\') { value += c; continue; }
 
         if (eof()) { diags_.error(loc, "unterminated string"); break; }
+        // "\" before a line break is not an escape: the single-line form does
+        // not span lines (grammar §5), and eating the break here would weld
+        // the next line onto this statement behind a misleading "unknown
+        // escape".  Report the real problem and let the break end the line,
+        // exactly like the unterminated case above.
+        if (peek() == '\n' || peek() == '\r') {
+            diags_.error(loc,
+                         "unterminated string: \\ at the end of the line does not "
+                         "continue it -- use triple quotes to span lines");
+            break;
+        }
         char e = advance();
         char d;
         if (escape_char(e, d)) {
