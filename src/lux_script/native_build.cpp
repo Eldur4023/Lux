@@ -354,7 +354,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     codigo += "#include <lux/request.hpp>\n#include <lux/response.hpp>\n"
                   "#include <lux/task.hpp>\n#include <lux/blocking_pool.hpp>\n"
                   "#include <lux_script/db.hpp>\n#include <lux_script/builtin_module.hpp>\n"
-                  "#include <lux_script/auth.hpp>\n#include <lux/logger.hpp>\n#include <lux/multipart.hpp>\n\n" +
+                  "#include <lux_script/auth.hpp>\n#include <lux/logger.hpp>\n#include <lux/multipart.hpp>\n"
+                  "#include <lux_script/luxp_serve.hpp>\n\n" +
                   route_runtime_prelude() + "\n";
     codigo += clases_texto + "\n" + prototipos + "\n" + cuerpos;
     if (con_rutas) {

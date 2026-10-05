@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -61,6 +62,12 @@ struct Template {
     // against them: that is what makes `{{ who.uppercase() }}` on a string a
     // compile error and not a broken page.
     std::vector<TypedName> names;
+
+    // What luxp_serve built from this template at compile time (a document
+    // with holes, plus the sheet and program, see luxp_template.cpp); null if
+    // the template cannot be one.  Type-erased: the template engine does not
+    // know about .luxp.
+    std::shared_ptr<const void> luxp;
 };
 
 // Reads a whole file in binary mode, or nullopt if it can't be opened --

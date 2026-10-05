@@ -4449,6 +4449,21 @@ std::string generate_native_template(const Template& t, const std::string& fnkey
            "(lux_script::NativeCtx& ctx" + params + ") {\n"
            "    static const size_t tpl = lux_template(" + literal_string(key) + ");\n"
            "    Value s[" + std::to_string(std::max<size_t>(t.names.size(), 1)) + "];\n" + args +
+           // A client that asks for a .luxp gets it from the template's plan before any HTML is
+           // built.  A record list the HTML path reads in place has no Value slot: it is made one
+           // here (lux_rec_value), only on this path.
+           [&] {
+               std::string rec_sets;
+               for (const auto& [slot, arg] : rec_slot)
+                   rec_sets += "        s[" + std::to_string(slot) + "] = lux_rec_value(a" + std::to_string(arg.first) + ");\n";
+               return std::string("    bool luxp_ok = true;\n"
+                                  "    if (lux_script::wants_luxp(ctx.req)) {\n") + rec_sets +
+                      "        const auto o = lux_script::luxp_respond_slots(ctx, tpl, s, " +
+                      std::to_string(std::max<size_t>(t.names.size(), 1)) + ");\n"
+                      "        if (o == lux_script::LuxpOutcome::Sent) { ctx.response_written = true; return; }\n"
+                      "        luxp_ok = o != lux_script::LuxpOutcome::HtmlOnly;\n"
+                      "    }\n";
+           }() +
            "    static thread_local size_t hint = 0;\n"
            "    LuxOut out(hint + hint / 8);\n"
            "    Value tmp;\n    const Value* v = nullptr;\n    (void)tmp; (void)v; (void)tpl;\n" +
@@ -4456,7 +4471,8 @@ std::string generate_native_template(const Template& t, const std::string& fnkey
            (n_hints ? "    size_t h0 = 0" + [&] { std::string h; for (int i = 1; i < n_hints; ++i) h += ", h" + std::to_string(i) + " = 0"; return h; }() + ";\n" : std::string()) +
            locals + body +
            "    ;\n    std::string html = out.done();\n    hint = html.size();\n"
-           "    ctx.res.header(\"Content-Type\", \"text/html; charset=utf-8\").send(std::move(html));\n"
+           // HTML, or .luxp for a client that asks -- same as the VM's render() (luxp_serve.hpp)
+           "    lux_script::send_page(ctx.req, ctx.res, html, luxp_ok);\n"
            "    ctx.response_written = true;\n}\n";
 }
 
