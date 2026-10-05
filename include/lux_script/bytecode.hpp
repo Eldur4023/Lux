@@ -57,9 +57,11 @@ enum class Op : uint8_t {
     // typed, so what the generic VM works out on every pass is known here once:
     // they are the same operation without the cascade of type checks.
     //
-    // The declared type is not enforced on assignment, so they carry a guard:
-    // if the values are not really integers, they fall to the generic path and
-    // the program behaves the same, with the same error message.
+    // A definite mismatch between declared and assigned types is a compile
+    // error, but the compiler cannot always tell (an expression it does not
+    // follow, a Json), so a value may still not be what was declared: they
+    // carry a guard.  If the values are not really integers, they fall to the
+    // generic path and the program behaves the same, with the same error message.
     AddInt, SubInt, MulInt,
     LtInt, LeInt, GtInt, GeInt,
 

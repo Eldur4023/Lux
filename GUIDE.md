@@ -1713,6 +1713,7 @@ variable another call site happens to pass for the same file.
 | `'sse' only exists inside an sse route` | A reserved object out of context |
 | `a ws route needs origins(...)` | The origin allowlist is missing |
 | `cannot add int and string` | An operation between different types |
+| `'a' is declared int but is initialized with string` | A declaration, assignment or `return` whose value does not match the declared type (`LUX_SCRIPT-GRAMMAR.md` §21) |
 | `the session is not configured` | `session: secret ...` is missing from `app:` |
 | `'X' is not declared` | An unknown name, inside `validate` too |
 
