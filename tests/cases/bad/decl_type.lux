@@ -1,0 +1,11 @@
+# Declared types are checked where both sides are statically known.
+fn int count():
+    return "x"
+
+fn void f():
+    int a = "hola"
+    int k = 1
+    k = "x"
+
+get endpoint("/"):
+    return {"ok": true}

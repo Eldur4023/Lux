@@ -628,9 +628,13 @@ fails_to_compile "a module's return type is checked" "$HERE/cases/bad/module_ret
 fails_to_compile "a bad schedule"        "$HERE/cases/bad/every.lux"    "is not a schedule"
 fails_to_compile "'Response' as a return type" "$HERE/cases/bad/response_type.lux" "cannot be used as a return type"
 fails_to_compile "backslash-newline in a string" "$HERE/cases/bad/string_break.lux" "use triple quotes"
-# Expression types are checked at RUN TIME: the compiler
-# it verifies names, arity, context, and the methods and fields of a receiver
-# whose type it knows -- but not that `s - 1` adds up.
+fails_to_compile "declared type vs initializer" "$HERE/cases/bad/decl_type.lux" "'a' is declared int but is initialized with string"
+fails_to_compile "declared type vs assignment"  "$HERE/cases/bad/decl_type.lux" "cannot assign string to 'k', declared int"
+fails_to_compile "fn return type"               "$HERE/cases/bad/decl_type.lux" "this fn returns int, not string"
+compiles         "declared types: valid cases"  "$HERE/cases/decl_types_ok.lux"
+# Declared types (variables, assignments, fn returns) are checked when both
+# sides are statically known.  Expression types are checked at RUN TIME:
+# the compiler does not verify that `s - 1` adds up.
 # That is already covered by the "no coercion" test of the language suite.
 
 # ─── What a real application needed (abort, errors, forms, state, SQL, ...) ─────────
