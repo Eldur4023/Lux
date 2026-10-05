@@ -2441,4 +2441,54 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     return mod;
 }
 
+lux::Task<void> run_error_handler(const Module& mod, int code, lux::Request& req,
+                                  lux::Response& res) {
+    auto it = mod.error_handlers.find(code);
+    if (it == mod.error_handlers.end()) it = mod.error_handlers.find(0);
+    if (it == mod.error_handlers.end()) co_return;   // no handler: whatever is there is left alone
+
+    NativeCtx ctx{req, res};
+    ctx.templates  = &mod.templates;   // render() inside the handler
+    ctx.functions  = &mod.functions;
+    ctx.error_code = code;
+    // The real runtime-error text (division by zero, an out-of-range index, ...)
+    // that was put in last_internal_error() right before the 500 body was
+    // written, gated by is_production_mode() like the raw 500 body itself.
+    // Read before the first await: it belongs to this thread's last request.
+    if (res.status_code() >= 500) {
+        ctx.error_message = is_production_mode() ? "internal error" : last_internal_error();
+        // Cleared right after reading: a 500 a handler returns directly never
+        // touches it, and would inherit an earlier request's crash.
+        last_internal_error().clear();
+    } else {
+        ctx.error_message = "invalid request";
+    }
+    if (!res.error_message().empty()) ctx.error_message = res.error_message();   // status(code, "why")
+    // Copied now: another request on this thread may overwrite it across an await.
+    const std::vector<std::string> messages = last_validation_messages();
+    ctx.error_messages = &messages;
+
+    VM vm;
+    const NativeDispatch native = mod.native ? mod.native->dispatch() : NativeDispatch{};
+    VM::Result result = vm.start(*it->second, {}, ctx, &mod.functions, &native);
+    if (!co_await drive_vm(vm, result, req, ctx)) co_return;   // the client went away
+    if (result.status == VM::Status::Error) {
+        lux::log().error("on error " + std::to_string(code) + ": " + result.error);
+        co_await rollback_pending(ctx, req);
+        co_return;
+    }
+    // A transaction the handler left open is rolled back, as in any request.
+    co_await rollback_pending(ctx, req);
+    if (result.status != VM::Status::Done) co_return;
+
+    if (!ctx.response_written && !result.value.is_null())
+        res.header("Content-Type", "application/json; charset=utf-8")
+           .send(result.value.to_json_text());
+
+    // The handler describes the failure; it may redirect (a 3xx, e.g. a 401 to
+    // the login page) or pick another error, but not turn it into a success.
+    const int now = res.status_code();
+    if (!((now >= 300 && now < 400) || (now >= 400 && now < 600))) res.status(code);
+}
+
 } // namespace lux_script

@@ -10,7 +10,7 @@ tests-sqlite-types.db*
 example/notes.db*
 # Benchmark scratch data, not part of the project.
 bench
-
+experiments
 # --native: the .cpp/.so that compile_native() generates, regenerated on
 # every --native startup.
 .lux-native/

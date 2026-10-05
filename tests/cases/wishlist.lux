@@ -24,6 +24,16 @@ on start:
 on error 401:
     return redirect("/hello")
 
+# A handler may await, like a route.
+on error 418:
+    List<Json> r = await sqlite.query("select name from t where id = ?", 3)
+    return render("err.html", c={ "code": error.code, "msg": r[0]["name"] })
+
+# One that fails leaves the original response and logs the failure.
+on error 507:
+    await sqlite.exec("select * from a_table_that_does_not_exist")
+    return { "never": true }
+
 on error:
     return render("err.html", c={ "code": error.code, "msg": error.message })
 
@@ -100,3 +110,9 @@ get endpoint("/tpl"):
 
 get endpoint("/file"):
     return send_file("wishlist.lux", ".", { "filename": "w.lux" })
+
+get endpoint("/teapot"):
+    abort(418, "short and stout")
+
+get endpoint("/full"):
+    return status(507, "disk full")

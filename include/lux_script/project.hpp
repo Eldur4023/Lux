@@ -109,6 +109,13 @@ bool resolve_inputs(const std::vector<std::string>& args,
 std::shared_ptr<Module> compile(const std::vector<std::filesystem::path>& inputs,
                                 DiagnosticBag& diags, bool native = false);
 
+// Runs the module's `on error` handler for `code` against the response that is
+// being replaced. The handler may `await` (a database read, a module call),
+// like a route. If it fails the original response stays and the failure is
+// logged. A no-op when the module has no handler for the code.
+lux::Task<void> run_error_handler(const Module& mod, int code, lux::Request& req,
+                                  lux::Response& res);
+
 // Formats the diagnostics of a failed attempt using the files that were read.
 std::string format_errors(const DiagnosticBag& diags,
                           const std::vector<std::unique_ptr<SourceFile>>& files);

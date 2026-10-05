@@ -264,6 +264,8 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     // Cookie engine on: cookies set along a redirect chain travel with the next
     // hop, and come back in the result's `cookies`.
     curl_easy_setopt(curl, CURLOPT_COOKIEFILE, "");
+    // The handle is reused by the pool thread: forget the previous request's jar.
+    curl_easy_setopt(curl, CURLOPT_COOKIELIST, "ALL");
     if (!opts.cookies.empty()) curl_easy_setopt(curl, CURLOPT_COOKIE, opts.cookies.c_str());
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, kMaxRedirects);
     // A redirect is server-controlled: only ever to http/https, never

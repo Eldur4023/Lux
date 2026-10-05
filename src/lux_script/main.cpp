@@ -604,63 +604,10 @@ int main(int argc, char** argv) {
     // `on error` handlers: a single one is registered in the engine and the
     // dispatch by code is done by the live module, just as with the routes, so
     // that a hot reload reaches them too.
-    app.on_error([](int code, lux::Request& req, lux::Response& res) {
-        const auto& mod = current_module();
-        if (!mod) return;
-
-        auto it = mod->error_handlers.find(code);
-        if (it == mod->error_handlers.end()) it = mod->error_handlers.find(0);
-        if (it == mod->error_handlers.end()) return;   // no handler: whatever is there is left alone
-
-        lux_script::NativeCtx ctx{req, res};
-        ctx.templates      = &mod->templates;   // render() inside the handler
-        ctx.functions      = &mod->functions;
-        ctx.error_code     = code;
-        // The real runtime-error text (division by zero, an out-of-range
-        // index, ...) that project.cpp/native_gen.cpp already put in
-        // last_internal_error() right before writing their own 500 body --
-        // gated by is_production_mode() HERE, the one place `error.message`
-        // actually reaches the client, the same way the raw 500 body
-        // already is. Before this, `error.message` was hardcoded to the
-        // string "internal error" unconditionally (not gated by production
-        // mode at all), so GUIDE.md's own `log.error(error.message)`
-        // example never logged anything useful, even in development.
-        // "invalid request" is unrelated to this and unchanged: a 4xx has
-        // no VM error behind it to report -- it is the client's request
-        // that was wrong, not a bug to surface detail about.
-        if (res.status_code() >= 500) {
-            ctx.error_message = lux_script::is_production_mode()
-                ? "internal error" : lux_script::last_internal_error();
-            // Cleared right after reading, not just after setting: a 500 a
-            // handler returns directly (`return status(500)`, no VM crash
-            // behind it) never touches last_internal_error() at all, and
-            // without this it would otherwise inherit whatever an EARLIER,
-            // unrelated request on this same thread last crashed with.
-            lux_script::last_internal_error().clear();
-        } else {
-            ctx.error_message = "invalid request";
-        }
-        if (!res.error_message().empty()) ctx.error_message = res.error_message();   // status(code, "why")
-        ctx.error_messages = &lux_script::last_validation_messages();
-
-        lux_script::VM  vm;
-        const lux_script::NativeDispatch native =
-            mod->native ? mod->native->dispatch() : lux_script::NativeDispatch{};
-        auto result = vm.start(*it->second, {}, ctx, &mod->functions, &native);
-        if (result.status == lux_script::VM::Status::Error) {
-            lux::log().error("on error " + std::to_string(code) + ": " + result.error);
-            return;
-        }
-        if (result.status != lux_script::VM::Status::Done) return;   // it cannot suspend
-
-        if (!ctx.response_written && !result.value.is_null())
-            res.header("Content-Type", "application/json; charset=utf-8")
-               .send(result.value.to_json_text());
-
-        // The handler describes the failure; it may redirect (a 3xx, e.g. a 401
-        // to the login page) or pick another error, but not turn it into a success.
-        const int now = res.status_code();
-        if (!((now >= 300 && now < 400) || (now >= 400 && now < 600))) res.status(code);
+    app.on_async_error([](int code, lux::Request& req, lux::Response& res) -> lux::Task<void> {
+        const auto mod = current_module();   // a copy: it stays alive across the handler's awaits
+        if (!mod) co_return;
+        co_await lux_script::run_error_handler(*mod, code, req, res);
     });
 
     std::thread watcher;
