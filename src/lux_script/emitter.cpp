@@ -40,6 +40,7 @@ const Type& Emitter::local_type(const std::string& name) const {
 void Emitter::reset(Chunk& out, std::string method) {
     chunk_        = &out;
     route_method_ = std::move(method);
+    return_type_  = Type::unknown();
     locals_.clear();
     loops_.clear();
     scope_depth_  = 0;
@@ -208,6 +209,7 @@ bool Emitter::check_function(const FnDecl& fn, Chunk& out, DiagnosticBag& shadow
                              IrBlock* out_body) {
     size_t before = shadow.size();
     reset(out, "FN");
+    return_type_ = Type::from_declared(fn.return_type);
 
     for (const auto& p : fn.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
     IrBlock body = check_block(fn.body, shadow);
@@ -219,6 +221,7 @@ bool Emitter::check_method(const std::string& cls, const FnDecl& m, Chunk& out,
                            DiagnosticBag& shadow, IrBlock* out_body) {
     size_t before = shadow.size();
     reset(out, "FN");
+    return_type_ = Type::from_declared(m.return_type);
 
     declare_local("this", m.loc, Type::class_ref(cls));
     for (const auto& p : m.params) declare_local(p.name, p.loc, Type::from_declared(p.type));
@@ -331,6 +334,21 @@ IrBlock Emitter::check_block(const Block& body, DiagnosticBag& shadow) {
     return out;
 }
 
+// Can a value of static type `got` go where `want` was declared?  Only a
+// DEFINITE mismatch is an error: an unknown side (type_of() could not tell)
+// or Json (dynamic by definition) passes, int widens to float (§7), and
+// List/Dict compare only the container -- their element type is not tracked
+// through calls, so comparing it would invent errors.
+static bool assignable(const Type& want, const Type& got) {
+    using K = Type::Kind;
+    if (want.is_unknown() || got.is_unknown()) return true;
+    if (want.kind() == K::Json || got.kind() == K::Json) return true;
+    if (want.kind() == K::Float && got.kind() == K::Int) return true;
+    if (want.kind() != got.kind()) return false;
+    if (want.kind() == K::Class) return want.class_name() == got.class_name();
+    return true;
+}
+
 IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
     auto node = [&]() {
         auto r = std::make_unique<IrStmt>();
@@ -345,6 +363,16 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             if (s.value) {
                 IrExprPtr v = check_expr(*s.value, shadow);
                 if (!v) return nullptr;
+                const Type got = type_of(*s.value);
+                if (return_type_.kind() == Type::Kind::Void && !got.is_unknown()) {
+                    shadow.error(s.loc, "a void fn cannot return a value (" + got.to_string() + ")");
+                    return nullptr;
+                }
+                if (!assignable(return_type_, got)) {
+                    shadow.error(s.loc, "this fn returns " + return_type_.to_string() +
+                                 ", not " + got.to_string());
+                    return nullptr;
+                }
                 r->value = std::move(v);
             }
             return r;
@@ -360,11 +388,22 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
 
         case StmtKind::VarDecl: {
             IrExprPtr v;
+            bool mismatch = false;
             if (s.value) {
                 v = check_expr(*s.value, shadow);
                 if (!v) return nullptr;
+                const Type want = Type::from_declared(s.type);
+                const Type got  = type_of(*s.value);
+                if (!assignable(want, got)) {
+                    shadow.error(s.loc, "'" + s.name + "' is declared " + want.to_string() +
+                                 " but is initialized with " + got.to_string());
+                    mismatch = true;
+                }
             }
+            // Declared even on a mismatch: later uses must not cascade into
+            // "'x' is not declared".
             int slot = declare_local(s.name, s.loc, Type::from_declared(s.type));
+            if (mismatch) return nullptr;
             auto r = node();
             r->value     = std::move(v);
             r->name      = s.name;
@@ -427,6 +466,13 @@ IrStmtPtr Emitter::check_stmt(const Stmt& s, DiagnosticBag& shadow) {
             }
             IrExprPtr val = check_expr(*s.value, shadow);
             if (!val) return nullptr;
+            const Type want = local_type(s.target->text);
+            const Type got  = type_of(*s.value);
+            if (!assignable(want, got)) {
+                shadow.error(s.loc, "cannot assign " + got.to_string() + " to '" +
+                             s.target->text + "', declared " + want.to_string());
+                return nullptr;
+            }
             auto r = node();
             r->assign_target = IrAssignTarget::Local;
             r->assign_slot   = slot;

@@ -1,0 +1,23 @@
+# What the declared-type check must keep accepting.
+class P:
+    int x
+
+fn float decl_types_widen():
+    return 3
+
+fn P decl_types_make():
+    return P(1)
+
+fn void decl_types_ok():
+    float a = 2
+    long b = 5
+    int? c = null
+    List<int> xs = [1, 2]
+    Json j = 3
+    string s = "x"
+    string t = s.upper()
+    P p = decl_types_make()
+    a = 4
+
+get endpoint("/"):
+    return {"ok": true}

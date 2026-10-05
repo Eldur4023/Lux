@@ -228,6 +228,9 @@ private:
     // time: at runtime an instance is a Dict and would be indistinguishable.
     struct Local { std::string name; int depth; Type type; };
     std::vector<Local> locals_;
+    // Declared return type of the fn/method being checked; unknown in
+    // routes, constructors and handlers (their `return` is not typed).
+    Type return_type_ = Type::unknown();
     int                scope_depth_ = 0;
 
     // Pending jumps of the loop in progress.  Both are patched when it closes:
