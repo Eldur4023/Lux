@@ -587,6 +587,47 @@ check "records: two shapes stay Dicts"       GET /records_mixed 200 '[{"a":1},{"
 check "records: a reused slot is not one"   GET /records_slot 200 '{"x":1}'
 check "records: ...and its own branch is"    GET '/records_slot?c=1' 200 '[{"a":1}]'
 
+echo "== .luxp: render() for Luxium (luxp.lux) =="
+export LUX_LUXP_CHECK=1   # the server compares every plan answer with translating its HTML
+next_server "$HERE/cases/luxp.lux" || exit 1
+# check_luxp <name> <path> <bytes>: asked with Accept: application/x-luxp,
+# the answer is a .luxp holding <bytes> and no HTML/CSS/LuxScript source.
+check_luxp() {
+    local name="$1" path="$2" needle="$3" ct
+    ct=$(curl -sS --max-time 10 -H "Accept: application/x-luxp" -o "$TMP/body" \
+         -w '%{content_type}' "http://127.0.0.1:$PORT$path" 2>/dev/null)
+    if [ "$ct" != "application/x-luxp" ]; then
+        fail "$name" "Content-Type application/x-luxp" "$ct — $(head -c 120 "$TMP/body")"; return
+    fi
+    python3 "$HERE/luxp_dump.py" "$TMP/body" > "$TMP/dump" 2>/dev/null
+    if grep -qaF "$needle" "$TMP/dump" && ! grep -qaF "<html" "$TMP/dump"
+    then ok "$name"; else fail "$name" "a .luxp holding '$needle', no HTML source" "$(head -c 60 "$TMP/body" | cat -v)"; fi
+}
+# check_html <name> <path>: asked for a .luxp, the page comes back as HTML.
+check_html() {
+    local name="$1" path="$2" ct
+    ct=$(curl -sS --max-time 10 -H "Accept: application/x-luxp" -o "$TMP/body" -w '%{content_type}' "http://127.0.0.1:$PORT$path" 2>/dev/null)
+    case "$ct" in text/html*) ok "$name" ;; *) fail "$name" "text/html" "$ct" ;; esac
+}
+check_luxp "render() -> .luxp with the template's data"    '/hello?who=Zoe' 'Zoe'
+check_luxp "{{ }} inside the page's <script>"               '/hello?who=Zoe' 'Hola desde LuxScript, '
+check_luxp "<link> through a static mount, and its @import" '/hello'         'rebeccapurple'
+check_luxp "constant render(): translated at startup"       '/fixed'         'cambiada por LuxScript'
+check "same route, any other browser: HTML" GET '/hello?who=Zoe' 200 '<h1 id="t">Hola Zoe</h1>'
+check_luxp "plan: values in text and attributes"          '/plan?who=Zoe&n=3'   'Item <2> & "co" '"'"'x'"'"
+check_luxp "plan: a loop of zero rows, an empty list"      '/plan?n=0'           'pocos'
+check_luxp "plan: elif branch"                             '/plan?n=2'           'dos'
+check_luxp "plan: a value that looks like markup"          '/plan?who=%3Cb%3E%26amp;&n=1' '<b>&amp;'
+check_luxp "plan: a bigger page"                           '/plan?n=40'          'Item <39>'
+check_luxp "plan: 200 rows (a child count longer than one byte)" '/plan?n=200'   'Item <199>'
+check_luxp "no plan: |safe, answered by translating"       '/raw'                'rawok'
+check_luxp "no plan: unquoted attribute"                   '/unquoted?who=a%20b' 'a b'
+check_luxp "no plan: a tag split by {% if %}"              '/condattr'           'class'
+check_html "a page with JavaScript is HTML"                '/js'
+if grep -q "luxp: a template's plan differs" "$TMP/srv.log"; then fail "plans equal translating their HTML" "no 'plan differs' in the log" "$(grep -m1 'plan differs' "$TMP/srv.log" | head -c 400)"; else ok "plans equal translating their HTML (LUX_LUXP_CHECK)"; fi
+unset LUX_LUXP_CHECK
+fails_to_compile "a page's LuxScript is checked at compile time" "$HERE/cases/bad/luxp_script.lux" "template 'broken.html': line 3: 'n' is declared int"
+
 echo "== --native semantics (native_edges.lux) =="
 next_server "$HERE/cases/native_edges.lux" /mixed || exit 1
 check "a list shared by two variables"      GET /values 200 '"b":[1,2,3]'

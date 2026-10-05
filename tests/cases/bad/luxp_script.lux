@@ -1,0 +1,7 @@
+# A page script that does not compile is a compile error of the project:
+# render() with constant data translates the page to .luxp at startup.
+app:
+    templates "./luxp_templates"
+
+get endpoint("/"):
+    return render("broken.html")

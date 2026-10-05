@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>{{ who }} · plan</title>
+<style>td{padding:2px} .sel{color:#c00}</style></head>
+<body class="b-{{ n }}" data-who="{{ who }}">
+<h1 id="t">Hola {{ who }}!</h1>
+{% if n > 2 %}<p class="big">grande ({{ n }})</p>{% elif n == 2 %}<p>dos</p>{% else %}<p>pocos</p>{% endif %}
+<table><tr><th>#</th><th>Nombre</th><th>Tags</th></tr>
+{% for r in rows %}<tr class="row{{ r.id }}" data-p="{{ r.price }}"><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{% for tg in r.tags %}{{ tg }}{{ loop.last ? "" : "," }}{% endfor %}</td></tr>
+{% endfor %}</table>
+<ul>{% for e in empty %}<li>{{ e }}</li>{% endfor %}</ul>
+<p>Total: {% for r in rows %}{{ r.price }} {% endfor %}fin</p>
+<p>solo texto &amp; entidad &middot; fijo</p>
+<p>{{ who }}{{ n }}</p><p>{% if n > 100 %}nunca{% endif %}</p>
+<script type="text/luxscript">
+document.get("t").set_text("listo")
+</script>
+</body></html>

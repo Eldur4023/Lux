@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><title>hola</title><link rel="stylesheet" href="/static/app.css"></head>
+<body><h1 id="t">Hola {{ who }}</h1>
+<ul>{% for it in items %}<li>{{ it }}</li>{% endfor %}</ul>
+<script type="text/luxscript">
+string quien = "{{ who }}"
+document.get("t").set_text("Hola desde LuxScript, " + quien)
+</script></body></html>

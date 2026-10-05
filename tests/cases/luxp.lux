@@ -1,0 +1,44 @@
+# render() answers .luxp (Luxium's compiled format) to a client that sends
+# Accept: application/x-luxp, and HTML to every other one -- same route,
+# same template.  The template is filled first, then translated, so {{ }}
+# works anywhere, even inside the page's <script>.
+app:
+    port 8000
+    templates "./luxp_templates"
+    static "/static" -> "./luxp_static"
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+# Constant data: rendered AND translated at startup.
+get endpoint("/fixed"):
+    return render("fixed.html")
+
+get endpoint("/hello", string who = "Ana"):
+    List<string> items = ["uno", "dos"]
+    return render("hello.html", who=who, items=items)
+
+# A template whose {{ }} and {% %} sit where the page's structure does not
+# depend on them gets a PLAN: translated once at compile time, filled per
+# request with no HTML parsing.  LUX_LUXP_CHECK=1 (the suite sets it) makes the
+# server compare every plan answer with translating its HTML, and log a
+# difference -- the suite fails if one is logged.
+get endpoint("/plan", string who = "Ana", int n = 3):
+    List<Json> rows = []
+    for int i in range(n):
+        rows.add({ "id": i, "name": "Item <" + str(i) + "> & \"co\" 'x'", "price": i * 3, "tags": ["a", "b"] })
+    return render("plan.html", who=who, rows=rows, n=n, empty=[])
+
+# Templates a plan cannot cover: the filled HTML is translated instead.
+get endpoint("/raw", string who = "<b>rawok</b>"):
+    return render("raw.html", who=who)
+
+get endpoint("/unquoted", string who = "k"):
+    return render("unquoted.html", who=who)
+
+get endpoint("/condattr"):
+    return render("condattr.html", items=["a", "b", "c"])
+
+# JavaScript: never a .luxp, always HTML.
+get endpoint("/js", string who = "j"):
+    return render("js.html", who=who)

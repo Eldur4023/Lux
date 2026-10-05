@@ -633,6 +633,53 @@ Range Not Satisfiable`; one whose END is past the end is clamped to the last rea
 (`bytes=0-99,200-299`) or one this cannot parse at all is not an error either: the file is
 served in full, exactly as if the header had never arrived.
 
+### Pages for Luxium (`.luxp`)
+
+[Luxium](../Luxium) is the browser that runs LuxScript instead of JavaScript. It does not
+read your HTML: it reads `.luxp`, pages already compiled into its own structures (DOM tree,
+parsed stylesheets, verified LuxScript bytecode). Lux produces them:
+
+```lux
+get endpoint("/hello", string who = "Ana"):
+    return render("hello.html", who=who)    # nothing to change
+```
+
+The same route answers `application/x-luxp` when the request says
+`Accept: application/x-luxp` (Luxium does), and `text/html` to every other browser —
+`Vary: Accept` on both. `{{ }}` keeps working anywhere, inside the page's
+`<script type="text/luxscript">` too. Its `<link rel="stylesheet">`, `@import` and `url()`
+resolve through your `static` mounts, the way a browser would request them.
+
+How much a request costs depends on the template:
+
+- **A template whose `{{ }}` and `{% %}` sit where the page's structure does not depend on
+  them** (text, quoted attributes, loops and conditions that open and close under the same
+  element) is compiled to `.luxp` **once, at startup**, into a document with holes. A request
+  only fills the holes: no HTML parsing, no CSS parsing, no compiling, no compression.
+- **Any other template** (`|safe`, a value in an unquoted attribute or inside a `<script>`,
+  a tag split by an `{% if %}`, a loop that creates its own `<tbody>`) has its filled HTML
+  translated per request. Its script and stylesheet are compiled once and cached.
+- `render()` with constant data is rendered and translated at startup.
+- A page with JavaScript is always answered HTML (Luxium hands it to Chromium).
+- The LuxScript of a template's `<script type="text/luxscript">` is compiled by
+  `lux --check`, against the browser's API: an error is reported at the `render()` that uses
+  the template, with the template's line. A script that interpolates `{{ }}` can only compile
+  once rendered: if it fails, that request is answered HTML and the log says why.
+
+Diagnostics: `LUX_LUXP_VERBOSE=1` logs why a template has no plan; `LUX_LUXP_CHECK=1`
+computes every plan answer the long way too and logs any difference; `LUX_LUXP_PLAN=0` turns
+plans off.
+
+A static site, without a server:
+
+```
+lux pack site/index.html app.luxp    # every local page it links to, their CSS and images
+```
+
+It fails on any LuxScript error, a missing stylesheet or image, a page that needs JavaScript,
+or a file outside the working directory. The format and its guarantees: Luxium's
+`docs/LUXP.md`.
+
 ### There is no `Response` type
 
 Since "everything goes out through `return`" (above), a helper `fn` cannot build a response
