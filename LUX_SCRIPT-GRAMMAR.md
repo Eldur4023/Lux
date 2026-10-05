@@ -827,6 +827,34 @@ List<int> xs = [1, 2, 3]
 A variable declared without an initializer holds its type's default value (`0` for the
 numeric ones, `""` for `string`, `false` for `bool`, `null` for an optional or class type).
 
+### Declared types are checked
+
+When both sides are statically known, the compiler rejects a mismatch between a declared
+type and the value it receives — in a declaration, in an assignment to a variable, and in
+the `return` of a `fn` or method:
+
+```lux
+int a = "hola"          # 'a' is declared int but is initialized with string
+int k = 1
+k = "x"                 # cannot assign string to 'k', declared int
+fn int count():
+    return "x"          # this fn returns int, not string
+fn void f():
+    return 3            # a void fn cannot return a value (int)
+```
+
+It only reports a DEFINITE mismatch. What it accepts:
+
+- `int` where `float` is declared (`float f = 2`): `int`/`long` are one type and `float`/`double`
+  another (§7), and an integer widens to a float. The reverse, `int g = 2.5`, is an error.
+- A side whose type the compiler cannot tell (the result of an expression it does not follow,
+  a loop variable over a `Json`) and anything involving `Json`, which is dynamic by definition.
+- `List<T>` and `Dict<K,V>` compare the container only: the element type is not followed
+  through calls, so comparing it would invent errors.
+
+A declaration that mismatches still declares the variable, so later uses do not cascade into
+`'x' is not declared`.
+
 ## 22. Assignment
 
 ```
