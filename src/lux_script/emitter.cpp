@@ -1980,6 +1980,14 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
         failed_ = true;
         return;
     }
+    if (templates_->check_page) {
+        bool bad = false;
+        for (const auto& msg : templates_->check_page(*source)) {
+            error(e.args[0].loc, "template '" + name + "': " + msg);
+            bad = true;
+        }
+        if (bad) { failed_ = true; return; }
+    }
     const uint32_t idx = static_cast<uint32_t>(templates_->table->size());
     templates_->table->push_back(std::move(tpl));
     if (templates_->by_key) {

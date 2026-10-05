@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -79,6 +80,10 @@ struct TemplateCtx {
     // "file|key:type,..." -> index in `table`: how a --native route finds
     // the template its render() compiled to (render_key(), native_gen).
     std::map<std::string, size_t, std::less<>>* by_key = nullptr;
+    // Extra checks on a template's source once it compiled; the host's
+    // business (Lux checks the page's own <script>s for .luxp -- luxp_serve).
+    // Returns an error message per problem, reported at the render() call.
+    std::function<std::vector<std::string>(const std::string& source)> check_page;
 };
 
 class Emitter {

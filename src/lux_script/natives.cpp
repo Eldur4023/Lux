@@ -1,6 +1,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <lux_script/natives.hpp>
+#include <lux_script/luxp_serve.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
 #include <lux_script/auth.hpp>
@@ -15,6 +16,7 @@
 #include <lux/multipart.hpp>
 
 #include <algorithm>
+#include <map>
 #include <array>
 #include <cctype>
 #include <cerrno>
@@ -82,11 +84,20 @@ Value fn_render_tpl(NativeCtx& ctx, std::vector<Value>& args, std::string& error
         values.push_back(it == args[1].as_dict().end() ? Value::null() : it->second);
     }
 
+    // A client that asks for a .luxp gets it from the template's plan when it
+    // has one (luxp_serve.hpp); otherwise the filled HTML is translated.
+    bool luxp_ok = true;
+    if (wants_luxp(ctx.req)) {
+        const LuxpOutcome o = luxp_respond(ctx, p, values);
+        if (o == LuxpOutcome::Sent) { ctx.response_written = true; return Value::null(); }
+        luxp_ok = o != LuxpOutcome::HtmlOnly;
+    }
+
     std::string out;
     if (!render_template(p, std::move(values), ctx, ctx.functions, out, error))
         return Value::null();
 
-    ctx.res.header("Content-Type", "text/html; charset=utf-8").send(std::move(out));
+    send_page(ctx.req, ctx.res, out, luxp_ok);
     ctx.response_written = true;
     return Value::null();
 }
@@ -829,13 +840,64 @@ bool SharedState::remove(const std::string& key) {
     return data_.erase(key) > 0 || had;
 }
 
+// ── the browser profile (BrowserProfile, natives.hpp) ─────────────────────
+namespace {
+thread_local bool t_browser = false;
+
+namespace browser {
+// Page bytecode never runs on the server: these only give the compiler
+// names, arities and types.
+Value stub(NativeCtx&, std::vector<Value>&, std::string& error) {
+    error = "a browser builtin cannot run on the server";
+    return Value::null();
+}
+const NativeDef kNatives[] = {
+#define LUX_BROWSER_NATIVE(name, min, max, impl) {name, min, max, stub},
+#include <lux_script/browser_api.inc>
+};
+struct Member { const char* object; const char* member; const char* native; };
+const Member kMembers[] = {
+#define LUX_BROWSER_MEMBER(object, member, native) {object, member, native},
+#include <lux_script/browser_api.inc>
+};
+struct Method { const char* type; BuiltinMethod m; };
+const Method kMethods[] = {
+#define LUX_BROWSER_METHOD(type, name, min, max, ret) {type, {name, min, max, ret}},
+#include <lux_script/browser_api.inc>
+};
+
+int id(const std::string& name) {
+    for (size_t i = 0; i < std::size(kNatives); ++i)
+        if (name == kNatives[i].name) return static_cast<int>(i);
+    return -1;
+}
+
+const std::vector<BuiltinMethod>* methods(const std::string& type) {
+    static const std::map<std::string, std::vector<BuiltinMethod>> by_type = [] {
+        std::map<std::string, std::vector<BuiltinMethod>> m;
+        for (const auto& x : kMethods) m[x.type].push_back(x.m);
+        return m;
+    }();
+    auto it = by_type.find(type);
+    return it == by_type.end() ? nullptr : &it->second;
+}
+} // namespace browser
+} // namespace
+
+BrowserProfile::BrowserProfile() : prev_(t_browser) { t_browser = true; }
+BrowserProfile::~BrowserProfile() { t_browser = prev_; }
+
 int native_id(const std::string& name) {
+    if (t_browser) return browser::id(name);
     for (size_t i = 0; i < kNatives.size(); ++i)
         if (name == kNatives[i].name) return static_cast<int>(i);
     return -1;
 }
 
-const NativeDef& native_at(int id) { return kNatives[static_cast<size_t>(id)]; }
+const NativeDef& native_at(int id) {
+    if (t_browser) return browser::kNatives[static_cast<size_t>(id)];
+    return kNatives[static_cast<size_t>(id)];
+}
 
 
 // ─── Methods on values ───────────────────────────────────────────────────────
@@ -1528,6 +1590,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
 // If a method is added above it has to be added here: they are the same list
 // seen from both sides.
 const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
+    if (t_browser) return browser::methods(type);
     // The three response modifiers chain onto ANY value —`return
     // {...}.status(201)`— so they appear in every list.
     static const std::vector<BuiltinMethod> kComunes = {
@@ -1631,6 +1694,11 @@ const std::array<MemberMap, 39> kMembers = {{
 // " db" (not a valid identifier, so no script can name it) stands for every
 // database module: sqlite/postgres/mysql expose the same six operations.
 int member_native_id(const std::string& object, const std::string& member) {
+    if (t_browser) {
+        for (const auto& m : browser::kMembers)
+            if (object == m.object && member == m.member) return browser::id(m.native);
+        return -1;
+    }
     const std::string obj = is_db_module(object) ? " db" : object;
     for (const auto& m : kMembers)
         if (obj == m.object && member == m.member) return native_id(m.native);
@@ -1638,12 +1706,17 @@ int member_native_id(const std::string& object, const std::string& member) {
 }
 
 bool is_reserved_object(const std::string& name) {
+    if (t_browser) {
+        for (const auto& m : browser::kMembers) if (name == m.object) return true;
+        return false;
+    }
     if (is_db_module(name)) return true;
     for (const auto& m : kMembers) if (name == m.object) return true;
     return false;
 }
 
 bool is_db_module(const std::string& name) {
+    if (t_browser) return false;
     return name == "sqlite" || name == "postgres" || name == "mysql";
 }
 

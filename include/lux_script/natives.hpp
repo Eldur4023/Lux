@@ -223,6 +223,22 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type);
 bool             is_reserved_object(const std::string& name);
 bool             is_db_module(const std::string& name);
 
+// Compiling a page script for the browser (.luxp, src/luxp): while one of
+// these lives on this thread, native_id/native_at/member_native_id/
+// methods_of/is_reserved_object/is_db_module answer with the browser's API
+// (browser_api.inc) instead of the server's -- same emitter, other world.
+// Thread-local and scoped: a server VM on another thread never sees it.
+// Luxium declares the same class as a no-op (its tables ARE the browser's).
+class BrowserProfile {
+public:
+    BrowserProfile();
+    ~BrowserProfile();
+    BrowserProfile(const BrowserProfile&) = delete;
+    BrowserProfile& operator=(const BrowserProfile&) = delete;
+private:
+    bool prev_;
+};
+
 // Messages of the last failed validation on this thread.  They are filled when
 // building the 422 and read by the `on error` handler of the same request;
 // there is no suspension between the two moments, so requests cannot cross.

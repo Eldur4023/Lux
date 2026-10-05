@@ -1,4 +1,5 @@
 // The Lux binary: it reads .lux files and serves.
+#include <lux_script/luxp_serve.hpp>
 #include "../http/http_parser.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -92,6 +93,13 @@ void usage() {
         "\n"
         "  Runs the `command \"name\":` block (after the `on start:` blocks)\n"
         "  once, as a script: os.argv(), os.input(), os.exit(code)\n"
+        "\n"
+        "       lux pack <page.html> <out.luxp>\n"
+        "\n"
+        "  Compiles a static HTML+CSS+LuxScript site (the page, every local\n"
+        "  page it links to, their stylesheets and images) into one .luxp for\n"
+        "  Luxium.  render() answers .luxp by itself to a client that sends\n"
+        "  Accept: application/x-luxp\n"
         "\n"
         "       lux test <files|directory> [-- name-filter]\n"
         "\n"
@@ -349,6 +357,20 @@ int main(int argc, char** argv) {
     mallopt(M_TRIM_THRESHOLD, 8 << 20);
     if (argc >= 2 && std::string(argv[1]) == "restore")
         return lux_script::restore_main({argv + 2, argv + argc});
+
+    // lux pack page.html out.luxp: a static HTML+CSS+LuxScript site compiled
+    // into one .luxp (Luxium's format; luxp_serve.hpp).
+    if (argc >= 2 && std::string(argv[1]) == "pack") {
+        if (argc != 4) {
+            std::fprintf(stderr, "usage: lux pack <page.html> <out.luxp>\n");
+            return 2;
+        }
+        std::string report;
+        const bool ok = lux_script::pack_site(argv[2], argv[3], &report);
+        std::fputs(report.c_str(), ok ? stdout : stderr);
+        if (!ok) std::fputs("\n", stderr);
+        return ok ? 0 : 1;
+    }
 
     std::vector<std::string> args;
     const bool run_mode  = argc >= 2 && std::string(argv[1]) == "run";

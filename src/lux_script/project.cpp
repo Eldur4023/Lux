@@ -1,3 +1,4 @@
+#include <lux_script/luxp_serve.hpp>
 #include <lux_script/project.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/lexer.hpp>
@@ -297,8 +298,21 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             diags.error(e.loc, "when rendering '" + name + "': " + err);
             return {};
         }
-        return [html](lux::Request&, lux::Response& res) {
-            res.header("Content-Type", "text/html; charset=utf-8").send(html);
+        // Its .luxp too (Luxium asks for it with Accept), translated once,
+        // here.  An error in the page's text/luxscript is a compile error of
+        // the project (raised again, with its location, by the VM path this
+        // falls back to); JavaScript is not: that page is always HTML.
+        if (!check_page_scripts(*source).empty()) {
+            diags.error(e.loc, "page script of '" + name + "'");
+            return {};
+        }
+        std::optional<std::string> luxp = html_to_luxp(html, "/" + name, nullptr);
+        return [html, luxp](lux::Request& req, lux::Response& res) {
+            res.header("Vary", "Accept");
+            if (luxp && wants_luxp(req))
+                res.header("Content-Type", "application/x-luxp").send(*luxp);
+            else
+                res.header("Content-Type", "text/html; charset=utf-8").send(html);
         };
     }
 
@@ -1751,7 +1765,7 @@ void build_error_handlers(Module& mod, const FunctionSigs& fns,
                           const ClassSigs& sigs, const EnumSigs& enums,
                           DiagnosticBag& diags) {
     // An error handler can render a page too.
-    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates};
+    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates, nullptr, check_page_scripts};
     for (const auto& e : mod.program.errors) {
         auto    chunk = std::make_shared<Chunk>();
         Emitter emitter(diags, &fns, &sigs, &mod.program.imports, &pctx, &enums);
@@ -1822,7 +1836,7 @@ void build_routes(Module& mod, const ClassTable& classes, const AuthConfig& auth
 
     // Context the emitters need to compile the templates they find in a
     // render().
-    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates, &mod.template_keys};
+    TemplateCtx pctx{mod.program.app.templates_dir, &mod.templates, &mod.template_keys, check_page_scripts};
 
     for (size_t ridx = 0; ridx < mod.program.routes.size(); ++ridx) {
         const auto& r = mod.program.routes[ridx];
@@ -2299,6 +2313,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         };
         resolve(mod->program.app.templates_dir);
         for (auto& m : mod->program.app.statics) resolve(m.fs_root);
+        set_luxp_statics(mod->program.app.statics);   // render() -> .luxp resolves <link>/url() through them
         auto sqlite_it = mod->program.app.modules.find("sqlite");
         if (sqlite_it != mod->program.app.modules.end()) {
             auto file_it = sqlite_it->second.find("file");
