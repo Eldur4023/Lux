@@ -208,7 +208,6 @@ struct AppDecl {
     int                      port = 8080;
     LogConfig                log;
     std::string              host = "0.0.0.0";
-    std::string              tls_cert, tls_key;   // both set: the listener speaks HTTPS
     std::vector<std::pair<std::string, std::string>> headers;   // sent on every response
     size_t                   max_body = 16u * 1024 * 1024;   // request body cap, bytes
     std::string              templates_dir = "./templates";
@@ -230,6 +229,13 @@ struct AppDecl {
     bool                     present = false;
 };
 
+// `tls:` block: when present, the app's port speaks HTTPS.
+struct TlsDecl {
+    bool        present = false;
+    SourceLoc   loc;
+    std::string cert, key;
+};
+
 struct Program {
     // Imported modules.  `sqlite.query(...)` can only be used if there is an
     // `import sqlite`.
@@ -240,6 +246,7 @@ struct Program {
     std::vector<RouteDecl> routes;
     std::vector<ErrorDecl> errors;
     AppDecl                app;
+    TlsDecl                tls;
 };
 
 } // namespace lux_script

@@ -55,13 +55,13 @@ bool init(const std::string& cert_file, const std::string& key_file, std::string
     SSL_CTX_set_num_tickets(c, 1);
 
     if (SSL_CTX_use_certificate_chain_file(c, cert_file.c_str()) != 1) {
-        err = "tls_cert " + cert_file + ": " + last_error(); SSL_CTX_free(c); return false;
+        err = "tls cert " + cert_file + ": " + last_error(); SSL_CTX_free(c); return false;
     }
     if (SSL_CTX_use_PrivateKey_file(c, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-        err = "tls_key " + key_file + ": " + last_error(); SSL_CTX_free(c); return false;
+        err = "tls key " + key_file + ": " + last_error(); SSL_CTX_free(c); return false;
     }
     if (SSL_CTX_check_private_key(c) != 1) {
-        err = "tls_cert and tls_key do not match: " + last_error(); SSL_CTX_free(c); return false;
+        err = "tls cert and key do not match: " + last_error(); SSL_CTX_free(c); return false;
     }
     g_ctx = c;
     return true;

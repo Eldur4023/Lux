@@ -25,7 +25,7 @@ endif()
 
 option(LUX_IO_URING "io_uring backend instead of epoll (Linux 5.1+)" OFF)
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
-# HTTPS in the server itself (app: tls_cert / tls_key). Off by default: without it the
+# HTTPS in the server itself (tls: cert / key). Off by default: without it the
 # core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
 option(LUX_TLS      "HTTPS: Lux terminates TLS (OpenSSL libssl)"          OFF)
 

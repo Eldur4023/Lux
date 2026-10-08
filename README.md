@@ -160,7 +160,7 @@ way into templates too.
 |---|---|
 | Auth | Vendored HMAC-SHA256, HS256. No OpenSSL. RS256 is not available |
 | Real time | SSE and WebSockets |
-| Transport | HTTP/1.1; HTTPS built in as an option (`-DLUX_TLS=ON`, `tls_cert`/`tls_key`). HTTP/2 belongs to the reverse proxy |
+| Transport | HTTP/1.1; HTTPS built in as an option (`-DLUX_TLS=ON`, `tls:` block). HTTP/2 belongs to the reverse proxy |
 | Execution | Bytecode on a custom VM, one VM per event-loop thread |
 | Compilation | Built into the binary. No external toolchain, no transpilation to C++ |
 | Persistence | `sqlite`, `postgres`, and `mysql` modules over a thread pool and `await`. `?` placeholder in all three — the postgres driver translates it to `$1` |

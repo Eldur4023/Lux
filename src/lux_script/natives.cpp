@@ -627,7 +627,7 @@ Value fn_req_host(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(hdr(ctx, "host"));
 }
 
-// "https" when Lux itself terminates TLS (tls_cert/tls_key); otherwise only when
+// "https" when Lux itself terminates TLS (a tls: block); otherwise only when
 // a proxy on this machine says so: from anyone else the header is just a claim.
 Value fn_req_scheme(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     if (lux::tls::enabled()) return Value::str("https");

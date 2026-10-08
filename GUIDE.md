@@ -184,8 +184,6 @@ app:
     version   "1.0.0"
     port      8080
     host      "127.0.0.1"     # listen address; default 0.0.0.0
-    tls_cert  "fullchain.pem" # with tls_key: the port speaks HTTPS (needs -DLUX_TLS=ON)
-    tls_key   "privkey.pem"
     max_body  "16MB"          # request body cap (see §16 for bigger uploads)
     templates "./templates"
 
@@ -232,9 +230,17 @@ whatever directory that launcher happened to start in (which, for a database fil
 silently creating and using an empty one — no error, since a missing sqlite file is normally
 just a fresh database). An absolute path, or one built from `env(...)`, is never touched.
 
-**HTTPS.** With `tls_cert` and `tls_key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
+**HTTPS.** A top-level `tls:` block, next to `app:`, makes the app's port speak HTTPS; without it the port is plain HTTP.
+
+```
+tls:
+    cert "fullchain.pem"
+    key  "privkey.pem"
+```
+
+With `cert` and `key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
 so no reverse proxy is needed for it. It is a build option, `cmake -DLUX_TLS=ON` (needs `libssl-dev`);
-a binary without it refuses to start with these keys instead of serving plain HTTP. Measured on 8
+a binary without it refuses to start with a `tls:` block instead of serving plain HTTP. Measured on 8
 cores against nginx in front: Lux alone ~125k req/s on a small route, nginx + keep-alive to Lux ~60k,
 nginx with its default `proxy_pass` ~21k. Not included: HTTP/2, a plain-HTTP-to-HTTPS redirect on
 another port (that is one `return 301` in whatever listens on 80) and certificate reload (restart

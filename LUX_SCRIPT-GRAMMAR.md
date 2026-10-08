@@ -428,8 +428,6 @@ app:
     port      8080
     templates "./templates"
     host      "127.0.0.1"           # listen address (default 0.0.0.0)
-    tls_cert  "fullchain.pem"       # PEM paths; both set = HTTPS (binary built with -DLUX_TLS=ON)
-    tls_key   "privkey.pem"
     headers:                        # added to every response; a handler's own header wins
         "Content-Security-Policy" "default-src 'self'"
         "Strict-Transport-Security" "max-age=31536000"
@@ -455,6 +453,15 @@ app:
     sqlite:
         file "./data.db"
         pool 8
+```
+
+HTTPS is a separate top-level block, also once per project. Without it the port is plain HTTP;
+with it the same port speaks TLS (binary built with `-DLUX_TLS=ON`):
+
+```lux
+tls:
+    cert "fullchain.pem"      # PEM paths; env("VAR") works
+    key  "privkey.pem"
 ```
 
 `env("VAR")` is resolved **at compile time**, not when the process starts: it is the only way

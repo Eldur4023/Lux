@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HTTPS in the server itself (app: tls_cert / tls_key). Needs a binary built with
+# HTTPS in the server itself (tls: cert / key). Needs a binary built with
 # -DLUX_TLS=ON, skipped (77) otherwise. Usage: tests/run_tls.sh [lux-binary]
 set -u
 cd "$(dirname "$0")/.."
@@ -12,9 +12,11 @@ cat > "$T/app.lux" <<LUX
 app:
     port     $PORT
     host     "127.0.0.1"
-    tls_cert "$T/c.pem"
-    tls_key  "$T/k.pem"
     static "/static" -> "$T/public"
+
+tls:
+    cert "$T/c.pem"
+    key  "$T/k.pem"
 
 get endpoint("/hi"):
     return { "scheme": request.scheme }
@@ -49,5 +51,5 @@ check "survives a broken handshake"       "$(curl -sk $U/hi)" '{"scheme":"https"
 # a key that does not exist is a startup error, not a server that silently speaks HTTP
 sed -i "s#k.pem#nokey.pem#" "$T/app.lux"; sed -i "s#port     $PORT#port     $((PORT+1))#" "$T/app.lux"
 timeout 5 "$LUX" --no-watch "$T/app.lux" >"$T/bad.log" 2>&1; rc=$?
-check "missing tls_key stops the server"  "$rc:$(grep -c 'https: ' "$T/bad.log")" "1:1"
+check "missing tls key stops the server"  "$rc:$(grep -c 'https: ' "$T/bad.log")" "1:1"
 exit $fail

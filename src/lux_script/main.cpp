@@ -462,6 +462,7 @@ int main(int argc, char** argv) {
     publish_module(mod);
 
     const lux_script::AppDecl& cfg = mod->program.app;
+    const lux_script::TlsDecl& tls = mod->program.tls;
     lux::App app;
     // One line per request, with its flush, costs close to 25% of the
     // throughput and multiplies median latency by 2.6: it is opt-in.
@@ -624,10 +625,9 @@ int main(int argc, char** argv) {
         }).detach();
     }
 
-    if (!test_mode && (!cfg.tls_cert.empty() || !cfg.tls_key.empty())) {
-        std::string tls_err = "app: needs both tls_cert and tls_key for HTTPS";
-        if (cfg.tls_cert.empty() || cfg.tls_key.empty() ||
-            !lux::tls::init(cfg.tls_cert, cfg.tls_key, tls_err)) {
+    if (!test_mode && tls.present) {
+        std::string tls_err = "tls: needs both cert and key for HTTPS";
+        if (tls.cert.empty() || tls.key.empty() || !lux::tls::init(tls.cert, tls.key, tls_err)) {
             std::cerr << "https: " << tls_err << "\n";
             return 1;
         }
