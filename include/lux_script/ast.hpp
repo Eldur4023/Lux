@@ -208,6 +208,7 @@ struct AppDecl {
     int                      port = 8080;
     LogConfig                log;
     std::string              host = "0.0.0.0";
+    std::string              tls_cert, tls_key;   // both set: the listener speaks HTTPS
     std::vector<std::pair<std::string, std::string>> headers;   // sent on every response
     size_t                   max_body = 16u * 1024 * 1024;   // request body cap, bytes
     std::string              templates_dir = "./templates";

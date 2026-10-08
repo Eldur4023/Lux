@@ -25,6 +25,9 @@ endif()
 
 option(LUX_IO_URING "io_uring backend instead of epoll (Linux 5.1+)" OFF)
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
+# HTTPS in the server itself (app: tls_cert / tls_key). Off by default: without it the
+# core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
+option(LUX_TLS      "HTTPS: Lux terminates TLS (OpenSSL libssl)"          OFF)
 
 # Manual fuzzing harnesses -- see fuzz/chaos.hpp for why libFuzzer is not used
 # (it needs clang; this toolchain is gcc).  Off by default: it is not part of the
@@ -44,8 +47,9 @@ option(LUX_GZIP     "Native module: gzip, and deflate in zip (zlib)"  ON)
 option(LUX_IMAGE    "Native module: image (libjpeg, libpng, libwebp)" ON)
 
 # ── System dependencies ───────────────────────────────────────────────────────
-# Lux links neither OpenSSL, nghttp2 nor zlib: TLS, HTTP/2 and compression are
-# the reverse proxy's business.  Only threads are needed.
+# Lux links neither OpenSSL, nghttp2 nor zlib: HTTP/2 and compression are the
+# reverse proxy's business, and so is TLS unless built with -DLUX_TLS=ON.  Only
+# threads are needed.
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
@@ -92,6 +96,7 @@ set(LUX_SOURCES
     src/core/tcp_server.cpp
     src/http/http_parser.cpp
     src/http/http_connection.cpp
+    src/http/tls.cpp
 )
 
 if(LUX_IO_URING)
@@ -110,6 +115,14 @@ target_link_libraries(lux PUBLIC
     Threads::Threads
     ${LUX_ALLOC}
 )
+
+if(LUX_TLS)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(LUX_SSL REQUIRED libssl libcrypto)
+    target_compile_definitions(lux PUBLIC LUX_TLS)
+    target_include_directories(lux PUBLIC ${LUX_SSL_INCLUDE_DIRS})
+    target_link_libraries(lux PUBLIC ${LUX_SSL_LDFLAGS})
+endif()
 
 if(LUX_IO_URING)
     # io_uring_loop.cpp calls io_uring_setup/io_uring_enter via raw

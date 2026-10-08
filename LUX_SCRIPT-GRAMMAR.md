@@ -428,6 +428,8 @@ app:
     port      8080
     templates "./templates"
     host      "127.0.0.1"           # listen address (default 0.0.0.0)
+    tls_cert  "fullchain.pem"       # PEM paths; both set = HTTPS (binary built with -DLUX_TLS=ON)
+    tls_key   "privkey.pem"
     headers:                        # added to every response; a handler's own header wins
         "Content-Security-Policy" "default-src 'self'"
         "Strict-Transport-Security" "max-age=31536000"

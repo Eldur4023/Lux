@@ -1,6 +1,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <lux_script/natives.hpp>
+#include <lux/tls.hpp>
 #include <lux_script/luxp_serve.hpp>
 #include <lux_script/template.hpp>
 #include <lux_script/crypto.hpp>
@@ -637,9 +638,10 @@ Value fn_req_host(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(hdr(ctx, "host"));
 }
 
-// "https" only when a proxy on this machine says so (TLS ends at the proxy):
-// from anyone else the header is just a claim.
+// "https" when Lux itself terminates TLS (tls_cert/tls_key); otherwise only when
+// a proxy on this machine says so: from anyone else the header is just a claim.
 Value fn_req_scheme(NativeCtx& ctx, std::vector<Value>&, std::string&) {
+    if (lux::tls::enabled()) return Value::str("https");
     const auto& ip = ctx.req.remote_ip;
     const bool local = ip == "127.0.0.1" || ip == "::1";
     return Value::str(local && hdr(ctx, "x-forwarded-proto") == "https" ? "https" : "http");

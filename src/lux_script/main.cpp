@@ -17,6 +17,7 @@
 #include <lux/app.hpp>
 #include <lux/middleware.hpp>
 #include <lux/logger.hpp>
+#include <lux/tls.hpp>
 #include <lux/openapi.hpp>
 
 #include <atomic>
@@ -645,6 +646,14 @@ int main(int argc, char** argv) {
         }).detach();
     }
 
+    if (!test_mode && (!cfg.tls_cert.empty() || !cfg.tls_key.empty())) {
+        std::string tls_err = "app: needs both tls_cert and tls_key for HTTPS";
+        if (cfg.tls_cert.empty() || cfg.tls_key.empty() ||
+            !lux::tls::init(cfg.tls_cert, cfg.tls_key, tls_err)) {
+            std::cerr << "https: " << tls_err << "\n";
+            return 1;
+        }
+    }
     lux::http::g_max_body_size = cfg.max_body;
     lux::global_headers() = cfg.headers;
     app.run(test_mode ? std::string("127.0.0.1") : cfg.host, port_override ? static_cast<uint16_t>(port_override)
