@@ -44,6 +44,13 @@ bool init(const std::string& cert_file, const std::string& key_file, std::string
     }
     // No renegotiation (a DoS lever, and TLS 1.3 has none). Partial writes and a
     // moving buffer because HttpConnection retries from write_buf_ + offset.
+    // kTLS on transmit (the kernel encrypts, so a static file goes out through
+    // sendfile instead of pread + user-space AES): only where the kernel's AES-GCM
+    // is fast. On a VM without PCLMULQDQ it measured slower than OpenSSL's own.
+    // Without the `tls` kernel module this silently stays on user-space TLS.
+#ifndef OPENSSL_NO_KTLS
+    if (fast_aes_gcm()) SSL_CTX_set_options(c, SSL_OP_ENABLE_KTLS);
+#endif
     // RELEASE_BUFFERS: an idle keep-alive connection holds no 30+ KB of record buffers.
     SSL_CTX_set_options(c, SSL_OP_NO_RENEGOTIATION | SSL_OP_CIPHER_SERVER_PREFERENCE);
     SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |

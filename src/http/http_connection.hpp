@@ -43,6 +43,8 @@ private:
     bio_st*            tls_in_         = nullptr;  // ciphertext read off the socket, for OpenSSL (owned by ssl_)
     bool               tls_want_out_   = false;  // the handshake needs EPOLLOUT, not a response
     bool               tls_drained_    = false;  // the last socket read was short: empty until the next edge
+    bool    corked_         = false;  // TCP_CORK while a TLS file response goes out
+    void    cork(bool on);
     ssize_t io_read(void* buf, size_t n);
     ssize_t io_write(const void* buf, size_t n);
     ssize_t tls_ret(int r, bool reading);

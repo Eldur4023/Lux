@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -77,6 +78,16 @@ ssize_t HttpConnection::tls_ret(int r, bool reading) {
     }
 }
 #endif
+
+// A TLS response is several records, each a TCP push (and, on loopback, a trip
+// through the receiver too): cork the socket so a file response leaves as full
+// segments, and uncork when it is written.
+void HttpConnection::cork(bool on) {
+    if (corked_ == on) return;
+    corked_ = on;
+    int v = on;
+    ::setsockopt(fd_, IPPROTO_TCP, TCP_CORK, &v, sizeof v);
+}
 
 ssize_t HttpConnection::io_read(void* buf, size_t n) {
 #ifdef LUX_TLS
@@ -660,6 +671,7 @@ void HttpConnection::send_response(std::string data, const std::string* body) {
     // an offset and arm EPOLLOUT only (EPOLLIN dropped until it completes).
     // Headers with a file behind them wait for it (MSG_MORE): one segment
     // for both instead of a small one of their own.
+    if (ssl_ && file_fd_ >= 0) cork(true);
     ssize_t n = file_fd_ >= 0 && !ssl_ ? ::send(fd_, data.data(), data.size(), MSG_MORE)
                                        : io_write(data.data(), data.size());
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
@@ -787,8 +799,28 @@ void HttpConnection::queue_ws_write(std::string frame) {
 void HttpConnection::do_sendfile() {
     // Over TLS the bytes are encrypted in user space: pread a chunk into
     // write_buf_ and drain it (do_write() comes back here when it blocks).
-    // kTLS (sendfile through the kernel's TLS) was measured on the target VPS
-    // and lost: the kernel's per-record crypto cost more than the copies saved.
+    // With kTLS on transmit (tls.cpp enables it where the kernel's AES-GCM is
+    // fast) the file goes through the kernel as plaintext, like plain HTTP.
+#if defined(LUX_TLS) && !defined(OPENSSL_NO_KTLS)
+    if (ssl_ && BIO_get_ktls_send(SSL_get_wbio(ssl_))) {
+        while (file_remaining_ > 0) {
+            ssize_t n = tls_ret(static_cast<int>(SSL_sendfile(ssl_, file_fd_, file_offset_,
+                                    std::min(file_remaining_, size_t{256 * 1024}), 0)), false);
+            if (n < 0) {
+                if (errno == EAGAIN) { arm(EPOLLOUT); return; }
+                close(); return;
+            }
+            if (n == 0) break;
+            file_offset_    += n;
+            file_remaining_ -= static_cast<size_t>(n);
+            refresh_request_timeout();
+        }
+        ::close(file_fd_);
+        file_fd_ = -1; file_offset_ = 0; file_remaining_ = 0;
+        on_write_complete();
+        return;
+    }
+#endif
     while (ssl_ && file_remaining_ > 0) {
         write_buf_.resize(std::min(file_remaining_, size_t{64 * 1024}));
         ssize_t r = ::pread(file_fd_, write_buf_.data(), write_buf_.size(), file_offset_);
@@ -828,6 +860,7 @@ void HttpConnection::do_sendfile() {
 }
 
 void HttpConnection::on_write_complete() {
+    cork(false);
     // Cancel the request timeout — response delivered successfully
     deadline_msg_ = nullptr;
     in_flight_ = false;

@@ -388,7 +388,7 @@ restarts it after every renewal (open connections drop for an instant). Also:
   group or copy the files in the deploy hook.
 - Lux listens on one port and does not redirect HTTP to HTTPS. If you want that, something else
   on port 80 has to answer with a `301`.
-- Not included: HTTP/2. A static file is encrypted in user space, so it is not zero-copy over TLS.
+- Not included: HTTP/2. A static file is encrypted in user space unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM; then Lux uses kTLS and `sendfile`. Without the module it stays in user space.
 
 ---
 

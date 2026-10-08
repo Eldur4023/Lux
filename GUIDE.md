@@ -244,7 +244,7 @@ a binary without it refuses to start with a `tls:` block instead of serving plai
 cores against nginx in front: Lux alone ~125k req/s on a small route, nginx + keep-alive to Lux ~60k,
 nginx with its default `proxy_pass` ~21k. Not included: HTTP/2, a plain-HTTP-to-HTTPS redirect on
 another port (that is one `return 301` in whatever listens on 80) and certificate reload (restart
-after a renewal). A static file is encrypted in user space, so it is not zero-copy over TLS.
+after a renewal). A static file is encrypted in user space (pread + OpenSSL) unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM: then Lux hands the encryption to the kernel (kTLS) and the file goes out through `sendfile`, about 20% more requests per second on a 30 KB file in a local test. Without the module nothing breaks, it just stays in user space.
 
 `spa` on a static mount makes routes that are not found fall back to `index.html`. A directory
 request (`/docs` or `/docs/`) serves that directory's own `index.html` if it has one, same as
