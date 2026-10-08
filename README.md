@@ -376,13 +376,14 @@ tls:
 nothing to edit here), so certbot only fetches the certificate and Lux is pointed at its files:
 
 ```bash
-sudo certbot certonly --standalone -d example.com      # needs port 80 free for a moment
+sudo certbot certonly --standalone --key-type ecdsa -d example.com   # needs port 80 free for a moment
 sudo certbot renew --deploy-hook "systemctl restart lux"
 ```
 
 The certbot timer renews on its own. Lux does **not** reload certificates, so the deploy hook
 restarts it after every renewal (open connections drop for an instant). Also:
 
+- Use an ECDSA certificate (`--key-type ecdsa`, certbot's default since 2.0), not RSA: the server signs the handshake, and an RSA-2048 signature costs ~30x an ECDSA P-256 one. In a local test a new connection took ~410 µs of server CPU with ECDSA and ~1,030 µs with RSA 2048.
 - Port 443 needs root, or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit.
 - `privkey.pem` is readable only by root: if Lux runs as another user, give it access through a
   group or copy the files in the deploy hook.
