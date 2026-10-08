@@ -769,6 +769,11 @@ void Parser::parse_app(Program& out) {
                 if (!config_value(text, number, flag, kind) || kind != 0)
                     error_here("host: expected an address in quotes, e.g. \"127.0.0.1\"");
                 else out.app.host = text;
+            } else if (k == "tls_cert" || k == "tls_key") {
+                std::string text; long long number = 0; bool flag = false; int kind = -1;
+                if (!config_value(text, number, flag, kind) || kind != 0)
+                    error_here(k + ": expected a PEM file path in quotes (or env(\"VAR\"))");
+                else (k == "tls_cert" ? out.app.tls_cert : out.app.tls_key) = text;
             } else if (k == "log") {
                 expect(Tok::Colon, "after 'log'");
                 skip_newlines();

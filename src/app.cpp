@@ -4,6 +4,7 @@
 #include "../include/lux/request.hpp"
 #include "../include/lux/response.hpp"
 #include "../include/lux/task.hpp"
+#include "../include/lux/tls.hpp"
 #include "../include/lux/blocking_pool.hpp"
 #include "../include/lux/percent_encoding.hpp"
 
@@ -691,7 +692,7 @@ void App::run(const std::string& host, uint16_t port) {
         all_servers.push_back(&main_server);
     }
 
-    const char* scheme = "http";
+    const char* scheme = tls::enabled() ? "https" : "http";
     log().info("Lux running on ", scheme, "://", host, ':', port,
                " (threads=", num_threads, ", press CTRL+C to quit)");
 

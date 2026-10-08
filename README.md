@@ -160,7 +160,7 @@ way into templates too.
 |---|---|
 | Auth | Vendored HMAC-SHA256, HS256. No OpenSSL. RS256 is not available |
 | Real time | SSE and WebSockets |
-| Transport | Plain HTTP/1.1, TLS and HTTP/2 belong to the reverse proxy |
+| Transport | HTTP/1.1; HTTPS built in as an option (`-DLUX_TLS=ON`, `tls_cert`/`tls_key`). HTTP/2 belongs to the reverse proxy |
 | Execution | Bytecode on a custom VM, one VM per event-loop thread |
 | Compilation | Built into the binary. No external toolchain, no transpilation to C++ |
 | Persistence | `sqlite`, `postgres`, and `mysql` modules over a thread pool and `await`. `?` placeholder in all three — the postgres driver translates it to `$1` |
@@ -310,8 +310,8 @@ File, line, column, cursor. Everything you (sometimes) love about g++ and clang+
 | **Observability** | Logger with rotation, `/health`, `/metrics` in Prometheus format |
 | **Reload** | File watching and atomic module swap |
 
-**Not included:** TLS, CORS, compression, rate limiting, and security headers,
-that's the reverse proxy's job. Also no user-defined generic classes: `List<T>` and
+**Not included:** CORS, compression, rate limiting, and security headers,
+that's the reverse proxy's job (TLS is optional, see the guide). Also no user-defined generic classes: `List<T>` and
 `Dict<K,V>` exist, `class Box<T>` doesn't (yet (maybe)). I might consider implementing HTTP/2 in the future.
 
 ---
