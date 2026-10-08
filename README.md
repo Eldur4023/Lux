@@ -349,6 +349,47 @@ lux ./app --verbose    # one log line per request
 lux ./app --autotest   # walks the endpoints after startup and after each reload
 ```
 
+### HTTPS
+
+Lux can terminate TLS itself, so a small deployment needs no reverse proxy. It is a build option
+(it links OpenSSL's `libssl`, needs `libssl-dev`); without it the binary stays free of OpenSSL:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLUX_TLS=ON
+```
+
+Then a top-level `tls:` block, next to `app:`. The port is the one in `app:`: with the block it
+speaks HTTPS, without it plain HTTP. A missing `cert` or `key`, or a file that cannot be read,
+stops the server at startup, and a binary built without `LUX_TLS` refuses to start with a `tls:`
+block instead of silently serving HTTP.
+
+```lux
+app:
+    port 443
+
+tls:
+    cert "/etc/letsencrypt/live/example.com/fullchain.pem"
+    key  "/etc/letsencrypt/live/example.com/privkey.pem"
+```
+
+**Let's Encrypt.** There is no certbot plugin for Lux (certbot edits nginx's config; it has
+nothing to edit here), so certbot only fetches the certificate and Lux is pointed at its files:
+
+```bash
+sudo certbot certonly --standalone -d example.com      # needs port 80 free for a moment
+sudo certbot renew --deploy-hook "systemctl restart lux"
+```
+
+The certbot timer renews on its own. Lux does **not** reload certificates, so the deploy hook
+restarts it after every renewal (open connections drop for an instant). Also:
+
+- Port 443 needs root, or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit.
+- `privkey.pem` is readable only by root: if Lux runs as another user, give it access through a
+  group or copy the files in the deploy hook.
+- Lux listens on one port and does not redirect HTTP to HTTPS. If you want that, something else
+  on port 80 has to answer with a `301`.
+- Not included: HTTP/2. A static file is encrypted in user space, so it is not zero-copy over TLS.
+
 ---
 
 ## Modules
