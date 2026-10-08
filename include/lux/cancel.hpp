@@ -26,6 +26,15 @@ namespace lux {
 //       }
 //   });
 
+// True once a graceful shutdown has begun (App::run's drain sets it). Long-lived
+// streams -- an SSE handler's `while sse.open` -- see it as "closed" and end on
+// their own; otherwise the drain would wait the whole grace period for a stream
+// nobody is going to close.
+inline std::atomic<bool>& shutting_down() {
+    static std::atomic<bool> flag{false};
+    return flag;
+}
+
 struct CancellationToken {
     std::atomic<bool> cancelled{false};
     std::function<void()> wake_fn_;   // set while a sleep() is active

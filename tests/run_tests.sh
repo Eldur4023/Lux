@@ -715,6 +715,19 @@ code=$(curl -s -o /dev/null -w '%{http_code}' --data-binary @"$TMP/big.bin" "htt
 rm -f "$HERE/cases/wishlist-tests.db"*
 cd "$HERE/.."
 
+echo "== graceful shutdown with an open sse stream =="
+next_server "$HERE/cases/sse_shutdown.lux" /ping || exit 1
+curl -sN --max-time 20 "http://127.0.0.1:$PORT/forever" > "$TMP/sse_open.txt" 2>&1 &
+EXTRA_PIDS="$EXTRA_PIDS $!"
+for _ in $(seq 1 40); do grep -q hello "$TMP/sse_open.txt" 2>/dev/null && break; sleep 0.1; done
+t0=$(date +%s)
+kill -TERM "$SRV"
+for _ in $(seq 1 100); do kill -0 "$SRV" 2>/dev/null || break; sleep 0.1; done
+t1=$(date +%s)
+if kill -0 "$SRV" 2>/dev/null; then fail "SIGTERM with an open sse stream exits promptly" "exit within 10 s" "still running after $((t1 - t0)) s"
+else ok "SIGTERM with an open sse stream exits promptly ($((t1 - t0)) s, not the 30 s grace period)"; fi
+kill_wait $SRV; SRV=""
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 summary

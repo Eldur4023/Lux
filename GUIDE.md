@@ -2113,6 +2113,38 @@ on the spot (`{"name": "report.csv", "content": csv.write(rows)}`), up to 25 MB.
 the mail carries both. Every header value is stripped of line breaks, so a form field cannot
 add a header, and `bcc` never appears in the message. Built with the `http` module (libcurl).
 
+**Several accounts.** A `smtp` Dict in the message replaces the `app:` block for that call:
+`"smtp": {"host", "port", "user", "password" or "token" (OAuth2 access token), "tls", "from"}`.
+`in_reply_to` and `references` set the threading headers. **`compose(d)`** takes the same Dict
+and returns the finished message as text instead of sending it (to save it with `imap.append`).
+
+### imap
+
+Reads mail over IMAP (libcurl, like `mail`). Stateless: every call carries its own connection
+Dict, so one app can serve any number of accounts. Folder names are passed as the server spells
+them; CR/LF in any value is rejected.
+
+```lux
+import imap
+
+Json c = { "host": "imap.example.com", "user": "me", "password": pw }   # tls "tls" (993) | "starttls" | "none"
+Json g = { "host": "imap.gmail.com", "user": "me@gmail.com", "token": access_token }  # OAuth2 (XOAUTH2)
+
+List folders = await imap.list_folders(c)           # [{name, attrs: ["\\Sent", ...]}]
+Json st      = await imap.status(c, "INBOX")        # {messages, uidnext, uidvalidity, unseen}
+List msgs    = await imap.uids(c, "INBOX", 1200)    # [{uid, flags}] for uid >= 1200
+string raw   = await imap.fetch(c, "INBOX", 1203)   # whole RFC 822 message; a 4th arg "HEADER" = headers only
+await imap.set_flags(c, "INBOX", 1203, "add", ["\\Seen"])   # "add" | "remove" | "set"
+await imap.move(c, "INBOX", 1203, "Trash")          # UID MOVE, or copy + \Deleted + UID EXPUNGE
+await imap.append(c, "Sent", mail.compose({...}))   # saved as \\Seen; the new uid is not returned (see find)
+int uid = await imap.find(c, "Drafts", "<id@host>") # uid of the message with that Message-ID header, or 0
+await imap.remove(c, "Drafts", uid)                 # \\Deleted + UID EXPUNGE
+```
+
+`mail.compose({..., "draft": true})` builds a message with no recipient or body yet and keeps its Bcc, for
+saving to Drafts. A new connection is made per call; no IDLE (poll `status`/`uids` on a timer). Test:
+`tests/run_imap.sh` (against `tests/imap_fake_server.py`).
+
 ---
 
 Using a module that is not imported, or a function it does not have, is a compile error:

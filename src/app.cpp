@@ -597,6 +597,7 @@ void App::run(const std::string& host, uint16_t port) {
     }
 
     g_initiate_drain = [this, &main_loop, shared_conn_count, &all_loops, &all_servers, &all_mutex]() {
+        shutting_down().store(true, std::memory_order_release);   // lets SSE streams end (see cancel.hpp)
         {
             // Each server stops accepting ON ITS OWN loop.  Doing it from here
             // —which is the main loop's thread— touched the handler map of the

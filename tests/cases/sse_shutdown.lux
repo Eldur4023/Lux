@@ -1,0 +1,10 @@
+# A graceful shutdown must not wait the whole grace period for an SSE stream:
+# `sse.open` turns false once the drain starts, so the handler ends and the
+# connection closes (run_tests.sh, "graceful shutdown").
+sse endpoint("/forever"):
+    sse.send("hello")
+    while sse.open:
+        await sleep(20)
+
+get endpoint("/ping"):
+    return { "ok": true }

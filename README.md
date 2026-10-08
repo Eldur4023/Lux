@@ -379,6 +379,7 @@ get endpoint("/valid_email/:s", string s):
 | `proc` | A subprocess handle that outlives one call — start it here, read/check/kill it from a later request |
 | `pdf` | Generates PDFs, needs cairo at build time |
 | `http` | Outbound HTTP calls, needs libcurl at build time |
+| `imap` | Read mail over IMAP (folders, uids, fetch, flags, move, append), needs libcurl; `mail` also sends as several accounts |
 
 Forget the `import` and use the module anyway and it's a compile error, not a 3 a.m. crash the
 first time that code actually runs. And if the library a module needs (cairo, libcurl...)
