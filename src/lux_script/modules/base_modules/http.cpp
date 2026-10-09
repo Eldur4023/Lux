@@ -13,6 +13,7 @@
 #include "netaddr.hpp"
 
 #include <curl/curl.h>
+#include <lux_script/curl_init.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -168,7 +169,7 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     // One handle per pool thread, reset between calls; connections live in
     // the shared cache (CurlGlobal).
     thread_local struct Handle {
-        CURL* h = curl_easy_init();
+        CURL* h = lux_curl_init();
         ~Handle() { if (h) curl_easy_cleanup(h); }
     } handle;
     CURL* curl = handle.h;

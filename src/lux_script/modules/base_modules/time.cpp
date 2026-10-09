@@ -5,6 +5,7 @@
 // takes a zone it is a fixed number of minutes or an IANA name, never an implicit
 // server timezone: `time.format(ts, fmt, 60)` is CET, `time.format(ts, fmt, "Europe/Madrid")` follows DST.
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/tz.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -27,7 +28,7 @@ long long now_ms() {
 // set for a name it does not know.
 struct Zone {
     long long fixed_ms = 0;
-    const std::chrono::time_zone* tz = nullptr;
+    const lux_tz::time_zone* tz = nullptr;
     bool bad = false;
 
     long long at(long long utc_ms) const {
@@ -47,7 +48,7 @@ Zone zone_arg(const std::vector<Value>& a, size_t i) {
     Zone z;
     if (a.size() <= i || a[i].is_null()) return z;
     if (a[i].is_int()) { z.fixed_ms = a[i].as_int() * 60'000; return z; }
-    try { z.tz = std::chrono::get_tzdb().locate_zone(a[i].to_string()); }
+    try { z.tz = lux_tz::locate(a[i].to_string()); }
     catch (const std::exception&) { z.bad = true; }
     return z;
 }

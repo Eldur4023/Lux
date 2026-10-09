@@ -244,8 +244,16 @@ private:
             // Out of long long range: falls to double, as everyone does.
         }
         double d = 0;
+#ifdef __ANDROID__
+        // libc++ in the NDK has no floating-point from_chars; the grammar was already checked above.
+        const std::string tmp(p, f);
+        char* end = nullptr;
+        d = std::strtod(tmp.c_str(), &end);
+        if (end != tmp.c_str() + tmp.size()) return false;
+#else
         const auto r = std::from_chars(p, f, d);
         if (r.ec != std::errc{} || r.ptr != f) return false;
+#endif
         out = Value::real(d);
         return true;
     }

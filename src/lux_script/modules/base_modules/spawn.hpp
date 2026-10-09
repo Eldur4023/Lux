@@ -83,7 +83,9 @@ inline bool start(const std::vector<std::string>& argv, const Options& o, Child&
     };
     bool ok = wire(o.in, STDIN_FILENO, c.in) && wire(o.out, STDOUT_FILENO, c.out) &&
               wire(o.err, STDERR_FILENO, c.err);
+#ifndef __ANDROID__   // ponytail: bionic (API 28) has no usable addchdir_np, so `cwd` is ignored on Android
     if (ok && !o.cwd.empty()) posix_spawn_file_actions_addchdir_np(&fa, o.cwd.c_str());
+#endif
 
     // The environment: ours, minus every key the options touch, plus what
     // they set.

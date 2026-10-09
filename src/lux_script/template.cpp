@@ -616,7 +616,7 @@ bool render_template(const Template& p, std::vector<Value> values,
     // slots, without starting the VM for each. Anything else, and anything
     // that would fail (a field of a non-Dict), goes through the VM, so the
     // result and the error are the VM's own.
-    static const Value kNull;
+    static const Value kNull{};
     auto direct = [&](const Chunk& c) -> const Value* {
         const auto& code = c.code;
         if (code.size() < 2 || code.front().op != Op::LoadLocal || code.back().op != Op::Return ||

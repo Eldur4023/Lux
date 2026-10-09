@@ -101,6 +101,12 @@ static const App::StaticMount* mount_for(const std::vector<App::StaticMount>& mo
 // hang the loop), 403 (escapes root), 404, or -1: no openat2 here (Linux <
 // 5.6, or a seccomp profile that predates it).
 static int open_beneath(int root_fd, const std::string& rel, struct stat& st, int& fd) {
+#ifdef __ANDROID__
+    // Android's app seccomp filter kills the process (SIGSYS) on openat2 instead of answering ENOSYS:
+    // take the portable path straight away.
+    (void)root_fd; (void)rel; (void)st; fd = -1;
+    return -1;
+#endif
     open_how how{};
     how.flags   = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
     how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;

@@ -339,15 +339,24 @@ static void run_tests(const lux_script::Module& m, lux::DispatchFn dispatch, std
     std::_Exit(g_test_rc.load());
 }
 
+// Desktop apps (Drive Sync, Calendar, Mail): their shell links this file with LUX_EMBEDDED and
+// calls lux_main() on a thread, so it serves the app exactly as `lux` does
+// (every:, on start:, limits...) instead of keeping a second copy of this wiring.
+#ifdef LUX_EMBEDDED
+int lux_main(int argc, char** argv) {
+#else
 int main(int argc, char** argv) {
+#endif
     // glibc mmaps every allocation past 128 KB and unmaps it when freed: a
     // file read into a string or a big response paid a fresh zeroed mapping
     // per request, and each unmap interrupted every other thread (a TLB
     // shootdown). Up to 1 MB is served, and reused, from the heap.
     // ponytail: each arena may keep up to 8 MB of freed memory; lower
     // M_TRIM_THRESHOLD if resident size matters more than those faults.
+#ifndef __ANDROID__   // glibc tuning knobs; bionic's allocator has neither
     mallopt(M_MMAP_THRESHOLD, 1 << 20);
     mallopt(M_TRIM_THRESHOLD, 8 << 20);
+#endif
     if (argc >= 2 && std::string(argv[1]) == "restore")
         return lux_script::restore_main({argv + 2, argv + argc});
 

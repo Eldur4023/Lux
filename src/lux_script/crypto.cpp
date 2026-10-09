@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <cstring>
 #include <sys/random.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #if defined(__x86_64__)
 #include <immintrin.h>
 #endif
@@ -65,7 +67,7 @@ void compress_soft(uint32_t h[8], const uint8_t block[64]) {
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(__clang__)   // clang rejects __builtin_cpu_supports("sha"): the portable path is used there
 // SHA-256 on the CPU's SHA extensions (SHA-NI): several times the portable
 // rounds above. Picked at run time, so the binary still runs on CPUs without.
 __attribute__((target("sha,sse4.1,ssse3")))
@@ -398,7 +400,8 @@ std::string random_bytes(size_t n) {
         // free correctness). Available unconditionally: this project only
         // targets Linux, and getrandom() has existed since Linux 3.17
         // (2014)/glibc 2.25.
-        ssize_t r = ::getrandom(out.data() + got, n - got, 0);
+        // syscall, not ::getrandom(): bionic only declares it from API 28 (the Android build targets 28 anyway).
+        ssize_t r = ::syscall(SYS_getrandom, out.data() + got, n - got, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
             return {};   // caller must treat empty as failure, never a fallback value

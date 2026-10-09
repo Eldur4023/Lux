@@ -89,8 +89,13 @@ Value fn_mtime_ms(NativeCtx&, std::vector<Value>& a, std::string&) {
     std::error_code ec;
     auto t = fs::last_write_time(a[0].as_str(), ec);
     if (ec) return Value::integer(-1);
+#ifdef __ANDROID__
+    // libc++ (NDK) has no clock_cast; its file_clock counts from the Unix epoch on Linux/Android.
+    return Value::integer(std::chrono::duration_cast<std::chrono::milliseconds>(t.time_since_epoch()).count());
+#else
     return Value::integer(std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::clock_cast<std::chrono::system_clock>(t).time_since_epoch()).count());
+#endif
 }
 
 // ─── Files ──────────────────────────────────────────────────────────────────
