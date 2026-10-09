@@ -171,6 +171,8 @@ set(_lux_module_exclude
     "src/lux_script/modules/base_modules/pdf.cpp"
     "src/lux_script/modules/base_modules/http.cpp"
     "src/lux_script/modules/base_modules/mail.cpp"
+    "src/lux_script/modules/base_modules/imap.cpp"
+    "src/lux_script/modules/base_modules/mailparse.cpp"
     "src/lux_script/modules/base_modules/crypto.cpp"
     "src/lux_script/modules/base_modules/gzip.cpp"
     "src/lux_script/modules/base_modules/image.cpp")
@@ -317,7 +319,7 @@ endfunction()
 
 set(_m src/lux_script/modules/base_modules)
 lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp)
-lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp)
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp ${_m}/imap.cpp ${_m}/mailparse.cpp)
 lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp)
 lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp)
 lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp)
