@@ -506,6 +506,7 @@ void HttpConnection::finish_dispatch(lux::Request& request,
         std::transform(val.begin(), val.end(), val.begin(), ::tolower);
         keep_alive_ = (val != "close");
     }
+    if (draining_) keep_alive_ = false;   // shutting down: answer and close
     response.header("Connection", keep_alive_ ? "keep-alive" : "close");
 
     // SSE / WebSocket mode: headers were already written directly.
@@ -909,6 +910,16 @@ void HttpConnection::send_and_close(lux::Response& r) {
     r.header("Connection", "close");
     keep_alive_ = false;
     send_response(r.build());
+}
+
+void HttpConnection::begin_shutdown() {
+    if (closed_) return;
+    draining_ = true;
+    // Idle = nothing in flight, nothing half-read, nothing left to write.
+    const bool idle = !in_flight_ && !in_parser_ && !parser_.in_message() &&
+                      write_offset_ >= write_buf_.size() && ws_write_offset_ >= ws_write_buf_.size() &&
+                      file_fd_ < 0 && pending_buf_.empty();
+    if (idle) close();
 }
 
 void HttpConnection::close() {

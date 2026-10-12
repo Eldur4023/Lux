@@ -491,6 +491,12 @@ add_test(NAME pdf
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(pdf PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 
+# Orderly shutdown: idle keep-alive connections must not hold it up (fix in App's drain).
+add_test(NAME shutdown
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_shutdown.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(shutdown PROPERTIES TIMEOUT 120)
+
 # The `http` native module needs libcurl (LUX_HTTP) -- same skip-if-missing
 # pattern as pdf/sqlite/postgres/mysql above.
 add_test(NAME http

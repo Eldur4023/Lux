@@ -87,7 +87,15 @@ TcpServer::~TcpServer() {
 }
 
 void TcpServer::pedir_parada() {
-    loop_.post([this] { stop_accepting(); });
+    loop_.post([this] {
+        stop_accepting();
+        stopping_ = true;
+        // The orderly shutdown waits for the connections to be gone: the idle ones (keep-alive)
+        // close now, those mid-request close when they answer.
+        for (auto& w : conns_)
+            if (auto c = w.lock()) c->begin_shutdown();
+        conns_.clear();
+    });
 }
 
 void TcpServer::stop_accepting() {
@@ -243,6 +251,11 @@ void TcpServer::adopt(int client_fd) {
     loop_.add(client_fd, EPOLLIN | EPOLLET, [conn](uint32_t events) {
         conn->on_event(events);
     });
+
+    if (stopping_) { conn->begin_shutdown(); return; }   // handed over after the shutdown began
+    if (conns_.size() > 2 * static_cast<size_t>(live_->load(std::memory_order_relaxed)) + 16)
+        std::erase_if(conns_, [](const auto& w) { return w.expired(); });
+    conns_.push_back(conn);
 }
 
 } // namespace lux::core

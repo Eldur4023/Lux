@@ -8,6 +8,8 @@
 #include <lux/core/event_loop.hpp>
 #include "../../include/lux/types.hpp"
 
+namespace lux::http { class HttpConnection; }
+
 namespace lux::core {
 
 class TcpServer {
@@ -62,6 +64,12 @@ private:
     std::shared_ptr<Group>            group_;
     // This loop's open connections (the HttpConnection lowers it on close).
     std::shared_ptr<std::atomic<int>> live_ = std::make_shared<std::atomic<int>>(0);
+
+    // This loop's connections, to close the idle ones when the orderly shutdown starts (before,
+    // it waited for the clients -- a browser keeps them open for tens of seconds). Only touched
+    // from the loop's own thread; expired entries are pruned as connections come in.
+    std::vector<std::weak_ptr<http::HttpConnection>> conns_;
+    bool stopping_ = false;
 
     void on_accept();
     void adopt(int client_fd);
