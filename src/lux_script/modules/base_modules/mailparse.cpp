@@ -12,7 +12,10 @@
 #include <lux_script/builtin_module.hpp>
 
 #include <curl/curl.h>   // curl_getdate: RFC 822 dates, already linked with the http module
-#include <iconv.h>
+#if __has_include(<iconv.h>)
+#  include <iconv.h>
+#  define LUX_HAVE_ICONV 1
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -40,6 +43,18 @@ std::string trim(const std::string& s) {
 std::string to_utf8(const std::string& in, const std::string& charset) {
     const std::string cs = lower(charset);
     if (cs.empty() || cs == "utf-8" || cs == "utf8" || cs == "us-ascii") return in;
+#ifndef LUX_HAVE_ICONV
+    // No iconv on this platform (Windows without libiconv): only Latin-1 / Windows-1252 are converted.
+    if (cs == "iso-8859-1" || cs == "latin1" || cs == "windows-1252") {
+        std::string out;
+        for (unsigned char c : in) {
+            if (c < 0x80) out += static_cast<char>(c);
+            else { out += static_cast<char>(0xC0 | (c >> 6)); out += static_cast<char>(0x80 | (c & 0x3F)); }
+        }
+        return out;
+    }
+    return in;
+#else
     iconv_t cd = iconv_open("UTF-8//TRANSLIT", cs.c_str());
     if (cd == reinterpret_cast<iconv_t>(-1)) return in;
     std::string out(in.size() * 4 + 8, '\0');
@@ -54,6 +69,7 @@ std::string to_utf8(const std::string& in, const std::string& charset) {
     iconv_close(cd);
     out.resize(static_cast<size_t>(op - out.data()));
     return out;
+#endif
 }
 
 std::string decode_qp(const std::string& s, bool header) {

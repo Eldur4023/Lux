@@ -7,6 +7,7 @@
 // module's table until close().
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/crypto.hpp>
+#include <lux_script/platform_os.hpp>
 #include <lux/response.hpp>
 
 #include <cairo/cairo-pdf.h>
@@ -313,7 +314,7 @@ std::shared_ptr<PdfDoc> finished(std::vector<Value>& a, std::string& error) {
 Value fn_pdf_save(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const auto d = finished(a, error);
     if (!d) return Value::null();
-    std::ofstream f(a[1].as_str(), std::ios::binary);
+    std::ofstream f(plat::to_path(a[1].as_str()), std::ios::binary);
     if (!f.write(d->buffer.data(), static_cast<std::streamsize>(d->buffer.size()))) {
         error = "pdf.save(): cannot write '" + a[1].as_str() + "'";
         return Value::null();

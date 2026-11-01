@@ -7,9 +7,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <filesystem>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <unistd.h>
+#include <lux/platform.hpp>
 
 namespace lux::http {
 
@@ -181,7 +179,7 @@ static int cb_on_body(llhttp_t* p, const char* at, size_t len) {
     if (c->spool_fd < 0 && c->multipart && have + len > kMemBodyMax) {
         std::error_code ec;
         std::string dir = std::filesystem::temp_directory_path(ec).string();
-        c->spool_fd = ::open(dir.c_str(), O_TMPFILE | O_RDWR | O_CLOEXEC, 0600);
+        c->spool_fd = plat::tmpfile_open(dir);
         if (c->spool_fd < 0 || !spool_write(c, c->current.body.data(), c->current.body.size())) {
             c->error = true;
             return HPE_USER;
@@ -208,8 +206,8 @@ static int cb_on_message_complete(llhttp_t* p) {
     }
 
     if (c->spool_fd >= 0) {
-        void* m = ::mmap(nullptr, c->spool_size, PROT_READ, MAP_PRIVATE, c->spool_fd, 0);
-        if (m == MAP_FAILED) { c->error = true; return HPE_USER; }
+        void* m = plat::map_ro(c->spool_fd, c->spool_size);
+        if (!m) { c->error = true; return HPE_USER; }
         c->current.body_map = std::make_shared<const MappedBody>(m, c->spool_size);
         ::close(c->spool_fd);
         c->spool_fd = -1;

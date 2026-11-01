@@ -7,18 +7,28 @@
 //     await keyring.delete("lux-mail", "account-3")
 //
 // `service` and `key` identify the entry (attributes "service" and "account" in secret-tool).
+//
+// On Windows the entries live in the Credential Manager (generic credentials, target "service/key",
+// advapi32); the blob is the secret's UTF-8 bytes, so Windows caps it at CRED_MAX_CREDENTIAL_BLOB_SIZE.
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/keyring_control.hpp>
 
-#include <spawn.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <lux_script/platform_os.hpp>
+#  include <wincred.h>
+#else
+#  include <spawn.h>
+#  include <sys/wait.h>
+#  include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
 
+#ifndef _WIN32
 extern char** environ;
+#endif
 
 namespace lux_script {
 
@@ -28,6 +38,7 @@ namespace {
 
 constexpr size_t kMaxSecretBytes = 64 * 1024;
 
+#ifndef _WIN32
 // Runs secret-tool, feeds `input` to its stdin, returns its stdout. `ok` = exited 0.
 std::string run(const std::vector<std::string>& args, const std::string& input, bool& ok, std::string& error, const char* fn) {
     ok = false;
@@ -68,6 +79,11 @@ std::string run(const std::vector<std::string>& args, const std::string& input, 
     ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
     return result;
 }
+#else
+std::wstring target_of(const Value& service, const Value& key) {
+    return plat::widen(service.as_str() + "/" + key.as_str());
+}
+#endif
 
 bool valid(const Value& service, const Value& key, const char* fn, std::string& error) {
     if (!service.is_str() || !key.is_str() || service.as_str().empty() || key.as_str().empty()) {
@@ -84,10 +100,27 @@ Value fn_set(NativeCtx&, std::vector<Value>& a, std::string& error) {
         return Value::null();
     }
     if (const auto& c = keyring_control(); c.set) return Value::boolean(c.set(a[0].as_str(), a[1].as_str(), a[2].as_str()));
+#ifdef _WIN32
+    if (a[2].as_str().size() > CRED_MAX_CREDENTIAL_BLOB_SIZE) {
+        error = "keyring.set(): the secret is too long for the Windows Credential Manager (max " + std::to_string(CRED_MAX_CREDENTIAL_BLOB_SIZE) + " bytes)";
+        return Value::null();
+    }
+    std::wstring target = target_of(a[0], a[1]), user = plat::widen(a[1].as_str());
+    std::string secret = a[2].as_str();
+    CREDENTIALW c{};
+    c.Type = CRED_TYPE_GENERIC;
+    c.TargetName = target.data();
+    c.UserName = user.data();
+    c.CredentialBlobSize = static_cast<DWORD>(secret.size());
+    c.CredentialBlob = reinterpret_cast<LPBYTE>(secret.data());
+    c.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    return Value::boolean(CredWriteW(&c, 0) != FALSE);
+#else
     bool ok;
     run({"secret-tool", "store", "--label=" + a[0].as_str() + " " + a[1].as_str(), "service", a[0].as_str(), "account", a[1].as_str()},
         a[2].as_str(), ok, error, "keyring.set");
     return error.empty() ? Value::boolean(ok) : Value::null();
+#endif
 }
 
 Value fn_get(NativeCtx&, std::vector<Value>& a, std::string& error) {
@@ -96,17 +129,29 @@ Value fn_get(NativeCtx&, std::vector<Value>& a, std::string& error) {
         auto v = c.get(a[0].as_str(), a[1].as_str());
         return Value::str(v ? *v : "");
     }
+#ifdef _WIN32
+    PCREDENTIALW c = nullptr;
+    if (!CredReadW(target_of(a[0], a[1]).c_str(), CRED_TYPE_GENERIC, 0, &c)) return Value::str("");   // no such entry
+    std::string v(reinterpret_cast<const char*>(c->CredentialBlob), c->CredentialBlobSize);
+    CredFree(c);
+    return Value::str(std::move(v));
+#else
     bool ok;
     std::string v = run({"secret-tool", "lookup", "service", a[0].as_str(), "account", a[1].as_str()}, "", ok, error, "keyring.get");
     return error.empty() ? Value::str(ok ? v : "") : Value::null();
+#endif
 }
 
 Value fn_delete(NativeCtx&, std::vector<Value>& a, std::string& error) {
     if (!valid(a[0], a[1], "keyring.delete", error)) return Value::null();
     if (const auto& c = keyring_control(); c.del) return Value::boolean(c.del(a[0].as_str(), a[1].as_str()));
+#ifdef _WIN32
+    return Value::boolean(CredDeleteW(target_of(a[0], a[1]).c_str(), CRED_TYPE_GENERIC, 0) != FALSE);
+#else
     bool ok;
     run({"secret-tool", "clear", "service", a[0].as_str(), "account", a[1].as_str()}, "", ok, error, "keyring.delete");
     return error.empty() ? Value::boolean(ok) : Value::null();
+#endif
 }
 
 } // namespace

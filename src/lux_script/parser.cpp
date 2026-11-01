@@ -1,5 +1,6 @@
 #include <lux_script/schedule.hpp>
 #include <lux_script/parser.hpp>
+#include <lux_script/platform_os.hpp>
 #include <cstdlib>
 #include <iostream>
 
@@ -648,7 +649,9 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
             has_fallback = true;
         }
         expect(Tok::RParen, "closing env()");
-        const char* v = std::getenv(name.c_str());
+        std::string env_value;
+        const bool env_set = plat::get_env(name.c_str(), env_value);
+        const char* v = env_set ? env_value.c_str() : nullptr;
         if (!v && has_fallback) { text = fallback; kind = 0; return true; }
         // Without this, a forgotten environment variable turns into "" with
         // nobody noticing until production: for session/jwt an empty secret

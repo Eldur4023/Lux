@@ -763,6 +763,10 @@ static bool prueba_tipos_dinamicos() {
 }
 
 int main() {
+#ifdef _WIN32
+    std::puts("skipped: the --native backend (g++ + dlopen) is not available on Windows");
+    return 0;
+#endif
     const std::string src =
         "fn int fib(int n):\n"
         "    if n < 2:\n"

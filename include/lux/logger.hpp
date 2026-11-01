@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <lux/platform.hpp>
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 //
@@ -150,7 +151,7 @@ private:
         auto ms  = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
         std::time_t t = system_clock::to_time_t(now);
         std::tm tm{};
-        localtime_r(&t, &tm);
+        plat::local_time(&t, &tm);
         char buf[64];
         std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d:%02d.%03d",
                       tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,

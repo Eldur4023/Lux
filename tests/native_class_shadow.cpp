@@ -355,6 +355,10 @@ static bool prueba_inalcanzable_no_rompe() {
 }
 
 int main() {
+#ifdef _WIN32
+    std::puts("skipped: the --native backend (g++ + dlopen) is not available on Windows");
+    return 0;
+#endif
     if (!prueba_campos_y_metodo()) ++fallos;
     if (!prueba_ctor_y_referencia()) ++fallos;
     if (!prueba_inalcanzable_no_rompe()) ++fallos;

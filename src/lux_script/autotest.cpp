@@ -2,10 +2,15 @@
 
 #include <lux/logger.hpp>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -18,6 +23,18 @@ namespace lux_script {
 namespace {
 
 // ─── Minimal HTTP client ─────────────────────────────────────────────────────
+
+#ifdef _WIN32
+using sock_t = SOCKET;
+constexpr sock_t kBadSock = INVALID_SOCKET;
+void sock_close(sock_t s) { ::closesocket(s); }
+constexpr int kSendFlags = 0;   // no SIGPIPE on Windows
+#else
+using sock_t = int;
+constexpr sock_t kBadSock = -1;
+void sock_close(sock_t s) { ::close(s); }
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#endif
 //
 // It talks over the real socket, not internally: that way the probe walks the
 // same path as a real request —parser, router, middleware— and not just the
@@ -36,15 +53,23 @@ Response pedir(uint16_t port, const std::string& method, const std::string& path
     Response r;
     auto t0 = std::chrono::steady_clock::now();
 
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return r;
+#ifdef _WIN32
+    static const bool winsock_ready = [] { WSADATA w; return WSAStartup(MAKEWORD(2, 2), &w) == 0; }();
+    if (!winsock_ready) return r;
+#endif
+    sock_t fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd == kBadSock) return r;
 
-    timeval tv{};
     int expects = read_stream ? stream_ms : timeout_ms;
+#ifdef _WIN32
+    const DWORD tv = static_cast<DWORD>(expects);   // milliseconds
+#else
+    timeval tv{};
     tv.tv_sec  = expects / 1000;
     tv.tv_usec = (expects % 1000) * 1000;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv), sizeof(tv));
 
     sockaddr_in dir{};
     dir.sin_family = AF_INET;
@@ -52,7 +77,7 @@ Response pedir(uint16_t port, const std::string& method, const std::string& path
     ::inet_pton(AF_INET, "127.0.0.1", &dir.sin_addr);
 
     if (::connect(fd, reinterpret_cast<sockaddr*>(&dir), sizeof(dir)) < 0) {
-        ::close(fd);
+        sock_close(fd);
         return r;
     }
     r.connected = true;
@@ -69,22 +94,22 @@ Response pedir(uint16_t port, const std::string& method, const std::string& path
 
     size_t enviado = 0;
     while (enviado < pet.size()) {
-        ssize_t n = ::send(fd, pet.data() + enviado, pet.size() - enviado, MSG_NOSIGNAL);
-        if (n <= 0) { ::close(fd); return r; }
+        ssize_t n = ::send(fd, pet.data() + enviado, static_cast<size_t>(pet.size() - enviado), kSendFlags);
+        if (n <= 0) { sock_close(fd); return r; }
         enviado += static_cast<size_t>(n);
     }
 
     std::string received;
     char        buf[4096];
     for (;;) {
-        ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        ssize_t n = ::recv(fd, buf, static_cast<int>(sizeof(buf)), 0);
         if (n <= 0) break;
         received.append(buf, static_cast<size_t>(n));
         // For a stream the header and some body are enough: it never ends.
         if (read_stream && received.size() > 64) break;
         if (received.size() > 1u << 20) break;
     }
-    ::close(fd);
+    sock_close(fd);
 
     if (received.rfind("HTTP/1.1 ", 0) == 0)
         r.code = std::atoi(received.c_str() + 9);

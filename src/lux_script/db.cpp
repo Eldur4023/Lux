@@ -1,7 +1,12 @@
 #include <lux_script/db.hpp>
 #include <lux/logger.hpp>
+#include <lux_script/platform_os.hpp>
 
-#include <sys/socket.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#else
+#  include <sys/socket.h>
+#endif
 #include <cerrno>
 #include <algorithm>
 #include <chrono>
@@ -27,7 +32,7 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
     // The writer: everything queued while the previous batch ran goes in the
     // next one, so the busier it is, the more each commit carries.
     if (batch_) threads_.emplace_back([this, writer = workers] {
-        pthread_setname_np(pthread_self(), "lux-dbwriter");
+        plat::set_thread_name("lux-dbwriter");
         std::vector<Write> writes;
         std::vector<GroupDone> group;
         for (;;) {
@@ -57,7 +62,7 @@ void DbPool::start(size_t workers, std::function<bool(size_t)> in_transaction, B
 
     for (size_t i = 0; i < workers; ++i) {
         threads_.emplace_back([this, i, in_transaction] {
-            pthread_setname_np(pthread_self(), "lux-dbpool");
+            plat::set_thread_name("lux-dbpool");
             bool held = false;
             for (;;) {
                 Job job;
@@ -377,12 +382,27 @@ void DbRegistry::shutdown() {
 SocketState peek_socket(int fd) {
     if (fd < 0) return SocketState::Dead;
     char c;
+#ifdef _WIN32
+    // No MSG_DONTWAIT: ask first whether anything is pending (a closed peer counts), then peek.
+    WSAPOLLFD pfd{static_cast<SOCKET>(fd), POLLRDNORM, 0};
+    const int ready = WSAPoll(&pfd, 1, 0);
+    if (ready == 0) return SocketState::Alive;
+    if (ready < 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) return SocketState::Dead;
+    const int n = ::recv(static_cast<SOCKET>(fd), &c, 1, MSG_PEEK);
+    if (n == 0) return SocketState::Dead;                 // orderly close
+    if (n > 0)  return SocketState::Unknown;
+    const int werr = WSAGetLastError();
+    if (werr == WSAEWOULDBLOCK) return SocketState::Alive;
+    if (werr == WSAEINTR) return SocketState::Unknown;
+    return SocketState::Dead;
+#else
     const ssize_t n = ::recv(fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
     if (n == 0) return SocketState::Dead;                 // orderly close
     if (n > 0)  return SocketState::Unknown;
     if (errno == EAGAIN || errno == EWOULDBLOCK) return SocketState::Alive;
     if (errno == EINTR) return SocketState::Unknown;
     return SocketState::Dead;                             // reset and friends
+#endif
 }
 
 void GroupCommitAwaitable::await_suspend(std::coroutine_handle<> h) {

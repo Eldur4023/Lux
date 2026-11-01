@@ -8,11 +8,6 @@
 
 #include "spawn.hpp"
 
-#include <sys/wait.h>
-#include <poll.h>
-#include <unistd.h>
-#include <signal.h>
-#include <fcntl.h>
 #include <cerrno>
 #include <cstring>
 #include <chrono>
@@ -58,9 +53,9 @@ struct ProcEntry {
     // this exists to prevent -- see alive()/wait()/close(), all of which
     // take this before touching `reaped`/`exit_code` or calling waitpid().
     std::mutex mutex;
-    pid_t      pid        = -1;
-    int        stdout_fd  = -1;    // -1 unless started with stdout: "pipe"
-    int        stdin_fd   = -1;    // -1 unless started with stdin: "pipe"
+    spawn::Pid pid        = spawn::kNoPid;
+    spawn::Fd  stdout_fd  = spawn::kNoFd;    // unset unless started with stdout: "pipe"
+    spawn::Fd  stdin_fd   = spawn::kNoFd;    // unset unless started with stdin: "pipe"
     bool       reaped     = false;
     int        exit_code  = -1;    // valid only once `reaped` is true
 };
@@ -74,7 +69,7 @@ public:
 
     // Random 53-bit ids (a handle cannot be guessed by counting), and a
     // handle nobody touched for an hour is closed -- closed, not killed.
-    long long put(pid_t pid, int stdout_fd, int stdin_fd) {
+    long long put(spawn::Pid pid, spawn::Fd stdout_fd, spawn::Fd stdin_fd) {
         auto e = std::make_shared<ProcEntry>();
         e->pid       = pid;
         e->stdout_fd = stdout_fd;
@@ -109,14 +104,15 @@ public:
             procs_.erase(it);
         }
         std::lock_guard<std::mutex> elock(e->mutex);
-        if (e->stdout_fd >= 0) { ::close(e->stdout_fd); e->stdout_fd = -1; }
-        if (e->stdin_fd >= 0)  { ::close(e->stdin_fd);  e->stdin_fd  = -1; }
+        if (spawn::open_fd(e->stdout_fd)) { spawn::close_fd(e->stdout_fd); e->stdout_fd = spawn::kNoFd; }
+        if (spawn::open_fd(e->stdin_fd))  { spawn::close_fd(e->stdin_fd);  e->stdin_fd  = spawn::kNoFd; }
         if (e->reaped) return;
-        int status = 0;
-        pid_t r = ::waitpid(e->pid, &status, WNOHANG);
-        if (r == e->pid) {
+        int code = -1;
+        const int r = spawn::try_reap(e->pid, code);
+        if (r == 1) {
             e->reaped    = true;
-            e->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            e->exit_code = code;
+            spawn::release_pid(e->pid);
             return;
         }
         if (r == 0) {
@@ -131,6 +127,7 @@ public:
         }
         // r < 0 (ECHILD, ...): already reaped by something else, or the
         // pid never existed -- nothing left to track either way.
+        else spawn::release_pid(e->pid);
     }
 
     // Best-effort, non-blocking sweep of pids close() could not reap
@@ -142,9 +139,9 @@ public:
     void reap_orphans() {
         std::lock_guard<std::mutex> lock(orphan_mutex_);
         for (size_t i = 0; i < orphan_pids_.size();) {
-            int status = 0;
-            pid_t r = ::waitpid(orphan_pids_[i], &status, WNOHANG);
-            if (r != 0) orphan_pids_.erase(orphan_pids_.begin() + static_cast<long>(i));
+            int code = 0;
+            const int r = spawn::try_reap(orphan_pids_[i], code);
+            if (r != 0) { spawn::release_pid(orphan_pids_[i]); orphan_pids_.erase(orphan_pids_.begin() + static_cast<long>(i)); }
             else        ++i;
         }
     }
@@ -165,7 +162,7 @@ private:
     std::unordered_map<long long, Slot>     procs_;
 
     std::mutex           orphan_mutex_;
-    std::vector<pid_t>   orphan_pids_;
+    std::vector<spawn::Pid> orphan_pids_;
 };
 
 // ─── start() ─────────────────────────────────────────────────────────────────
@@ -201,7 +198,8 @@ Value fn_proc_start(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!spawn::start(spawn::argv_of(args), o, c, error)) { error = "proc.start(): " + error; return Value::null(); }
     // Our ends non-blocking: read() never waits past its own poll(), and
     // write() hands over only what fits instead of blocking a thread.
-    for (int fd : {c.out, c.in}) if (fd >= 0) fcntl(fd, F_SETFL, O_NONBLOCK);
+    if (spawn::open_fd(c.out)) spawn::set_nonblock(c.out, /*write_end=*/false);
+    if (spawn::open_fd(c.in))  spawn::set_nonblock(c.in, /*write_end=*/true);
     return Value::integer(ProcRegistry::instance().put(c.pid, c.out, c.in));
 }
 
@@ -214,13 +212,12 @@ Value fn_proc_write(NativeCtx&, std::vector<Value>& args, std::string& error) {
     auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
     std::lock_guard<std::mutex> lock(e->mutex);
-    if (e->stdin_fd < 0) { error = "proc.write(): this process has no stdin: \"pipe\" (or it was closed)"; return Value::null(); }
-    if (args[1].is_null()) { ::close(e->stdin_fd); e->stdin_fd = -1; return Value::integer(0); }
+    if (!spawn::open_fd(e->stdin_fd)) { error = "proc.write(): this process has no stdin: \"pipe\" (or it was closed)"; return Value::null(); }
+    if (args[1].is_null()) { spawn::close_fd(e->stdin_fd); e->stdin_fd = spawn::kNoFd; return Value::integer(0); }
     const std::string& data = args[1].as_str();
-    const ssize_t n = ::write(e->stdin_fd, data.data(), data.size());
+    const long n = spawn::write_some(e->stdin_fd, data.data(), data.size());
     if (n >= 0) return Value::integer(n);
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return Value::integer(0);
-    error = std::string("proc.write(): ") + std::strerror(errno);
+    error = "proc.write(): " + spawn::sys_error();
     return Value::null();
 }
 
@@ -241,16 +238,12 @@ Value fn_proc_alive(NativeCtx&, std::vector<Value>& args, std::string& error) {
     std::lock_guard<std::mutex> lock(e->mutex);
     if (e->reaped) return Value::boolean(false);
 
-    int status = 0;
-    pid_t r = ::waitpid(e->pid, &status, WNOHANG);
-    if (r == e->pid) {
+    int code = -1;
+    const int r = spawn::try_reap(e->pid, code);
+    if (r != 0) {   // 1: just exited; -1: gone, but we do not know how -- ECHILD or similar
         e->reaped    = true;
-        e->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        return Value::boolean(false);
-    }
-    if (r < 0) {
-        e->reaped    = true;
-        e->exit_code = -1; // gone, but we do not know how -- ECHILD or similar
+        e->exit_code = code;
+        spawn::release_pid(e->pid);
         return Value::boolean(false);
     }
     return Value::boolean(true); // r == 0: still running
@@ -276,26 +269,24 @@ Value fn_proc_read(NativeCtx&, std::vector<Value>& args, std::string& error) {
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
 
     std::lock_guard<std::mutex> lock(e->mutex);
-    if (e->stdout_fd < 0) {
+    if (!spawn::open_fd(e->stdout_fd)) {
         error = "proc.read(): this process was not started with stdout: \"pipe\"";
         return Value::null();
     }
 
-    struct pollfd pfd { e->stdout_fd, POLLIN, 0 };
-    int pr = poll(&pfd, 1, static_cast<int>(timeout_ms));
+    const int pr = spawn::wait_readable(e->stdout_fd, static_cast<int>(timeout_ms));
     if (pr < 0) {
-        if (errno == EINTR) return Value::str(""); // caller retries, same as a plain timeout
-        error = std::string("proc.read(): poll failed: ") + std::strerror(errno);
+        error = "proc.read(): poll failed: " + spawn::sys_error();
         return Value::null();
     }
-    if (pr == 0) return Value::str(""); // timed out, no data yet -- process may still be running
+    if (pr == 0) return Value::str(""); // timed out (or interrupted), no data yet -- process may still be running
 
     std::string buf(std::min<size_t>(static_cast<size_t>(max_bytes), kMaxReadChunk), '\0');
-    ssize_t n = ::read(e->stdout_fd, buf.data(), buf.size());
+    const long n = spawn::read_some(e->stdout_fd, buf.data(), buf.size());
     if (n > 0) { buf.resize(static_cast<size_t>(n)); return Value::str(std::move(buf)); }
     if (n == 0) return Value::null(); // EOF: the process closed stdout (exited, or closed it early)
-    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return Value::str(""); // spurious wake
-    error = std::string("proc.read(): read failed: ") + std::strerror(errno);
+    if (n == -2) return Value::str(""); // spurious wake
+    error = "proc.read(): read failed: " + spawn::sys_error();
     return Value::null();
 }
 
@@ -322,16 +313,11 @@ Value fn_proc_wait(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     for (;;) {
-        int status = 0;
-        pid_t r = ::waitpid(e->pid, &status, WNOHANG);
-        if (r == e->pid) {
+        int code = -1;
+        if (spawn::try_reap(e->pid, code) != 0) {   // 1: exited; -1: gone, unknowable
             e->reaped    = true;
-            e->exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-            return Value::integer(e->exit_code);
-        }
-        if (r < 0) {
-            e->reaped    = true;
-            e->exit_code = -1;
+            e->exit_code = code;
+            spawn::release_pid(e->pid);
             return Value::integer(e->exit_code);
         }
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -351,14 +337,18 @@ Value fn_proc_wait(NativeCtx&, std::vector<Value>& args, std::string& error) {
 // nicely -- SIGTERM, then its own retry policy -- should not be forced
 // into this module's idea of how long is long enough).
 Value fn_proc_kill(NativeCtx&, std::vector<Value>& args, std::string& error) {
+    #ifdef _WIN32
+    const int sig = 15;   // no signals on Windows: the process is terminated whatever the number
+#else
     const int sig = args.size() > 1 ? static_cast<int>(args[1].as_int()) : SIGTERM;
+#endif
 
     auto e = ProcRegistry::instance().get(args[0].as_int());
     if (!e) { error = "proc: unknown handle"; return Value::null(); }
 
     std::lock_guard<std::mutex> lock(e->mutex);
     if (e->reaped) return Value::boolean(false); // already gone -- nothing to signal
-    return Value::boolean(::kill(e->pid, sig) == 0);
+    return Value::boolean(spawn::kill_proc(e->pid, sig));
 }
 
 // ─── close() ─────────────────────────────────────────────────────────────────
