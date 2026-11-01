@@ -374,6 +374,10 @@ Value fn_remove_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
         return ec ? fail(error, "remove_dir", ec.message()) : Value::boolean(n > 0);
     }
     const bool removed = fs::remove(P(path), ec);
+#ifdef _WIN32
+    // MinGW/Wine report a non-empty dir as access denied, not ENOTEMPTY.
+    if (ec) { std::error_code e2; if (!fs::is_empty(P(path), e2) && !e2) ec = std::make_error_code(std::errc::directory_not_empty); }
+#endif
     if (ec == std::errc::directory_not_empty)
         return fail(error, "remove_dir", "'" + path + "' is not empty -- pass true as the second argument to remove it and everything inside");
     return ec ? fail(error, "remove_dir", ec.message()) : Value::boolean(removed);
@@ -384,6 +388,13 @@ Value fn_copy_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::error_code ec;
     if (!fs::is_regular_file(P(a[0].as_str()), ec)) return fail(error, "copy_file", "'" + a[0].as_str() + "' is not a regular file");
     const auto mode = a.size() > 2 && a[2].as_bool() ? fs::copy_options::overwrite_existing : fs::copy_options::none;
+#ifdef _WIN32
+    // MinGW's copy_file(overwrite_existing) fails with EEXIST on an existing target.
+    if (mode == fs::copy_options::overwrite_existing) {
+        const bool okc = CopyFileW(P(a[0].as_str()).c_str(), P(a[1].as_str()).c_str(), FALSE) != 0;
+        return okc ? Value::boolean(true) : fail(error, "copy_file", "could not copy (error " + std::to_string(GetLastError()) + ")");
+    }
+#endif
     const bool copied = fs::copy_file(P(a[0].as_str()), P(a[1].as_str()), mode, ec);
     return ec ? fail(error, "copy_file", ec.message()) : Value::boolean(copied);
 }

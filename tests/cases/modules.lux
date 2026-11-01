@@ -318,6 +318,23 @@ get endpoint("/os/run_echo"):
     Json r = await os.run("/bin/echo", ["hello", "from", "os.run"])
     return r
 
+# Windows-only twins of the POSIX run/proc routes above (cmd.exe/ping exist in Wine).
+get endpoint("/os/run_win"):
+    Json r = await os.run("cmd", ["/c", "echo", "hello", "from", "os.run"])
+    return r
+
+get endpoint("/os/run_win_opts"):
+    Json r = await os.run("cmd", ["/c", "echo %LUX_T%&cd"], { "env": { "LUX_T": "set" }, "cwd": "C:\\windows" })
+    return r
+
+get endpoint("/proc/win_kill"):
+    int h = proc.start("ping", ["-n", "20", "127.0.0.1"])
+    bool was_alive = proc.alive(h)
+    proc.kill(h)
+    int? code = await proc.wait(h, 2000)
+    proc.close(h)
+    return { "was_alive": was_alive, "code": code }
+
 get endpoint("/os/run_missing"):
     Json r = await os.run("/definitely/not/a/real/command/xyz123")
     return r
