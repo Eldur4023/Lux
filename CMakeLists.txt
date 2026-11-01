@@ -332,11 +332,14 @@ endif()
 # library there too, whatever the .lux being compiled uses.
 set(LUX_NATIVE_EXTRA_LIBS "")
 function(lux_optional_module option label)
-    cmake_parse_arguments(M "" "" "PACKAGES;FILES;WIN_HEADERS;WIN_LIBS" ${ARGN})
+    cmake_parse_arguments(M "" "" "PACKAGES;FILES;WIN_HEADERS;WIN_LIBS;WIN_SYSLIBS;WIN_DEFS" ${ARGN})
     if(NOT ${option})
         return()
     endif()
-    find_package(PkgConfig QUIET)
+    # Never pkg-config when targeting Windows: it would answer with the host's (Linux) libraries.
+    if(NOT WIN32)
+        find_package(PkgConfig QUIET)
+    endif()
     if(PkgConfig_FOUND)
         pkg_check_modules(_${option} QUIET ${M_PACKAGES})
     endif()
@@ -367,7 +370,13 @@ function(lux_optional_module option label)
             set(_${option}_FOUND TRUE)
             set(_${option}_INCLUDE_DIRS ${_win_incs})
             set(_${option}_LIBRARIES ${_win_libs})
+            # Static libraries still need their own system libs (and defines) on Windows.
+            list(APPEND _${option}_LIBRARIES ${M_WIN_SYSLIBS})
             set(_${option}_LDFLAGS ${_win_libs})
+            foreach(_s ${M_WIN_SYSLIBS})
+                list(APPEND _${option}_LDFLAGS -l${_s})
+            endforeach()
+            target_compile_definitions(lux_script PRIVATE ${M_WIN_DEFS})
         endif()
     endif()
     if(NOT _${option}_FOUND)
@@ -387,7 +396,8 @@ set(_m src/lux_script/modules/base_modules)
 lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp
                     WIN_HEADERS cairo.h WIN_LIBS cairo)
 lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp ${_m}/imap.cpp ${_m}/mailparse.cpp
-                    WIN_HEADERS curl/curl.h WIN_LIBS curl)
+                    WIN_HEADERS curl/curl.h WIN_LIBS curl
+                    WIN_SYSLIBS ws2_32 crypt32 bcrypt secur32 normaliz iphlpapi WIN_DEFS CURL_STATICLIB)
 lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp
                     WIN_HEADERS openssl/evp.h WIN_LIBS crypto)
 lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp
