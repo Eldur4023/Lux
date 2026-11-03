@@ -871,7 +871,7 @@ Value stub(NativeCtx&, std::vector<Value>&, std::string& error) {
     return Value::null();
 }
 const NativeDef kNatives[] = {
-#define LUX_BROWSER_NATIVE(name, min, max, impl) {name, min, max, stub},
+#define LUX_BROWSER_NATIVE(name, min, max, impl, is_async) {name, min, max, stub, is_async},
 #include <lux_script/browser_api.inc>
 };
 struct Member { const char* object; const char* member; const char* native; };
@@ -881,7 +881,7 @@ const Member kMembers[] = {
 };
 struct Method { const char* type; BuiltinMethod m; };
 const Method kMethods[] = {
-#define LUX_BROWSER_METHOD(type, name, min, max, ret) {type, {name, min, max, ret}},
+#define LUX_BROWSER_METHOD_X(type, name, min, max, ret, async_native) {type, {name, min, max, ret, async_native}},
 #include <lux_script/browser_api.inc>
 };
 
@@ -902,6 +902,8 @@ const std::vector<BuiltinMethod>* methods(const std::string& type) {
 }
 } // namespace browser
 } // namespace
+
+bool browser_profile_active() { return t_browser; }
 
 BrowserProfile::BrowserProfile() : prev_(t_browser) { t_browser = true; }
 BrowserProfile::~BrowserProfile() { t_browser = prev_; }

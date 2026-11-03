@@ -209,6 +209,10 @@ struct BuiltinMethod {
     // checking to continue past the dot: s.upper().trim() also fails at
     // compile time.
     const char* return_type;
+    // Browser profile only: an ASYNC method (`await sock.recv()`).  The name
+    // of the async native it lowers to, receiver passed first; the checker
+    // then demands `await` on it.  nullptr = an ordinary method.
+    const char* async_native = nullptr;
 };
 
 // The methods that exist for a Lux Script type: "string", "int", "List", ...
@@ -222,6 +226,9 @@ struct BuiltinMethod {
 const std::vector<BuiltinMethod>* methods_of(const std::string& type);
 bool             is_reserved_object(const std::string& name);
 bool             is_db_module(const std::string& name);
+// True while a BrowserProfile lives on this thread.  The checker uses it to
+// let the browser's `ws`/`http` objects through the server's gates.
+bool             browser_profile_active();
 
 // Compiling a page script for the browser (.luxp, src/luxp): while one of
 // these lives on this thread, native_id/native_at/member_native_id/

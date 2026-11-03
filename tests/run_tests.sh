@@ -636,6 +636,16 @@ if grep -q "luxp: a template's plan differs" "$TMP/srv.log"; then fail "plans eq
 unset LUX_LUXP_CHECK
 fails_to_compile "a page's LuxScript is checked at compile time" "$HERE/cases/bad/luxp_script.lux" "template 'broken.html': line 3: 'n' is declared int"
 
+echo "== browser API: async http/ws/sleep in page scripts (cases/spa) =="
+if "$LUX" pack "$HERE/cases/spa/ok.html" "$TMP/spa.luxp" >/dev/null 2>&1; then ok "a page awaiting http/ws/sleep compiles to .luxp"
+else fail "a page awaiting http/ws/sleep compiles to .luxp" "a .luxp" "$("$LUX" pack "$HERE/cases/spa/ok.html" "$TMP/spa.luxp" 2>&1 | head -3)"; fi
+for n in 1 2 3 4; do
+    want=$(cat "$HERE/cases/spa/bad$n.want")
+    out=$("$LUX" pack "$HERE/cases/spa/bad$n.html" "$TMP/bad.luxp" 2>&1)
+    if [ $? -ne 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "browser API checked at compile time ($want)"
+    else fail "browser API checked at compile time ($want)" "an error containing '$want'" "$(printf '%s' "$out" | head -2)"; fi
+done
+
 echo "== --native semantics (native_edges.lux) =="
 next_server "$HERE/cases/native_edges.lux" /mixed || exit 1
 check "a list shared by two variables"      GET /values 200 '"b":[1,2,3]'

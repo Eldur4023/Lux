@@ -1375,6 +1375,17 @@ difference between an asynchronous server and one that blocks a thread per reque
 `sleep()` wakes early if the client disconnects; in that case the handler does not keep
 running after the `await`.
 
+**In a browser page** (Luxium compiles `<script>` against `include/lux_script/browser_api.inc`,
+the browser profile) `await` is valid in *any* fn, event handler, timer callback and the
+page's top level — each runs as a VM coroutine on the page's main loop. The suspendable
+expressions there are `sleep(ms)`, `page.frame()`, every `http.*` call and the *async
+methods*: a method the profile marks with an async native (`await sock.recv()`,
+`await sock.wait_open()`). The checker lowers `await sock.recv()` to a call of the async
+native with the receiver first, and the same two rules apply: forgetting `await` is
+`'recv()' is asynchronous: you must write 'await <value>.recv(...)'`, and awaiting a plain
+call is `is not asynchronous`. The browser profile has no `import`ed modules: `http`,
+`json`, `ws`, `storage`, `history`, ... are reserved objects (Luxium's docs/LUXSCRIPT.md §3).
+
 Inside, this is what forces the VM to have its own stack and locals instead of using C++'s
 call stack: an interpreter that recurses on the native stack cannot stop halfway and hand
 control somewhere else. Every in-flight request lives in its own VM frame, held inside the
@@ -1563,6 +1574,13 @@ never with `.`, because a `Json` has no fixed fields the checker could verify:
 get endpoint("/me"):
     return { "sub": jwt.claims["sub"], "role": jwt.claims["role"] }
 ```
+
+**The browser profile's surface** is a different table of the same shape (reserved objects
+`log document page event http json ws storage history clipboard template url math time`,
+receiver types `Element Response Socket Form File`, the global `sleep` and `form_data`).
+It is declared once in `include/lux_script/browser_api.inc` and documented per entry in
+Luxium's `docs/LUXSCRIPT.md` §3; the server's objects (`request`, `session`, `state`, `sse`,
+`ws` *inside a route*...) do not exist there, and there `ws` is the websocket *client*.
 
 ## 46. The database modules
 

@@ -1119,13 +1119,24 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
     int          id = -1;
     IrCallShape  shape = IrCallShape::Invalid;
 
+    // Browser profile: a method that suspends (`await sock.recv()`).  Found by
+    // the receiver's static type; lowered below to the async native it names.
+    const BuiltinMethod* async_method = nullptr;
+    if (browser_profile_active() && e.object->kind == ExprKind::Member) {
+        const auto* list = methods_of(type_of(*e.object->object).base_name());
+        if (list)
+            for (const auto& m : *list)
+                if (m.async_native && e.object->text == m.name) { async_method = &m; break; }
+    }
+
     // hash.sha256(...) — a native module function (NATIVE-MODULES.md).
     // Checked BEFORE the reserved-object branch below, and completely
     // separately from it: a native module's functions live in their own
     // flat id-space (BuiltinModuleRegistry), never in kMembers/kNatives, so
     // this cannot fall through into member_native_id() below and must
     // return on every path once it starts.
-    if (e.object->kind == ExprKind::Member &&
+    if (!browser_profile_active() &&
+        e.object->kind == ExprKind::Member &&
         e.object->object->kind == ExprKind::Ident &&
         resolve_local(e.object->object->text) < 0 &&
         BuiltinModuleRegistry::instance().has(e.object->object->text)) {
@@ -1291,8 +1302,9 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             return r;
         }
 
-        if ((obj == "sse" && route_method_ != "SSE") ||
-            (obj == "ws"  && route_method_ != "WS")) {
+        if (!browser_profile_active() &&
+            ((obj == "sse" && route_method_ != "SSE") ||
+             (obj == "ws"  && route_method_ != "WS"))) {
             shadow.error(e.object->loc, "'" + obj + "' only exists inside a route " + obj);
             return nullptr;
         }
@@ -1358,6 +1370,33 @@ IrExprPtr Emitter::check_call(const Expr& e, bool awaited, DiagnosticBag& shadow
             return nullptr;
         }
         shape = IrCallShape::BuiltinGlobalCall;
+    }
+    else if (async_method) {
+        const std::string& method = e.object->text;
+        if (!awaited) {
+            shadow.error(e.loc, "'" + method + "()' is asynchronous: you must write "
+                         "'await <value>." + method + "(...)'");
+            return nullptr;
+        }
+        const int nid = native_id(async_method->async_native);
+        if (nid < 0) { shadow.error(e.loc, "internal: no native for '" + method + "()'"); return nullptr; }
+        if (static_cast<int>(e.args.size()) < async_method->min_args ||
+            static_cast<int>(e.args.size()) > async_method->max_args) {
+            shadow.error(e.loc, "'" + method + "()' receives a number of arguments it does not accept");
+            return nullptr;
+        }
+        IrExprPtr receiver = check_expr(*e.object->object, shadow);
+        if (!receiver) return nullptr;
+        IrExprPtr r = make_call(IrCallShape::BuiltinGlobalCall);
+        r->call_name  = async_method->async_native;
+        r->call_index = nid;
+        r->args.push_back({{}, std::move(receiver), e.loc});
+        for (const auto& a : e.args) {
+            IrExprPtr v = check_expr(*a.value, shadow);
+            if (!v) return nullptr;
+            r->args.push_back({a.name, std::move(v), a.loc});
+        }
+        return r;
     }
     else if (e.object->kind == ExprKind::Member && classes_) {
         // type_of(), not a hand-rolled Ident/This-only check: the receiver

@@ -1,0 +1,19 @@
+<!doctype html><html><body><p id="x">hi</p>
+<script>
+fn void on_msg():
+    log.info(event.message())
+
+fn void main2():
+    Socket s = ws.connect("/ws")
+    s.on_message(on_msg)
+    string m = await s.recv()
+    Response r = await http.get("/api/x")
+    Json d = r.json()
+    log.info(str(r.status()) + d["a"])
+    await sleep(10)
+    Element e = document.get("x")
+    e.listen("click", on_msg)
+    string t = e.closest("p").text()
+
+main2()
+</script></body></html>
