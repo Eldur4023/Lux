@@ -232,13 +232,21 @@ whatever directory that launcher happened to start in (which, for a database fil
 silently creating and using an empty one — no error, since a missing sqlite file is normally
 just a fresh database). An absolute path, or one built from `env(...)`, is never touched.
 
-**HTTPS.** With `tls_cert` and `tls_key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
+**HTTPS.** A top-level `tls:` block, next to `app:`, makes the app's port speak HTTPS; without it the port is plain HTTP.
+
+```
+tls:
+    cert "fullchain.pem"
+    key  "privkey.pem"
+```
+
+With `cert` and `key` (PEM files; `env(...)` works) the port speaks TLS 1.2/1.3 itself,
 so no reverse proxy is needed for it. It is a build option, `cmake -DLUX_TLS=ON` (needs `libssl-dev`);
-a binary without it refuses to start with these keys instead of serving plain HTTP. Measured on 8
+a binary without it refuses to start with a `tls:` block instead of serving plain HTTP. Measured on 8
 cores against nginx in front: Lux alone ~125k req/s on a small route, nginx + keep-alive to Lux ~60k,
 nginx with its default `proxy_pass` ~21k. Not included: HTTP/2, a plain-HTTP-to-HTTPS redirect on
 another port (that is one `return 301` in whatever listens on 80) and certificate reload (restart
-after a renewal). A static file is encrypted in user space, so it is not zero-copy over TLS.
+after a renewal). A static file is encrypted in user space (pread + OpenSSL) unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM: then Lux hands the encryption to the kernel (kTLS) and the file goes out through `sendfile`, about 20% more requests per second on a 30 KB file in a local test. Without the module nothing breaks, it just stays in user space.
 
 `spa` on a static mount makes routes that are not found fall back to `index.html`. A directory
 request (`/docs` or `/docs/`) serves that directory's own `index.html` if it has one, same as
@@ -1963,6 +1971,7 @@ The handle-based `parse`/`rows`/`columns`/`row_count`/`to_csv`/`close` still wor
 | `make_dir` `remove_file` `remove_dir(dir[, recursive])` | `remove_dir` refuses a non-empty directory unless told |
 | `disk_usage(path)` | `{total, free, used}` bytes of the filesystem holding `path` |
 | `chmod(path, mode)` `umask(mask)` | Modes are octal strings (`"640"`); `umask` returns the previous mask |
+| `name()` | `"windows"`, `"linux"`, `"android"` or `"macos"`: the platform the binary was built for |
 | `temp_dir()` `temp_file([suffix])` | A new private (0600) temporary file |
 | **await** `read_file` `write_file` `append_file` `copy_file(from, to[, overwrite])` `move(from, to)` | `move` works across filesystems |
 | **await** `run(cmd[, args, options])` | `{status, stdout, stderr}`; options `input` (stdin), `cwd`, `env` (a `null` value unsets), `timeout_ms` (default 15 s, up to 120 s) |

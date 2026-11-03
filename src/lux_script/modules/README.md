@@ -83,3 +83,12 @@ Pass `-DLUX_MODULE_EXCLUDE="path/to/file.cpp;other.cpp"` to `cmake` (paths relat
 the repo root), or set `LUX_MODULE_EXCLUDE` before the glob in a local, uncommitted
 `CMakeLists.txt` override. Anything listed there is skipped even though it lives under
 `modules/`.
+
+## Windows
+
+Anything OS-specific goes behind `#ifdef _WIN32`; `include/lux_script/platform_os.hpp` has the shared
+helpers (UTF-8 <-> UTF-16 paths, `get_env`, `home_dir`, time functions, `strptime`, `fnmatch_period`),
+and `base_modules/spawn.hpp` the portable process/pipe layer used by `os.run` and `proc.*`
+(CreateProcessW there, no shell either way). Differences a script can see: `proc.kill` terminates
+whatever the signal number, `os.chmod` only toggles the read-only attribute, `keyring` is the Credential
+Manager, `--native` is unavailable (the VM runs instead), `sqlite` `replicate` / `lux restore` are not ported.

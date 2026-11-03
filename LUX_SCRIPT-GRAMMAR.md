@@ -457,6 +457,15 @@ app:
         pool 8
 ```
 
+HTTPS is a separate top-level block, also once per project. Without it the port is plain HTTP;
+with it the same port speaks TLS (binary built with `-DLUX_TLS=ON`):
+
+```lux
+tls:
+    cert "fullchain.pem"      # PEM paths; env("VAR") works
+    key  "privkey.pem"
+```
+
 `env("VAR")` is resolved **at compile time**, not when the process starts: it is the only way
 a secret does not end up written in the `.lux` that is versioned in git.
 

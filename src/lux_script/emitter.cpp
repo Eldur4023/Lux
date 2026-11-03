@@ -1,4 +1,5 @@
 #include <lux_script/emitter.hpp>
+#include <lux_script/platform_os.hpp>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -1956,7 +1957,7 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
     const std::string& name = e.args[0].value->text;
 
     if (name.find("..") != std::string::npos ||
-        std::filesystem::path(name).is_absolute()) {
+        plat::to_path(name).is_absolute()) {
         error(e.args[0].loc, "invalid template name: '" + name + "'");
         return;
     }
@@ -1967,7 +1968,7 @@ void Emitter::emit_compiled_render(const IrExpr& e) {
         keys.push_back({a.name, a.value->type.base_name()});
     }
 
-    auto source = read_whole_file(std::filesystem::path(templates_->dir) / name);
+    auto source = read_whole_file(plat::to_path(templates_->dir) / plat::to_path(name));
     if (!source) {
         error(e.args[0].loc, "template not found: '" + name + "' in " +
                              templates_->dir);

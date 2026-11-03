@@ -1,5 +1,6 @@
 #include <lux_script/schedule.hpp>
 #include <lux_script/parser.hpp>
+#include <lux_script/platform_os.hpp>
 #include <cstdlib>
 #include <iostream>
 
@@ -173,8 +174,10 @@ void Parser::parse_declaration(Program& out) {
             // `every` is a keyword only here, so a variable may still be
             // called that.
             if (check(Tok::Ident) && peek().text == "every") { parse_every(out); return; }
+            // Same for `tls:` (mail's `tls "starttls"` is a plain key).
+            if (check(Tok::Ident) && peek().text == "tls" && peek(1).is(Tok::Colon)) { parse_tls(out); return; }
             if (check(Tok::Ident) && (peek().text == "command" || peek().text == "test") && peek(1).is(Tok::String)) { parse_command(out); return; }
-            error_here("expected a declaration (get/post/... endpoint, or app)");
+            error_here("expected a declaration (get/post/... endpoint, app or tls)");
             synchronize();
             return;
     }
@@ -646,7 +649,9 @@ bool Parser::config_value(std::string& text, long long& number, bool& flag, int&
             has_fallback = true;
         }
         expect(Tok::RParen, "closing env()");
-        const char* v = std::getenv(name.c_str());
+        std::string env_value;
+        const bool env_set = plat::get_env(name.c_str(), env_value);
+        const char* v = env_set ? env_value.c_str() : nullptr;
         if (!v && has_fallback) { text = fallback; kind = 0; return true; }
         // Without this, a forgotten environment variable turns into "" with
         // nobody noticing until production: for session/jwt an empty secret
@@ -692,6 +697,35 @@ bool Parser::size_config(const std::string& key, size_t& out) {
     if (n == 0 || n > (1ull << 40) / mult) { diags_.error(loc, key + ": invalid size"); return false; }
     out = static_cast<size_t>(n * mult);
     return true;
+}
+
+void Parser::parse_tls(Program& out) {
+    SourceLoc loc = advance().loc;                    // 'tls'
+    if (out.tls.present) diags_.error(loc, "the 'tls:' block can only appear once in the project");
+    out.tls.present = true;
+    out.tls.loc     = loc;
+
+    if (!expect(Tok::Colon, "after 'tls'")) { synchronize(); return; }
+    skip_newlines();
+    if (!expect(Tok::Indent, "opening the tls block")) { synchronize(); return; }
+
+    while (!check(Tok::Dedent) && !check(Tok::EndOfFile)) {
+        skip_newlines();
+        if (check(Tok::Dedent) || check(Tok::EndOfFile)) break;
+        if (!check(Tok::Ident)) { error_here("expected 'cert' or 'key'"); advance(); continue; }
+        SourceLoc   kloc = peek().loc;
+        std::string k    = advance().text;
+        std::string text; long long number = 0; bool flag = false; int kind = -1;
+        if (k != "cert" && k != "key") {
+            diags_.error(kloc, "tls: unknown key '" + k + "' (cert, key)");
+            skip_to_eol();
+        } else if (!config_value(text, number, flag, kind) || kind != 0) {
+            error_here(k + ": expected a PEM file path in quotes (or env(\"VAR\"))");
+            skip_to_eol();
+        } else (k == "cert" ? out.tls.cert : out.tls.key) = text;
+        skip_newlines();
+    }
+    match(Tok::Dedent);
 }
 
 void Parser::parse_app(Program& out) {

@@ -5,7 +5,11 @@
 #include <lux_script/crypto.hpp>
 
 #include <chrono>
-#include <dlfcn.h>
+#ifdef _WIN32
+#  include <lux_script/platform_os.hpp>
+#else
+#  include <dlfcn.h>
+#endif
 
 namespace lux_script {
 
@@ -99,7 +103,14 @@ Value fn_password(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // first use: Lux does not link them, so a build without them still runs and
 // only these hashes report what to install.
 void* system_lib(const char* name) {
+#ifdef _WIN32
+    // "libargon2.so.1" -> "libargon2.dll"
+    std::string dll(name);
+    dll.erase(dll.find(".so"));
+    return reinterpret_cast<void*>(::LoadLibraryA((dll + ".dll").c_str()));
+#else
     return ::dlopen(name, RTLD_NOW | RTLD_LOCAL);
+#endif
 }
 
 using Argon2Verify = int (*)(const char*, const void*, size_t, int);
@@ -112,7 +123,11 @@ constexpr int kArgon2Id = 2;
 constexpr int kCryptDataSize = 32768;   // sizeof(struct crypt_data) in libxcrypt
 
 template <class F> F symbol(void* lib, const char* name) {
+#ifdef _WIN32
+    return lib ? reinterpret_cast<F>(reinterpret_cast<void*>(::GetProcAddress(static_cast<HMODULE>(lib), name))) : nullptr;
+#else
     return lib ? reinterpret_cast<F>(::dlsym(lib, name)) : nullptr;
+#endif
 }
 
 Value fn_argon2(NativeCtx&, std::vector<Value>& a, std::string& error) {

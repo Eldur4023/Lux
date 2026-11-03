@@ -38,6 +38,10 @@ static long long ejecutar_vm(const Chunk& chunk, long long arg, const FunctionTa
 }
 
 int main() {
+#ifdef _WIN32
+    std::puts("skipped: the --native backend (g++ + dlopen) is not available on Windows");
+    return 0;
+#endif
     // Mismas fib()/cuenta_primos() de bench/lux/app.lux, letra por letra.
     const std::string src =
         "fn int fib(int n):\n"

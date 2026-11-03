@@ -11,10 +11,12 @@
 #include <lux/core/event_loop.hpp>
 #include "core/tcp_server.hpp"
 
-#include <sys/epoll.h>
+#include <lux/platform.hpp>
 
 #include <csignal>
+#ifndef _WIN32
 #include <sched.h>
+#endif
 #include <iostream>
 #include <memory>
 #include <filesystem>
@@ -27,12 +29,12 @@
 #include <functional>
 #include <string_view>
 #include <utility>
-#include <unistd.h>
-#include <fcntl.h>
 #include <sys/stat.h>
+#ifndef _WIN32
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <linux/openat2.h>
+#endif
 
 #include <lux/mime.hpp>
 
@@ -93,6 +95,8 @@ static const App::StaticMount* mount_for(const std::vector<App::StaticMount>& mo
     return nullptr;
 }
 
+#ifndef _WIN32   // openat2 is Linux-only: Windows serves statics through the portable path below
+
 // root/rel resolved by the kernel without leaving root: openat2's
 // RESOLVE_BENEATH refuses any "..", absolute path or symlink that would
 // (EXDEV). One call where canonical() + weakly_canonical() + prefix checks
@@ -101,6 +105,12 @@ static const App::StaticMount* mount_for(const std::vector<App::StaticMount>& mo
 // hang the loop), 403 (escapes root), 404, or -1: no openat2 here (Linux <
 // 5.6, or a seccomp profile that predates it).
 static int open_beneath(int root_fd, const std::string& rel, struct stat& st, int& fd) {
+#ifdef __ANDROID__
+    // Android's app seccomp filter kills the process (SIGSYS) on openat2 instead of answering ENOSYS:
+    // take the portable path straight away.
+    (void)root_fd; (void)rel; (void)st; fd = -1;
+    return -1;
+#endif
     open_how how{};
     how.flags   = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
     how.resolve = RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS;
@@ -131,6 +141,8 @@ static int root_fd_for(const App::StaticMount& m) {
     cache.push_back({&m, ::open(m.root.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC), now});
     return cache.back().fd;
 }
+
+#endif // !_WIN32
 
 // Cache-Control, Content-Type, ETag and the 304, then the file itself.
 // `fd`, if not -1, is the file already open, and is taken over.
@@ -226,18 +238,28 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
             }
         }
 
+#ifndef _WIN32
         if (const int root_fd = root_fd_for(m); root_fd >= 0) {
             struct stat st{};
             int fd = -1;
             std::string file = rel.substr(1);
-            int r = open_beneath(root_fd, file, st, fd);
-            if (r == 0 && S_ISDIR(st.st_mode)) {
-                struct stat ist{};
-                int ifd = -1;
-                std::string index = file.empty() ? "index.html" : file + "/index.html";
-                if (open_beneath(root_fd, index, ist, ifd) == 0) {
-                    if (S_ISREG(ist.st_mode)) { ::close(fd); fd = ifd; file = std::move(index); st = ist; }
-                    else ::close(ifd);
+            int r;
+            if (file.empty() || file.back() == '/') {
+                // A directory by definition (the mount root, "docs/"): straight to
+                // its index.html, one openat2 + fstat + close less per request.
+                std::string index = file + "index.html";
+                r = open_beneath(root_fd, index, st, fd);
+                if (r == 0) file = std::move(index);   // regular file or not: checked below
+            } else {
+                r = open_beneath(root_fd, file, st, fd);
+                if (r == 0 && S_ISDIR(st.st_mode)) {
+                    struct stat ist{};
+                    int ifd = -1;
+                    std::string index = file.empty() ? "index.html" : file + "/index.html";
+                    if (open_beneath(root_fd, index, ist, ifd) == 0) {
+                        if (S_ISREG(ist.st_mode)) { ::close(fd); fd = ifd; file = std::move(index); st = ist; }
+                        else ::close(ifd);
+                    }
                 }
             }
             if (r > 0 || (r == 0 && !S_ISREG(st.st_mode))) {
@@ -259,6 +281,7 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
             }
             // r == -1: no openat2, resolved the portable way below.
         }
+#endif
 
         // canonical() for the root resolves any symlinks inside the serve root
         // itself (e.g. if m.root is itself a symlink to /var/www).  Required
@@ -324,7 +347,8 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
         auto mtime    = fs::last_write_time(canonical_file, mtime_ec);
         auto filesize = fs::file_size(canonical_file, size_ec);
         if (mtime_ec || size_ec) return fail(500, R"({"error":"Cannot stat file"})");
-        send_static(req, res, canonical_file.native(), make_etag(mtime, filesize), filesize);
+        // '/'-separated UTF-8-ish string on both: send_static() splits the name on '/'.
+        send_static(req, res, canonical_file.generic_string(), make_etag(mtime, filesize), filesize);
     }
 }
 
@@ -335,7 +359,7 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
 //
 // g_signal_pipe[0] = read end (monitored by epoll on the main loop)
 // g_signal_pipe[1] = write end (written by the signal handler)
-static int                   g_signal_pipe[2] = {-1, -1};
+static int                   g_signal_pipe[2] = {-1, -1};   // plat::pipe_open (a loopback socket pair on Windows)
 static std::function<void()> g_initiate_drain;
 static volatile sig_atomic_t g_signal_count   = 0;
 
@@ -343,17 +367,31 @@ static void signal_handler(int) {
     g_signal_count = g_signal_count + 1;
     if (g_signal_count >= 2) {
         static const char msg[] = "\nForced exit.\n";
-        (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        (void)write(2, msg, sizeof(msg) - 1);
         std::_Exit(1);
     }
     static const char msg[] = "\nShutting down gracefully... (CTRL+C again to force)\n";
-    (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)write(2, msg, sizeof(msg) - 1);
     // Wake the event loop — write is async-signal-safe.
     if (g_signal_pipe[1] >= 0) {
         char byte = 1;
-        (void)write(g_signal_pipe[1], &byte, 1);
+        (void)plat::pipe_write(g_signal_pipe[1], &byte, 1);
     }
 }
+
+#ifdef _WIN32
+// Ctrl-C / Ctrl-Break / console close / logoff / shutdown: same handler, run
+// by Windows on a thread of its own (so it only touches the signal pipe).
+static BOOL WINAPI console_ctrl_handler(DWORD type) {
+    switch (type) {
+        case CTRL_C_EVENT: case CTRL_BREAK_EVENT: case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT: case CTRL_SHUTDOWN_EVENT:
+            signal_handler(0);
+            return TRUE;
+        default: return FALSE;
+    }
+}
+#endif
 
 } // anonymous namespace
 
@@ -507,7 +545,9 @@ Task<void> App::handle_request(Request& req, Response& res) {
 // ── App::run ──────────────────────────────────────────────────────────────────
 
 void App::run(const std::string& host, uint16_t port) {
+#ifndef _WIN32
     std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     prepare();  // sorts the static mounts
 
@@ -523,12 +563,14 @@ void App::run(const std::string& host, uint16_t port) {
     // In a container with 2 cores assigned out of a 64-core machine,
     // levantaria 64 event loops sobre 2 cores.
     unsigned num_threads = 0;
+#ifndef _WIN32
     {
         cpu_set_t mask;
         CPU_ZERO(&mask);
         if (::sched_getaffinity(0, sizeof(mask), &mask) == 0)
             num_threads = static_cast<unsigned>(CPU_COUNT(&mask));
     }
+#endif
     if (num_threads == 0) num_threads = std::thread::hardware_concurrency();
     num_threads = std::max(1u, num_threads);
 
@@ -558,6 +600,10 @@ void App::run(const std::string& host, uint16_t port) {
     // 524288), as Go does at startup -- at 1024 the server ran out of them
     // near a thousand connections. The connection cap follows from it
     // unless it was set.
+#ifdef _WIN32
+    // No descriptor limit to raise (WSAPoll is not bound by FD_SETSIZE).
+    if (max_connections_ <= 0) max_connections_ = 10'000;
+#else
     {
         rlimit rl{};
         if (::getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
@@ -571,6 +617,7 @@ void App::run(const std::string& host, uint16_t port) {
                 fds > 2048 ? fds - 1024 : fds * 3 / 4, 1 << 30));
         }
     }
+#endif
 
     // Shared connection counter — enforces max_connections_ across all threads.
     auto shared_conn_count = std::make_shared<std::atomic<int>>(0);
@@ -587,8 +634,8 @@ void App::run(const std::string& host, uint16_t port) {
     //      stop accepting + poll every 100 ms until connections drain or 30 s elapse.
     // On second signal: std::_Exit(1) — see signal_handler above.
     g_signal_count = 0;
-    if (::pipe2(g_signal_pipe, O_CLOEXEC | O_NONBLOCK) < 0)
-        throw std::runtime_error(std::string("pipe2: ") + strerror(errno));
+    if (plat::pipe_open(g_signal_pipe) < 0)
+        throw std::runtime_error("signal pipe: " + plat::err_str());
 
     core::EventLoop main_loop;
     {
@@ -650,25 +697,39 @@ void App::run(const std::string& host, uint16_t port) {
     main_loop.add(g_signal_pipe[0], EPOLLIN,
                   [](uint32_t) {
                       char buf[16];
-                      while (::read(g_signal_pipe[0], buf, sizeof(buf)) > 0) {}
+                      while (plat::pipe_read(g_signal_pipe[0], buf, sizeof(buf)) > 0) {}
                       if (g_initiate_drain) g_initiate_drain();
                   });
 
+#ifdef _WIN32
+    ::SetConsoleCtrlHandler(console_ctrl_handler, TRUE);
+    // the shell (and run_tests) std::raise(SIGTERM): the CRT delivers it to this handler
+    std::signal(SIGTERM, signal_handler);
+#else
     std::signal(SIGINT,  signal_handler);
     std::signal(SIGTERM, signal_handler);
+#endif
 
     // ── Worker threads (cores 1..N-1) ─────────────────────────────────────────
     // Each thread runs its own EventLoop + TcpServer.  SO_REUSEPORT spreads
     // the accepts; the group then evens out the connections themselves.
+    // SO_REUSEPORT lets every loop own a listener; Windows has none, so only
+    // the main loop listens and hands connections to the workers.
+#ifdef _WIN32
+    constexpr bool kWorkersListen = false;
+#else
+    constexpr bool kWorkersListen = true;
+#endif
     auto group = std::make_shared<core::TcpServer::Group>();
     std::vector<std::thread> threads;
     threads.reserve(num_threads - 1);
     for (unsigned i = 1; i < num_threads; ++i) {
         threads.emplace_back([&]() {
-            pthread_setname_np(pthread_self(), "lux-loop");
+            plat::set_thread_name("lux-loop");
             core::EventLoop loop;
             core::TcpServer server(host, port, loop, dispatch,
-                                   max_connections_, shared_conn_count, group);
+                                   max_connections_, shared_conn_count, group,
+                                   /*listen_here=*/kWorkersListen);
             {
                 std::lock_guard<std::mutex> lk(all_mutex);
                 all_loops.push_back(&loop);
@@ -706,14 +767,19 @@ void App::run(const std::string& host, uint16_t port) {
     // a stray SIGINT/SIGTERM between the close and the SIG_DFL reset would
     // run signal_handler with g_signal_pipe[1] either invalid or already
     // reassigned to an unrelated fd opened in another thread.
+#ifdef _WIN32
+    ::SetConsoleCtrlHandler(console_ctrl_handler, FALSE);
+    std::signal(SIGTERM, SIG_DFL);
+#else
     std::signal(SIGINT,  SIG_DFL);
     std::signal(SIGTERM, SIG_DFL);
+#endif
 
     Metrics::instance().active_connections_ = nullptr;
     g_initiate_drain = nullptr;
     g_signal_count   = 0;
-    if (g_signal_pipe[0] >= 0) { ::close(g_signal_pipe[0]); g_signal_pipe[0] = -1; }
-    if (g_signal_pipe[1] >= 0) { ::close(g_signal_pipe[1]); g_signal_pipe[1] = -1; }
+    if (g_signal_pipe[0] >= 0) { plat::pipe_close(g_signal_pipe[0]); g_signal_pipe[0] = -1; }
+    if (g_signal_pipe[1] >= 0) { plat::pipe_close(g_signal_pipe[1]); g_signal_pipe[1] = -1; }
 }
 
 } // namespace lux

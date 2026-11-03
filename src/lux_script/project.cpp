@@ -9,6 +9,7 @@
 #include <lux_script/db.hpp>
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/json_bind.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <lux/request.hpp>
 #include <lux/response.hpp>
@@ -43,7 +44,7 @@ bool resolve_inputs(const std::vector<std::string>& args,
     std::error_code ec;
 
     for (const auto& a : args) {
-        fs::path p(a);
+        fs::path p = plat::to_path(a);
         if (!fs::exists(p, ec)) {
             error = "does not exist: " + a;
             return false;
@@ -268,11 +269,11 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         // out at compile time, like all the others.
         const std::string name = *tpl;
         if (name.find("..") != std::string::npos ||
-            std::filesystem::path(name).is_absolute()) {
+            plat::to_path(name).is_absolute()) {
             diags.error(e.loc, "invalid template name: '" + name + "'");
             return {};
         }
-        auto source = read_whole_file(std::filesystem::path(tpl_dir) / name);
+        auto source = read_whole_file(plat::to_path(tpl_dir) / plat::to_path(name));
         if (!source) {
             diags.error(e.loc, "template not found: '" + name + "' in " + tpl_dir);
             return {};
@@ -2262,7 +2263,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
 
     for (const auto& path : inputs) {
         auto src  = std::make_unique<SourceFile>();
-        src->path = path.string();
+        src->path = plat::from_path(path);
 
         std::ifstream f(path, std::ios::binary);
         if (!f) {
@@ -2271,6 +2272,10 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         }
         std::ostringstream ss; ss << f.rdbuf();
         src->text = ss.str();
+#ifdef _WIN32
+        // CRLF checkouts: scripts see "\n" only (a """ string must not embed a "\r").
+        src->text.erase(std::remove(src->text.begin(), src->text.end(), '\r'), src->text.end());
+#endif
 
         auto stamp = fs::last_write_time(path, ec);
         if (!ec) mod->stamps.emplace_back(path, stamp);
@@ -2300,16 +2305,16 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     // before module activation reads `modules["sqlite"]["file"]` below
     // or anything else reads `templates_dir`/a static mount's `fs_root`.
     if (diags.empty() && mod->program.app.loc.file) {
-        fs::path base = fs::path(*mod->program.app.loc.file).parent_path();
+        fs::path base = plat::to_path(*mod->program.app.loc.file).parent_path();
         auto resolve = [&](std::string& path) {
-            if (path.empty() || fs::path(path).is_absolute() || base.empty()) return;
+            if (path.empty() || plat::to_path(path).is_absolute() || base.empty()) return;
             // ":memory:" (SQLite's own convention for a private in-memory
             // database, recognized by sqlite3_open() itself) and a
             // "file:...?..." SQLite URI filename are not filesystem paths
             // at all -- resolving either against `base` would corrupt it
             // into a literal, on-disk file with that exact odd name.
             if (path == ":memory:" || path.rfind("file:", 0) == 0) return;
-            path = (base / path).lexically_normal().string();
+            path = plat::from_path((base / plat::to_path(path)).lexically_normal());
         };
         resolve(mod->program.app.templates_dir);
         for (auto& m : mod->program.app.statics) resolve(m.fs_root);
@@ -2443,7 +2448,7 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
     if (!mod->program.app.templates_dir.empty()) {
         std::error_code walk_ec;
         for (const auto& entry :
-             fs::recursive_directory_iterator(mod->program.app.templates_dir, walk_ec)) {
+             fs::recursive_directory_iterator(plat::to_path(mod->program.app.templates_dir), walk_ec)) {
             if (walk_ec) break;
             if (!entry.is_regular_file(walk_ec)) continue;
             auto stamp = fs::last_write_time(entry.path(), ec);

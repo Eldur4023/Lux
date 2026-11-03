@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
-#include <unistd.h>
+#include <lux/platform.hpp>
 #include <cerrno>
 #include <iostream>
 #include <utility>

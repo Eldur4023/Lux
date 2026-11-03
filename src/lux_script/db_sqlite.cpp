@@ -17,9 +17,8 @@
 #include <unordered_set>
 #include <cctype>
 #include <cstring>
-#include <strings.h>
+#include <lux_script/platform_os.hpp>
 #include <chrono>
-#include <unistd.h>
 
 namespace lux_script {
 
@@ -508,9 +507,16 @@ private:
     std::vector<std::unordered_map<std::string, Strikes>> slow_;   // per inline slot
 
     static int64_t thread_cpu_ns() {
+#ifdef _WIN32
+        FILETIME created, exited, kernel, user;   // 100 ns units
+        GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user);
+        auto ticks = [](const FILETIME& t) { return (int64_t(t.dwHighDateTime) << 32 | t.dwLowDateTime) * 100; };
+        return ticks(kernel) + ticks(user);
+#else
         timespec ts{};
         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
         return int64_t(ts.tv_sec) * 1'000'000'000 + ts.tv_nsec;
+#endif
     }
     // sqlite3_busy_timeout() sleeps 1, 2, 5, 10... ms between retries, while
     // a write transaction here holds the lock for tens of microseconds: the
@@ -520,7 +526,7 @@ private:
         const auto now = std::chrono::steady_clock::now();
         if (count == 0) start = now;
         if (now - start >= std::chrono::milliseconds(*static_cast<int*>(timeout_ms))) return 0;
-        usleep(static_cast<useconds_t>(std::min(20 << std::min(count, 6), 1000)));
+        std::this_thread::sleep_for(std::chrono::microseconds(std::min(20 << std::min(count, 6), 1000)));
         return 1;
     }
 
@@ -547,7 +553,7 @@ private:
         ckpt_cv_.notify_one();
     }
     void checkpoint_loop() {
-        pthread_setname_np(pthread_self(), "lux-ckpt");
+        plat::set_thread_name("lux-ckpt");
         sqlite3* c = nullptr;
         if (sqlite3_open_v2(file_.c_str(), &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, nullptr) != SQLITE_OK) {
             lux::log().error("sqlite: the checkpointer cannot open ", file_, ": ", sqlite3_errmsg(c));
@@ -718,7 +724,7 @@ private:
     static bool decltype_is_bool(sqlite3_stmt* stmt, int i) {
         const char* decl = sqlite3_column_decltype(stmt, i);
         for (; decl && decl[0]; ++decl)
-            if (strncasecmp(decl, "BOOL", 4) == 0) return true;
+            if (plat::strncasecmp(decl, "BOOL", 4) == 0) return true;
         return false;
     }
 

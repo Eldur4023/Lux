@@ -1,7 +1,9 @@
 #include <lux/tls.hpp>
 
 #ifdef LUX_TLS
-#include <cpuid.h>
+#if defined(__x86_64__) || defined(__i386__)
+#  include <cpuid.h>
+#endif
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #endif
@@ -22,8 +24,12 @@ static std::string last_error() {
 // generic CPU model often lacks the latter: measured on such a VPS, AES-GCM
 // 385 MB/s against ChaCha20-Poly1305 810 MB/s.
 static bool fast_aes_gcm() {
+#if defined(__x86_64__) || defined(__i386__)
     unsigned a, b, c, d;
     return __get_cpuid(1, &a, &b, &c, &d) && (c & bit_AES) && (c & bit_PCLMUL);
+#else
+    return false;   // no x86 CPUID: ChaCha20-Poly1305 first
+#endif
 }
 
 bool init(const std::string& cert_file, const std::string& key_file, std::string& err) {
@@ -44,6 +50,13 @@ bool init(const std::string& cert_file, const std::string& key_file, std::string
     }
     // No renegotiation (a DoS lever, and TLS 1.3 has none). Partial writes and a
     // moving buffer because HttpConnection retries from write_buf_ + offset.
+    // kTLS on transmit (the kernel encrypts, so a static file goes out through
+    // sendfile instead of pread + user-space AES): only where the kernel's AES-GCM
+    // is fast. On a VM without PCLMULQDQ it measured slower than OpenSSL's own.
+    // Without the `tls` kernel module this silently stays on user-space TLS.
+#if !defined(OPENSSL_NO_KTLS) && !defined(_WIN32)
+    if (fast_aes_gcm()) SSL_CTX_set_options(c, SSL_OP_ENABLE_KTLS);
+#endif
     // RELEASE_BUFFERS: an idle keep-alive connection holds no 30+ KB of record buffers.
     SSL_CTX_set_options(c, SSL_OP_NO_RENEGOTIATION | SSL_OP_CIPHER_SERVER_PREFERENCE);
     SSL_CTX_set_mode(c, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER |
@@ -55,13 +68,13 @@ bool init(const std::string& cert_file, const std::string& key_file, std::string
     SSL_CTX_set_num_tickets(c, 1);
 
     if (SSL_CTX_use_certificate_chain_file(c, cert_file.c_str()) != 1) {
-        err = "tls_cert " + cert_file + ": " + last_error(); SSL_CTX_free(c); return false;
+        err = "tls cert " + cert_file + ": " + last_error(); SSL_CTX_free(c); return false;
     }
     if (SSL_CTX_use_PrivateKey_file(c, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-        err = "tls_key " + key_file + ": " + last_error(); SSL_CTX_free(c); return false;
+        err = "tls key " + key_file + ": " + last_error(); SSL_CTX_free(c); return false;
     }
     if (SSL_CTX_check_private_key(c) != 1) {
-        err = "tls_cert and tls_key do not match: " + last_error(); SSL_CTX_free(c); return false;
+        err = "tls cert and key do not match: " + last_error(); SSL_CTX_free(c); return false;
     }
     g_ctx = c;
     return true;

@@ -9,6 +9,7 @@
 // kMaxPixels is refused before it is decoded: a small file can declare a
 // huge canvas.
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <jpeglib.h>
 #include <png.h>
@@ -287,7 +288,7 @@ Image cropped(const Image& in, int x0, int y0, int w, int h) {
 // ─── Functions ───────────────────────────────────────────────────────────────
 
 bool read_file(const std::string& path, std::string& out) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(plat::to_path(path), std::ios::binary);
     if (!f) return false;
     out.assign(std::istreambuf_iterator<char>(f), {});
     return true;
@@ -387,7 +388,7 @@ Value fn_resize(NativeCtx&, std::vector<Value>& a, std::string& error) {
                   : ext == "webp" ? encode_webp(img, quality, out, error)
                   : encode_jpeg(img, quality, out, error);
     if (!ok) { error = "image.resize(): " + error; return Value::null(); }
-    std::ofstream f(a[1].as_str(), std::ios::binary | std::ios::trunc);
+    std::ofstream f(plat::to_path(a[1].as_str()), std::ios::binary | std::ios::trunc);
     if (!f.write(out.data(), static_cast<std::streamsize>(out.size()))) { error = "image.resize(): cannot write '" + a[1].as_str() + "'"; return Value::null(); }
     Value::Dict d;
     d["width"] = Value::integer(img.width);

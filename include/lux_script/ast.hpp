@@ -230,6 +230,13 @@ struct AppDecl {
     bool                     present = false;
 };
 
+// `tls:` block: when present, the app's port speaks HTTPS.
+struct TlsDecl {
+    bool        present = false;
+    SourceLoc   loc;
+    std::string cert, key;
+};
+
 struct Program {
     // Imported modules.  `sqlite.query(...)` can only be used if there is an
     // `import sqlite`.
@@ -240,6 +247,7 @@ struct Program {
     std::vector<RouteDecl> routes;
     std::vector<ErrorDecl> errors;
     AppDecl                app;
+    TlsDecl                tls;
 };
 
 } // namespace lux_script

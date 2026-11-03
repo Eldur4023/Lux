@@ -56,6 +56,7 @@ private:
     void parse_group(Program& out, const std::string& prefix,
                      const std::vector<Guard>& guards);
     void parse_app(Program& out);
+    void parse_tls(Program& out);
     // Resolves a config value: string_value, number, boolean, or env("VAR").
     // from_env (optional): true if the value came from env("VAR") -- what
     // ends up there is decided by the deployment environment, not this

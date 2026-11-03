@@ -8,7 +8,7 @@
 #include <memory>
 #include <array>
 #include <cstring>
-#include <unistd.h>
+#include <lux/platform.hpp>
 #include <cerrno>
 #include <coroutine>
 #include <lux/core/event_loop.hpp>

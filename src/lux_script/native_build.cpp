@@ -2,7 +2,14 @@
 #include <lux_script/native_gen.hpp>
 #include <lux_script/template.hpp>
 
-#include <dlfcn.h>
+// The --native backend shells out to g++ and dlopen()s the result: Linux only.
+// On Windows (or with LUX_NO_NATIVE) compile_native() reports it is unavailable
+// and the module runs on the bytecode VM.
+#if defined(_WIN32) || defined(LUX_NO_NATIVE)
+#  define LUX_NATIVE_UNAVAILABLE 1
+#else
+#  include <dlfcn.h>
+#endif
 
 #include <cstdlib>
 #include <fstream>
@@ -14,7 +21,9 @@
 namespace lux_script {
 
 NativeModule::~NativeModule() {
+#ifndef LUX_NATIVE_UNAVAILABLE
     if (handle_) dlclose(handle_);
+#endif
 }
 
 NativeModule::NativeModule(NativeModule&& o) noexcept
@@ -26,7 +35,9 @@ NativeModule::NativeModule(NativeModule&& o) noexcept
 
 NativeModule& NativeModule::operator=(NativeModule&& o) noexcept {
     if (this != &o) {
+#ifndef LUX_NATIVE_UNAVAILABLE
         if (handle_) dlclose(handle_);
+#endif
         por_indice             = std::move(o.por_indice);
         error_message          = o.error_message;
         rutas_por_indice       = std::move(o.rutas_por_indice);
@@ -98,6 +109,11 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const FunctionTable* chunks,
                                               const EnumSigs* enums) {
     aviso.clear();
+#ifdef LUX_NATIVE_UNAVAILABLE
+    (void)prog; (void)sigs; (void)clases_sig; (void)cache_dir; (void)informe; (void)chunks; (void)enums;
+    aviso = "--native: native compilation is not available on Windows yet; running on the bytecode VM";
+    return nullptr;
+#else
     if (informe) informe->rutas.assign(prog.routes.size(), "");
 
     std::vector<std::string> nombre_por_indice(sigs.size());
@@ -480,7 +496,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
         std::error_code e1, e2;
         const auto p = std::filesystem::canonical(dep, e1);
         clave += '\0' + std::to_string(e1 ? 0 : std::filesystem::file_size(p, e2)) + ':' +
-                 std::to_string(e1 ? 0 : std::filesystem::last_write_time(p, e2).time_since_epoch().count());
+                 std::to_string(e1 ? 0LL : static_cast<long long>(std::filesystem::last_write_time(p, e2).time_since_epoch().count()));
     }
     const std::string clave_hash = std::to_string(std::hash<std::string>{}(clave));
     std::string clave_previa;
@@ -550,6 +566,7 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                 simbolos_sin_resolver;
 
     return out;
+#endif // LUX_NATIVE_UNAVAILABLE
 }
 
 } // namespace lux_script

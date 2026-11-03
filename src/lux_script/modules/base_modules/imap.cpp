@@ -26,6 +26,7 @@
 #include <lux/percent_encoding.hpp>
 
 #include <curl/curl.h>
+#include <lux_script/curl_init.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -196,7 +197,7 @@ size_t on_read(char* buf, size_t sz, size_t n, void* u) {
 
 // One curl handle with the account's connection options, a body sink, and an error buffer.
 struct Session {
-    CURL* curl = curl_easy_init();
+    CURL* curl = lux_curl_init();
     Conn  conn;
     Sink  sink;
     char  err[CURL_ERROR_SIZE] = "";

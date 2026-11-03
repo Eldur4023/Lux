@@ -5,6 +5,8 @@
 // takes a zone it is a fixed number of minutes or an IANA name, never an implicit
 // server timezone: `time.format(ts, fmt, 60)` is CET, `time.format(ts, fmt, "Europe/Madrid")` follows DST.
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/platform_os.hpp>
+#include <lux_script/tz.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -27,7 +29,7 @@ long long now_ms() {
 // set for a name it does not know.
 struct Zone {
     long long fixed_ms = 0;
-    const std::chrono::time_zone* tz = nullptr;
+    const lux_tz::time_zone* tz = nullptr;
     bool bad = false;
 
     long long at(long long utc_ms) const {
@@ -47,7 +49,7 @@ Zone zone_arg(const std::vector<Value>& a, size_t i) {
     Zone z;
     if (a.size() <= i || a[i].is_null()) return z;
     if (a[i].is_int()) { z.fixed_ms = a[i].as_int() * 60'000; return z; }
-    try { z.tz = std::chrono::get_tzdb().locate_zone(a[i].to_string()); }
+    try { z.tz = lux_tz::locate(a[i].to_string()); }
     catch (const std::exception&) { z.bad = true; }
     return z;
 }
@@ -55,11 +57,11 @@ Zone zone_arg(const std::vector<Value>& a, size_t i) {
 // Floor division: a timestamp before 1970 still lands in the right second.
 bool to_tm(long long ms, std::tm& tm) {
     std::time_t secs = static_cast<std::time_t>(ms / 1000 - (ms % 1000 < 0));
-    return gmtime_r(&secs, &tm) != nullptr;
+    return plat::gmtime(secs, tm);
 }
 
 long long from_tm(std::tm& tm, long long ms_part = 0) {
-    return static_cast<long long>(timegm(&tm)) * 1000 + ms_part;
+    return static_cast<long long>(plat::timegm(tm)) * 1000 + ms_part;
 }
 
 Value fn_now(NativeCtx&, std::vector<Value>&, std::string&)         { return Value::integer(now_ms()); }
@@ -86,7 +88,7 @@ Value fn_format_iso(NativeCtx& c, std::vector<Value>& a, std::string& e) {
 // parameter failing to parse is an outcome a route checks for.
 Value fn_parse(NativeCtx&, std::vector<Value>& a, std::string&) {
     std::tm tm{};
-    const char* end = strptime(a[0].as_str().c_str(), a[1].as_str().c_str(), &tm);
+    const char* end = plat::strptime(a[0].as_str().c_str(), a[1].as_str().c_str(), &tm);
     if (!end || *end) return Value::null();
     return Value::integer(from_tm(tm));
 }
@@ -186,10 +188,10 @@ Value fn_add_months(NativeCtx&, std::vector<Value>& a, std::string& error) {
     first.tm_mday = 1;
     first.tm_mon += 1;
     first.tm_hour = first.tm_min = first.tm_sec = 0;
-    std::time_t next_month = timegm(&first);
+    std::time_t next_month = plat::timegm(first);
     std::tm last{};
     next_month -= 86400;
-    gmtime_r(&next_month, &last);
+    plat::gmtime(next_month, last);
     tm.tm_mday = std::min(day, last.tm_mday);
     return Value::integer(from_tm(tm, ((ts % 1000) + 1000) % 1000));
 }

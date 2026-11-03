@@ -160,7 +160,7 @@ way into templates too.
 |---|---|
 | Auth | Vendored HMAC-SHA256, HS256. No OpenSSL. RS256 is not available |
 | Real time | SSE and WebSockets |
-| Transport | HTTP/1.1; HTTPS built in as an option (`-DLUX_TLS=ON`, `tls_cert`/`tls_key`). HTTP/2 belongs to the reverse proxy |
+| Transport | HTTP/1.1; HTTPS built in as an option (`-DLUX_TLS=ON`, `tls:` block). HTTP/2 belongs to the reverse proxy |
 | Execution | Bytecode on a custom VM, one VM per event-loop thread |
 | Compilation | Built into the binary. No external toolchain, no transpilation to C++ |
 | Persistence | `sqlite`, `postgres`, and `mysql` modules over a thread pool and `await`. `?` placeholder in all three — the postgres driver translates it to `$1` |
@@ -348,6 +348,48 @@ lux ./app --no-watch   # no hot reload
 lux ./app --verbose    # one log line per request
 lux ./app --autotest   # walks the endpoints after startup and after each reload
 ```
+
+### HTTPS
+
+Lux can terminate TLS itself, so a small deployment needs no reverse proxy. It is a build option
+(it links OpenSSL's `libssl`, needs `libssl-dev`); without it the binary stays free of OpenSSL:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DLUX_TLS=ON
+```
+
+Then a top-level `tls:` block, next to `app:`. The port is the one in `app:`: with the block it
+speaks HTTPS, without it plain HTTP. A missing `cert` or `key`, or a file that cannot be read,
+stops the server at startup, and a binary built without `LUX_TLS` refuses to start with a `tls:`
+block instead of silently serving HTTP.
+
+```lux
+app:
+    port 443
+
+tls:
+    cert "/etc/letsencrypt/live/example.com/fullchain.pem"
+    key  "/etc/letsencrypt/live/example.com/privkey.pem"
+```
+
+**Let's Encrypt.** There is no certbot plugin for Lux (certbot edits nginx's config; it has
+nothing to edit here), so certbot only fetches the certificate and Lux is pointed at its files:
+
+```bash
+sudo certbot certonly --standalone --key-type ecdsa -d example.com   # needs port 80 free for a moment
+sudo certbot renew --deploy-hook "systemctl restart lux"
+```
+
+The certbot timer renews on its own. Lux does **not** reload certificates, so the deploy hook
+restarts it after every renewal (open connections drop for an instant). Also:
+
+- Use an ECDSA certificate (`--key-type ecdsa`, certbot's default since 2.0), not RSA: the server signs the handshake, and an RSA-2048 signature costs ~30x an ECDSA P-256 one. In a local test a new connection took ~410 µs of server CPU with ECDSA and ~1,030 µs with RSA 2048.
+- Port 443 needs root, or `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit.
+- `privkey.pem` is readable only by root: if Lux runs as another user, give it access through a
+  group or copy the files in the deploy hook.
+- Lux listens on one port and does not redirect HTTP to HTTPS. If you want that, something else
+  on port 80 has to answer with a `301`.
+- Not included: HTTP/2. A static file is encrypted in user space unless the kernel's `tls` module is loaded (`sudo modprobe tls`) and the CPU has fast AES-GCM; then Lux uses kTLS and `sendfile`. Without the module it stays in user space.
 
 ---
 

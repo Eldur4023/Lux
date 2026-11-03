@@ -80,6 +80,10 @@ static Resultado pedir(Module& mod, const std::string& metodo, const std::string
 }
 
 int main() {
+#ifdef _WIN32
+    std::puts("skipped: the --native backend (g++ + dlopen) is not available on Windows");
+    return 0;
+#endif
     const auto dir_db = std::filesystem::temp_directory_path() / "lux_native_route_check";
     std::error_code ec_db;
     std::filesystem::create_directories(dir_db, ec_db);

@@ -2,6 +2,7 @@
 // gzip or zlib data alike. Output is capped -- a few KB of gzip can expand
 // to gigabytes (a "zip bomb"), and a server decompresses what users send.
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <zlib.h>
 
@@ -70,8 +71,8 @@ Value fn_decompress(NativeCtx&, std::vector<Value>& a, std::string& error) {
 
 Value files(std::vector<Value>& a, std::string& error, bool compress) {
     const char* fn = compress ? "compress_file" : "decompress_file";
-    std::ifstream in(a[0].as_str(), std::ios::binary);
-    std::ofstream out(a[1].as_str(), std::ios::binary | std::ios::trunc);
+    std::ifstream in(plat::to_path(a[0].as_str()), std::ios::binary);
+    std::ofstream out(plat::to_path(a[1].as_str()), std::ios::binary | std::ios::trunc);
     if (!in || !out) { error = std::string("gzip.") + fn + "(): cannot open '" + (in ? a[1] : a[0]).as_str() + "'"; return Value::null(); }
     // A file decompressed to disk may be large, but not unbounded (4 GB
     // unless told otherwise).

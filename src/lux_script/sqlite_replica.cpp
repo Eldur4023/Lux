@@ -29,7 +29,34 @@
 // half-uploaded one is recognizable (restore stops there) without renames.
 #include "sqlite_replica.hpp"
 
+#ifdef _WIN32
+// The replicator leans on Linux-only I/O (sync_file_range, posix_fadvise,
+// fmemopen, pread on the WAL). Not ported yet: on Windows `replicate` is
+// refused at configure time and `lux restore` says so.
+#include <iostream>
+
+namespace lux_script {
+
+bool SqliteReplicator::validate(const std::vector<std::string>&, std::string& error) {
+    error = "sqlite: `replicate` is not available on Windows yet";
+    return false;
+}
+std::unique_ptr<SqliteReplicator> SqliteReplicator::start(const std::string&, const std::vector<std::string>&,
+                                                          std::function<void(bool)>, std::string& error) {
+    error = "sqlite: `replicate` is not available on Windows yet";
+    return nullptr;
+}
+int sqlite_restore_main(const std::vector<std::string>&) {
+    std::cerr << "lux restore: not available on Windows yet\n";
+    return 1;
+}
+
+} // namespace lux_script
+
+#else // !_WIN32
+
 #include <lux/logger.hpp>
+#include <lux_script/platform_os.hpp>
 #include <sqlite3.h>
 
 #ifdef LUX_HTTP
@@ -713,7 +740,7 @@ private:
     // ── capture: the WAL into segments ──
 
     void capture_loop() {
-        pthread_setname_np(pthread_self(), "lux-rcapture");
+        plat::set_thread_name("lux-rcapture");
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             const bool last = stopping_;
@@ -766,7 +793,7 @@ private:
     // to the kernel that lands as one burst of writeback that stalled the
     // whole server (reads too) under a memory cap.
     void writeback_loop() {
-        pthread_setname_np(pthread_self(), "lux-rwriteback");
+        plat::set_thread_name("lux-rwriteback");
         while (!writeback_stop_) {
             if (checkpointing_ && dbfd_ >= 0) ::sync_file_range(dbfd_, 0, 0, SYNC_FILE_RANGE_WRITE);
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -1000,7 +1027,7 @@ private:
     }
 
     void upload_loop() {
-        pthread_setname_np(pthread_self(), "lux-rupload");
+        plat::set_thread_name("lux-rupload");
         std::unique_lock<std::mutex> l(m_);
         for (;;) {
             bool all_empty = true, any_ready = false;
@@ -1230,3 +1257,5 @@ int sqlite_restore_main(const std::vector<std::string>& args) {
 }
 
 } // namespace lux_script
+
+#endif // _WIN32

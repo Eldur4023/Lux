@@ -23,10 +23,12 @@
 // can never smuggle in a Bcc: line.
 #include <lux_script/builtin_module.hpp>
 #include <lux_script/crypto.hpp>
+#include <lux_script/platform_os.hpp>
 #include <lux/mime.hpp>
 #include <lux/percent_encoding.hpp>
 
 #include <curl/curl.h>
+#include <lux_script/curl_init.hpp>
 
 #include <algorithm>
 #include <fstream>
@@ -98,7 +100,7 @@ bool attachment_part(const Value& a, std::string& part, size_t& total, std::stri
         if (name.empty()) { error = "mail.send(): an attachment Dict needs a name"; return false; }
     } else {
         const std::string path = a.to_string();
-        std::ifstream f(path, std::ios::binary);
+        std::ifstream f(plat::to_path(path), std::ios::binary);
         if (!f) { error = "mail.send(): cannot read the attachment '" + path + "'"; return false; }
         content.assign(std::istreambuf_iterator<char>(f), {});
         name = path.substr(path.find_last_of('/') + 1);
@@ -186,7 +188,7 @@ bool build_message(const Value::Dict& m, const Config& cfg, const char* fn, std:
     char date[64];
     const std::time_t now = std::time(nullptr);
     std::tm tm{};
-    gmtime_r(&now, &tm);
+    plat::gmtime(now, tm);
     std::strftime(date, sizeof date, "%a, %d %b %Y %H:%M:%S +0000", &tm);
     const std::string from = one_line(field(m, "from").empty() ? cfg.from : field(m, "from"));
     if (from.empty()) { error = std::string(fn) + "(): no from address"; return false; }
@@ -272,7 +274,7 @@ Value fn_send(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::vector<std::string> rcpts;
     if (!build_message(m, cfg, "mail.send", msg, env_from, rcpts, error)) return Value::null();
 
-    CURL* curl = curl_easy_init();
+    CURL* curl = lux_curl_init();
     if (!curl) { error = "mail.send(): could not initialize"; return Value::null(); }
     curl_slist* rcpt = nullptr;
     for (const auto& r : rcpts) rcpt = curl_slist_append(rcpt, envelope(r).c_str());
@@ -305,7 +307,7 @@ Value fn_check(NativeCtx&, std::vector<Value>& a, std::string& error) {
     wrapper["smtp"] = a[0];
     Config cfg;
     if (!resolve_config(wrapper, "mail.check", cfg, error)) return Value::null();
-    CURL* curl = curl_easy_init();
+    CURL* curl = lux_curl_init();
     if (!curl) { error = "mail.check(): could not initialize"; return Value::null(); }
     char err[CURL_ERROR_SIZE] = "";
     curl_easy_setopt(curl, CURLOPT_URL, cfg.url.c_str());

@@ -14,6 +14,13 @@ EXTRA_PIDS=""   # other background processes to kill on exit
 passed=0
 failed=0
 
+# A Windows binary (cross-built .exe, run directly or through a wine wrapper)
+# has no sh/cat/sleep/g++ for the tests that assume them.
+case "$(basename "$LUX")" in *.exe|*wine*) IS_WIN=1 ;; *) IS_WIN=${LUX_TEST_WINDOWS:-0} ;; esac
+skip() { printf '  skip  %s (%s)\n' "$1" "$2"; }
+# posix_check <name> <check args...>: check(), or a skip on Windows
+posix_check() { local n="$1"; if [ "$IS_WIN" = 1 ]; then skip "$n" "skipped (needs POSIX tools)"; else check "$@"; fi; }
+
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
 grey()  { printf '\033[90m%s\033[0m\n' "$*"; }

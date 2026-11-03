@@ -2,7 +2,7 @@
 #include <string>
 #include <string_view>
 #include <memory>
-#include <unistd.h>
+#include <lux/platform.hpp>
 #include <cerrno>
 #include "cancel.hpp"
 #include "request.hpp"

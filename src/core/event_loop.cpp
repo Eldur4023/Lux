@@ -1,8 +1,9 @@
 #include <lux/core/event_loop.hpp>
 
-#include <sys/epoll.h>
+#include <lux/platform.hpp>
+#ifndef _WIN32
 #include <sys/eventfd.h>
-#include <unistd.h>
+#endif
 #include <stdexcept>
 #include <cstring>
 #include <cerrno>
@@ -10,6 +11,8 @@
 #include <iostream>
 
 namespace lux::core {
+
+#ifndef _WIN32   // the Windows ctor/add/modify/remove/run are in event_loop_win.cpp
 
 EpollLoop::EpollLoop() {
     epoll_fd_ = epoll_create1(EPOLL_CLOEXEC);
@@ -62,33 +65,38 @@ void EpollLoop::remove(int fd) {
         graveyard_.push_back(callbacks_.extract(it));
 }
 
+void EpollLoop::wake() {
+    uint64_t val = 1;
+    (void)write(wakeup_fd_, &val, sizeof(val));
+}
+
+#endif // !_WIN32
+
 void EpollLoop::post(std::function<void()> cb) {
-    bool wake;
+    bool need_wake;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         // A non-empty queue already has its wakeup pending: whoever pushed
         // the first task wrote the eventfd, and the loop takes the whole
         // queue at once.
-        wake = task_queue_.empty();
+        need_wake = task_queue_.empty();
         task_queue_.push_back(std::move(cb));
         has_tasks_.store(true, std::memory_order_release);
     }
-    if (!wake) return;
-    uint64_t val = 1;
-    (void)write(wakeup_fd_, &val, sizeof(val));
+    if (!need_wake) return;
+    wake();
 }
 
 void EpollLoop::post_urgent(std::function<void()> cb) {
-    bool wake;
+    bool need_wake;
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        wake = urgent_queue_.empty() && task_queue_.empty();
+        need_wake = urgent_queue_.empty() && task_queue_.empty();
         urgent_queue_.push_back(std::move(cb));
         has_urgent_.store(true, std::memory_order_release);
     }
-    if (!wake) return;
-    uint64_t val = 1;
-    (void)write(wakeup_fd_, &val, sizeof(val));
+    if (!need_wake) return;
+    wake();
 }
 
 void EpollLoop::process_urgent() {
@@ -120,6 +128,7 @@ void EpollLoop::process_tasks() {
     running_tasks_.clear();
 }
 
+#ifndef _WIN32
 void EpollLoop::run() {
     running_ = true;
     constexpr int kMaxEvents = 64;
@@ -158,6 +167,8 @@ void EpollLoop::run() {
         run_timers();
     }
 }
+
+#endif // !_WIN32
 
 // Returns a timer id (> 0, never an fd). Loop thread only, like add().
 int EpollLoop::schedule_timer(int ms, std::function<void()> cb) {
@@ -199,8 +210,7 @@ int EpollLoop::next_timeout_ms() const {
 
 void EpollLoop::stop() {
     running_ = false;
-    uint64_t val = 1;
-    (void)write(wakeup_fd_, &val, sizeof(val));
+    wake();
 }
 
 } // namespace lux::core

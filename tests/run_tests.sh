@@ -72,6 +72,7 @@ compiles() {
 # every test still passes (same results), so only this notices.
 native_compiles() {
     local name="$1" fich="$2" want="$3" got
+    [ "$IS_WIN" = 1 ] && { skip "$name" "skipped: --native is off on Windows"; return; }
     got=$(cd "$TMP" && "$LUX" --native --check "$fich" 2>&1)
     local n
     n=$(printf '%s' "$got" | sed -n 's/.* \([0-9]*\) route(s) compiled to native code.*/\1/p')
@@ -382,6 +383,7 @@ if [ "$timeouts" = "b'HTTP/1.1 200' b'HTTP/1.1 408'" ]; then ok "keep-alive idle
 else fail "keep-alive idle past 5s stays open; a partial request gets 408" "b'HTTP/1.1 200' b'HTTP/1.1 408'" "$timeouts"; fi
 check "zip.create writes the archive" GET /zip/create 200 '"n":2'
 zip_path=$(curl -sS "http://127.0.0.1:$PORT/zip/create" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+[ "$IS_WIN" = 1 ] && zip_path=$(winepath -u "$zip_path")
 zip_check=$(python3 -c "
 import zipfile, sys
 z = zipfile.ZipFile(sys.argv[1])
@@ -394,6 +396,7 @@ rm -rf "$(dirname "$zip_path")"
 if [ "$zip_check" = "ok" ]; then ok "zip archive is valid, names are sanitised"
 else fail "zip archive is valid, names are sanitised" "ok" "$zip_check"; fi
 zip_path=$(curl -sS --max-time 30 "http://127.0.0.1:$PORT/zip/many" | python3 -c "import json,sys; print(json.load(sys.stdin)['path'])")
+[ "$IS_WIN" = 1 ] && zip_path=$(winepath -u "$zip_path")
 zip_check=$(python3 -c "
 import zipfile, sys
 z = zipfile.ZipFile(sys.argv[1])
@@ -435,8 +438,8 @@ check "os.path_join/basename/dirname" GET /os/path                200 '"joined":
 check "os file round-trip"         GET /os/file_roundtrip         200 '"content":"hola mundo"'
 check "os file round-trip cleans up" GET /os/file_roundtrip       200 '"removed":true,"exists_after":false'
 check "os.read_file missing is null, not an error" GET /os/missing_file 200 '"content_is_null":true'
-check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
-check "os.run exit status"         GET /os/run_echo               200 '"status":0'
+posix_check "os.run captures stdout"     GET /os/run_echo               200 '"stdout":"hello from os.run\n"'
+posix_check "os.run exit status"         GET /os/run_echo               200 '"status":0'
 check "os.run missing command errors" GET /os/run_missing         500 '"error":"os.run(): could not start'
 
 check "os.is_dir/is_file tell a directory from a file" GET /os/stat 200 '"dir_is_dir":true,"dir_is_file":false,"file_is_dir":false,"file_is_file":true'
@@ -457,12 +460,17 @@ check "os.move renames a file"                           GET /os/move_file 200 '
 check "os.move moves a whole directory tree"             GET /os/move_dir 200 '"moved":true,"src_gone":true,"content":"nested"'
 check "os.move on a missing source is rejected"          GET /os/move_missing_source_rejected 500 'does not exist'
 
-check "os.run input/cwd/env"         GET /os/run_options 200 '"stdin":"fed through stdin","cwd":"/tmp\n","env":"set\n"'
-check "a failed await is catchable (os.run timeout_ms)" GET /os/run_options 200 '"timeout":"os.run(): '"'"'sleep'"'"' timed out after 100ms"'
+posix_check "os.run input/cwd/env"         GET /os/run_options 200 '"stdin":"fed through stdin","cwd":"/tmp\n","env":"set\n"'
+posix_check "a failed await is catchable (os.run timeout_ms)" GET /os/run_options 200 '"timeout":"os.run(): '"'"'sleep'"'"' timed out after 100ms"'
 check "os.append_file/glob/list_dir(recursive)" GET /os/files_more 200 '"appended":"one+two","glob":['
 check "os.list_dir recursive is relative" GET /os/files_more 200 '"tree":["a.txt","b.JPG","sub","sub/c.txt"]'
 check "os.mime/path_ext/temp_file"    GET /os/files_more 200 '"mime":"image/jpeg","mime_unknown":"application/octet-stream","ext":".gz","tmp_ok":true'
-check "proc stdin pipe + write"       GET /proc/stdin 200 '"written":4,"echo":"ping","code":0'
+if [ "$IS_WIN" = 1 ]; then
+check "os.run runs a Windows program (cmd /c)" GET /os/run_win 200 '"stdout":"hello from os.run\r\n"'
+check "os.run cwd/env on Windows"              GET /os/run_win_opts 200 '"stdout":"set\r\nC:\\windows\r\n"'
+check "proc.kill + wait on Windows"            GET /proc/win_kill 200 '"was_alive":true'
+fi
+posix_check "proc stdin pipe + write"       GET /proc/stdin 200 '"written":4,"echo":"ping","code":0'
 check "math.abs/min/max"           GET /math/basic  200 '"abs":7,"abs_f":2.5,"min":3,"max":9'
 check "math.round/floor/ceil"      GET /math/basic  200 '"round":3,"floor":2,"ceil":3'
 check "math.sqrt/pow/log"          GET /math/basic  200 '"sqrt":4.0,"pow":1024.0,"log":0.0'
@@ -505,9 +513,9 @@ else fail "rooms: join, broadcast_others (JSON), count, leave on close" "ok" "$r
 sse_rooms_out=$(python3 "$HERE/sse_rooms_check.py" "$PORT" 2>&1 | tail -1)
 if [ "$sse_rooms_out" = "ok" ]; then ok "rooms: sse streams in a room get broadcasts"
 else fail "rooms: sse streams in a room get broadcasts" "ok" "$sse_rooms_out"; fi
-check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
+posix_check "proc.start/read/wait a real command end to end" GET /proc/echo_full        200 '"out":"hello from proc\n","code":0'
 check "proc.start with a bad command is a hard error"  GET /proc/missing_command  500 'proc.start(): could not start'
-check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
+posix_check "proc.kill + wait reaps a live process"          GET /proc/kill_and_wait    200 '"was_alive":true,"code":'
 check "proc.kill + wait leaves it not alive"           GET /proc/kill_and_wait    200 '"still_alive":false'
 check "proc.read without stdout: pipe is an error" GET /proc/read_without_pipe 500 '"error":"proc.read(): this process was not started with stdout'
 check "proc.alive on an unknown handle errors"         GET /proc/unknown_handle   500 'proc: unknown handle'
@@ -696,7 +704,8 @@ check "state.hit counts a sliding window"   GET /hit 200 '"n":1,"ttl_ok":true'
 check "state.hit counts again"              GET /hit 200 '"n":2'
 check "a List is a list of SQL parameters"  GET /in 200 '"r":[{"name":"n2"}],"e":[]'
 check "sha1, hmac_sha1, base32, totp (RFC vectors)" GET /crypto 200 '"sha1":"a9993e364706816aba3e25717850c26c9cd0d89d","hmac":"effcdf6ae5eb2fa2d27416d5f184df9c259a7c79","b32":"MZXW6YTBOI","totp":"287082","verify_bad":false'
-check "argon2 / bcrypt hash and verify"     GET /pw 200 '"a_ok":true,"a_bad":false,"b_ok":true,"b_bad":false,"ref_bcrypt":true'
+if [ "$IS_WIN" = 1 ]; then skip "argon2 / bcrypt hash and verify" "skipped: libargon2 not available on Windows"
+else check "argon2 / bcrypt hash and verify"     GET /pw 200 '"a_ok":true,"a_bad":false,"b_ok":true,"b_bad":false,"ref_bcrypt":true'; fi
 check "IANA time zones with daylight saving" GET /tz 200 '"summer":"14:00","winter":"13:00","dst_day":"2026-03-29 00:00"'
 check "a template calls project fns and modules" GET /tpl 200 '4 KB | 14:00'
 check "send_file adds Content-Disposition"  GET /file 200
