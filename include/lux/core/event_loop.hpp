@@ -7,12 +7,14 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <lux/platform.hpp>
 
 namespace lux::core {
 
 // ── EpollLoop ─────────────────────────────────────────────────────────────────
 //
-// Default event loop backend — uses epoll + eventfd.  Timers live in an
+// Default event loop backend — uses epoll + eventfd (WSAPoll + a loopback
+// socket pair on Windows, see the _WIN32 parts of event_loop.cpp).  Timers live in an
 // ordered map and set epoll_wait's timeout: no fd or syscall per timer, and
 // every request arms two (header and request timeouts).
 // All existing code refers to this as "EventLoop" via the alias below.
@@ -47,8 +49,22 @@ private:
     void run_timers();
     int  next_timeout_ms() const;
 
+    void wake();   // makes the loop's wait return (eventfd write / loopback byte)
+
+#ifdef _WIN32
+    // Windows: WSAPoll over the registered sockets (level-triggered), the
+    // wakeup is a loopback socket pair instead of an eventfd.
+    struct Ready { int fd; uint32_t events; };
+    std::unordered_map<int, uint32_t> interest_;   // fd -> EPOLL* bits wanted
+    std::vector<WSAPOLLFD> pfds_;                  // [0] is the wakeup read end
+    std::vector<Ready>     ready_;                 // this turn's events, not yet dispatched
+    bool pfds_dirty_ = true;
+    int  wake_r_ = -1;
+    int  wake_w_ = -1;
+#else
     int  epoll_fd_  = -1;
     int  wakeup_fd_ = -1;
+#endif
     // Atomic because stop() writes it from ANOTHER thread —the shutdown one—
     // and the loop reads it on every turn.  As a plain bool it was a race, even
     // if in practice the compiler never bit it.

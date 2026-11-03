@@ -8,6 +8,7 @@
 // connection cache carries over: a second call to the same API reuses the
 // TCP+TLS connection instead of paying a new handshake.
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/platform_os.hpp>
 #include <lux/percent_encoding.hpp>
 
 #include "netaddr.hpp"
@@ -211,7 +212,11 @@ Value do_request(const std::string& method, const std::string& url, const Value*
         body = body_is_json ? body_value->to_json_text() : body_value->as_str();
     }
     if (!opts.save_to.empty()) {
+        #ifdef _WIN32
+        sink.file = _wfopen(plat::widen(opts.save_to).c_str(), L"wb");
+#else
         sink.file = std::fopen(opts.save_to.c_str(), "wb");
+#endif
         if (!sink.file) { error = "http." + method + "(): cannot write '" + opts.save_to + "'"; return Value::null(); }
         sink.max = 4ULL << 30;
     }

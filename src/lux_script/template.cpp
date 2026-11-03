@@ -1,4 +1,5 @@
 #include <lux_script/template.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <lux_script/emitter.hpp>
 #include <lux_script/lexer.hpp>
@@ -217,7 +218,7 @@ private:
 
     bool read_template(const std::string& name, std::string& out) {
         if (name.empty() || name.find("..") != std::string::npos) return false;
-        auto text = read_whole_file(std::filesystem::path(dir_) / name);
+        auto text = read_whole_file(plat::to_path(dir_) / plat::to_path(name));
         if (!text) return false;
         out = std::move(*text);
         return true;
@@ -492,7 +493,7 @@ void Compiler::body(const std::string& src, const std::string& file,
             std::string name = trim(rest);
             if (name.size() >= 2 && (name.front() == '"' || name.front() == '\''))
                 name = name.substr(1, name.size() - 2);
-            std::filesystem::path path = std::filesystem::path(dir_) / name;
+            std::filesystem::path path = plat::to_path(dir_) / plat::to_path(name);
             if (name.empty() || name.find("..") != std::string::npos) {
                 error(loc, "invalid template name in {% include %}");
                 continue;

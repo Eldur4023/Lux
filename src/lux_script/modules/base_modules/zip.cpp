@@ -3,6 +3,7 @@
 // it everything is stored. Files are streamed, never loaded whole. Past
 // 4 GB (an entry, an offset) or 65535 entries it writes ZIP64 records.
 #include <lux_script/builtin_module.hpp>
+#include <lux_script/platform_os.hpp>
 
 #include <algorithm>
 #include <array>
@@ -51,7 +52,7 @@ constexpr uint64_t kZip64From = 0xF0000000u;
 // Deflating a JPEG or an MP4 spends CPU to gain nothing.
 bool worth_deflating(const std::string& name) {
 #ifdef LUX_GZIP
-    std::string ext = fs::path(name).extension().string();
+    std::string ext = plat::from_path(plat::to_path(name).extension());
     for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     for (const char* e : {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".avif", ".mp4", ".mov",
                           ".mkv", ".webm", ".mp3", ".m4a", ".ogg", ".flac", ".zip", ".gz", ".7z", ".pdf", ".docx", ".xlsx"})
@@ -67,7 +68,7 @@ bool worth_deflating(const std::string& name) {
 // files written. A name keeps no leading '/' and no '..' part, so the
 // archive cannot write outside wherever it is unpacked.
 Value fn_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    std::ofstream out(a[0].as_str(), std::ios::binary | std::ios::trunc);
+    std::ofstream out(plat::to_path(a[0].as_str()), std::ios::binary | std::ios::trunc);
     if (!out) { error = "zip.create(): cannot write '" + a[0].as_str() + "'"; return Value::null(); }
     std::vector<Entry> entries;
     uint64_t offset = 0;
@@ -76,15 +77,15 @@ Value fn_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
     for (const Value& item : a[1].as_list()) {
         const bool pair = item.is_list() && item.as_list().size() == 2;
         const std::string path = pair ? item.as_list()[0].to_string() : item.to_string();
-        std::string name = pair ? item.as_list()[1].to_string() : fs::path(path).filename().string();
+        std::string name = pair ? item.as_list()[1].to_string() : plat::from_path(plat::to_path(path).filename());
         fs::path clean;
-        for (const auto& part : fs::path(name).relative_path())
+        for (const auto& part : plat::to_path(name).relative_path())
             if (part != ".." && part != ".") clean /= part;
-        name = clean.generic_string();
+        name = plat::from_path(clean);
 
         std::error_code ec;
-        const uint64_t size = fs::file_size(path, ec);
-        std::ifstream in(path, std::ios::binary);
+        const uint64_t size = fs::file_size(plat::to_path(path), ec);
+        std::ifstream in(plat::to_path(path), std::ios::binary);
         if (ec || !in || name.empty()) { error = "zip.create(): cannot read '" + path + "'"; return Value::null(); }
 
         // Local header with bit 3 set: CRC and sizes follow the data, so

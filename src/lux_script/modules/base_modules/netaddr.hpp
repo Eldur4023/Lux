@@ -2,7 +2,12 @@
 // IP address parsing and classification, shared by the net module and
 // http's public_only (SSRF) check. IPv4 is kept as an IPv4-mapped IPv6
 // address, so one comparison covers both families.
-#include <arpa/inet.h>
+#ifdef _WIN32
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#else
+#  include <arpa/inet.h>
+#endif
 
 #include <array>
 #include <cstdint>

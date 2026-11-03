@@ -8,17 +8,25 @@
 #include <lux_script/builtin_module.hpp>
 #include <lux/mime.hpp>
 
+#include <lux_script/platform_os.hpp>
+
 #include "spawn.hpp"
 
-#include <fcntl.h>
-#include <termios.h>
-#include <fnmatch.h>
-#include <sys/stat.h>
-#include <sys/statvfs.h>
-#include <unistd.h>
-#include <poll.h>
-#include <signal.h>
-#include <sys/wait.h>
+#ifdef _WIN32
+#  include <io.h>
+#  include <sys/stat.h>
+#  include <sys/types.h>
+#else
+#  include <fcntl.h>
+#  include <termios.h>
+#  include <fnmatch.h>
+#  include <sys/stat.h>
+#  include <sys/statvfs.h>
+#  include <unistd.h>
+#  include <poll.h>
+#  include <signal.h>
+#  include <sys/wait.h>
+#endif
 
 #include <algorithm>
 #include <chrono>
@@ -27,13 +35,20 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <sstream>
+#include <thread>
 
 namespace lux_script {
 
 namespace {
 
 namespace fs = std::filesystem;
+
+// LuxScript strings are UTF-8: P() makes a path of one, S() gives one back
+// ('/'-separated on Windows). On POSIX they are plain conversions.
+fs::path P(const std::string& s) { return plat::to_path(s); }
+std::string S(const fs::path& p) { return plat::from_path(p); }
 
 Value fail(std::string& error, const std::string& fn, const std::string& what) {
     error = "os." + fn + "(): " + what;
@@ -44,50 +59,63 @@ Value fail(std::string& error, const std::string& fn, const std::string& what) {
 
 // Unset is null (or the default): the script decides what absence means.
 Value fn_getenv(NativeCtx&, std::vector<Value>& a, std::string&) {
-    const char* v = std::getenv(a[0].as_str().c_str());
-    return v ? Value::str(v) : a.size() > 1 ? a[1] : Value::null();
+    std::string v;
+    return plat::get_env(a[0].as_str().c_str(), v) ? Value::str(std::move(v)) : a.size() > 1 ? a[1] : Value::null();
+}
+
+// "windows" / "android" / "macos" / "linux": the platform the binary was built for.
+Value fn_name(NativeCtx&, std::vector<Value>&, std::string&) {
+#if defined(_WIN32)
+    return Value::str("windows");
+#elif defined(__ANDROID__)
+    return Value::str("android");
+#elif defined(__APPLE__)
+    return Value::str("macos");
+#else
+    return Value::str("linux");
+#endif
 }
 
 Value fn_cwd(NativeCtx&, std::vector<Value>&, std::string& error) {
     std::error_code ec;
     fs::path p = fs::current_path(ec);
-    return ec ? fail(error, "cwd", ec.message()) : Value::str(p.string());
+    return ec ? fail(error, "cwd", ec.message()) : Value::str(S(p));
 }
 
 Value fn_path_join(NativeCtx&, std::vector<Value>& a, std::string&) {
     fs::path out;
-    for (const Value& v : a) out /= v.to_string();
-    return Value::str(out.string());
+    for (const Value& v : a) out /= P(v.to_string());
+    return Value::str(S(out));
 }
 
-Value fn_path_basename(NativeCtx&, std::vector<Value>& a, std::string&) { return Value::str(fs::path(a[0].as_str()).filename().string()); }
-Value fn_path_dirname(NativeCtx&, std::vector<Value>& a, std::string&)  { return Value::str(fs::path(a[0].as_str()).parent_path().string()); }
+Value fn_path_basename(NativeCtx&, std::vector<Value>& a, std::string&) { return Value::str(S(P(a[0].as_str()).filename())); }
+Value fn_path_dirname(NativeCtx&, std::vector<Value>& a, std::string&)  { return Value::str(S(P(a[0].as_str()).parent_path())); }
 // ".jpg" for "a/b.JPG" -> ".JPG"; "" when there is none.
-Value fn_path_ext(NativeCtx&, std::vector<Value>& a, std::string&)      { return Value::str(fs::path(a[0].as_str()).extension().string()); }
-Value fn_mime(NativeCtx&, std::vector<Value>& a, std::string&)          { return Value::str(lux::mime_for_ext(fs::path(a[0].as_str()).extension().string())); }
+Value fn_path_ext(NativeCtx&, std::vector<Value>& a, std::string&)      { return Value::str(S(P(a[0].as_str()).extension())); }
+Value fn_mime(NativeCtx&, std::vector<Value>& a, std::string&)          { return Value::str(lux::mime_for_ext(S(P(a[0].as_str()).extension()))); }
 
 // Absolute and normalised: "a/./b/../c" -> "/cwd/a/c".
 Value fn_path_abs(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::error_code ec;
-    fs::path p = fs::absolute(a[0].as_str(), ec);
-    return ec ? fail(error, "path_abs", ec.message()) : Value::str(p.lexically_normal().string());
+    fs::path p = fs::absolute(P(a[0].as_str()), ec);
+    return ec ? fail(error, "path_abs", ec.message()) : Value::str(S(p.lexically_normal()));
 }
 
 // A dangling symlink is neither a file nor a directory.
-Value fn_path_exists(NativeCtx&, std::vector<Value>& a, std::string&) { std::error_code ec; return Value::boolean(fs::exists(a[0].as_str(), ec)); }
-Value fn_is_dir(NativeCtx&, std::vector<Value>& a, std::string&)      { std::error_code ec; return Value::boolean(fs::is_directory(a[0].as_str(), ec)); }
-Value fn_is_file(NativeCtx&, std::vector<Value>& a, std::string&)     { std::error_code ec; return Value::boolean(fs::is_regular_file(a[0].as_str(), ec)); }
+Value fn_path_exists(NativeCtx&, std::vector<Value>& a, std::string&) { std::error_code ec; return Value::boolean(fs::exists(P(a[0].as_str()), ec)); }
+Value fn_is_dir(NativeCtx&, std::vector<Value>& a, std::string&)      { std::error_code ec; return Value::boolean(fs::is_directory(P(a[0].as_str()), ec)); }
+Value fn_is_file(NativeCtx&, std::vector<Value>& a, std::string&)     { std::error_code ec; return Value::boolean(fs::is_regular_file(P(a[0].as_str()), ec)); }
 
 // -1, never a real size, for a missing path or a directory.
 Value fn_file_size(NativeCtx&, std::vector<Value>& a, std::string&) {
     std::error_code ec;
-    auto n = fs::file_size(a[0].as_str(), ec);
+    auto n = fs::file_size(P(a[0].as_str()), ec);
     return Value::integer(ec ? -1 : static_cast<long long>(n));
 }
 
 Value fn_mtime_ms(NativeCtx&, std::vector<Value>& a, std::string&) {
     std::error_code ec;
-    auto t = fs::last_write_time(a[0].as_str(), ec);
+    auto t = fs::last_write_time(P(a[0].as_str()), ec);
     if (ec) return Value::integer(-1);
 #ifdef __ANDROID__
     // libc++ (NDK) has no clock_cast; its file_clock counts from the Unix epoch on Linux/Android.
@@ -104,6 +132,16 @@ Value fn_mtime_ms(NativeCtx&, std::vector<Value>& a, std::string&) {
 // straight into a string of the file's size: no stream, no copies.
 Value fn_read_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const std::string& path = a[0].as_str();
+#ifdef _WIN32
+    {
+        std::error_code ec;
+        if (!fs::is_regular_file(P(path), ec)) return Value::null();
+        std::ifstream f(P(path), std::ios::binary);
+        if (!f) return Value::null();
+        std::string out((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        return f.bad() ? fail(error, "read_file", "could not read '" + path + "'") : Value::str(std::move(out));
+    }
+#else
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return Value::null();
     struct stat st{};
@@ -135,11 +173,12 @@ Value fn_read_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     ::close(fd);
     out.resize(got);
     return Value::str(std::move(out));
+#endif
 }
 
 Value write(std::vector<Value>& a, std::string& error, bool append) {
     const char* fn = append ? "append_file" : "write_file";
-    std::ofstream f(a[0].as_str(), std::ios::binary | (append ? std::ios::app : std::ios::trunc));
+    std::ofstream f(P(a[0].as_str()), std::ios::binary | (append ? std::ios::app : std::ios::trunc));
     if (!f) return fail(error, fn, "could not open '" + a[0].as_str() + "' for writing");
     f << a[1].as_str();
     return f.flush() ? Value::boolean(true) : fail(error, fn, "write failed for '" + a[0].as_str() + "'");
@@ -150,11 +189,11 @@ Value fn_append_file(NativeCtx&, std::vector<Value>& a, std::string& e) { return
 // Entry names, one level (Python's os.listdir); list_dir(dir, true) walks
 // the whole tree and gives paths relative to `dir`. null if not a directory.
 Value fn_list_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    const fs::path root = a[0].as_str();
+    const fs::path root = P(a[0].as_str());
     std::error_code ec;
     if (!fs::is_directory(root, ec)) return Value::null();
     Value::List out;
-    auto add = [&](const fs::directory_entry& e) { out.push_back(Value::str(e.path().lexically_relative(root).string())); };
+    auto add = [&](const fs::directory_entry& e) { out.push_back(Value::str(S(e.path().lexically_relative(root)))); };
     if (a.size() > 1 && a[1].as_bool())
         for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) add(*it);
     else
@@ -165,15 +204,20 @@ Value fn_list_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // glob("uploads/*.jpg"): the matching paths, sorted. The pattern's last
 // part is matched (shell rules: * ? [...]) inside the directory before it.
 Value fn_glob(NativeCtx&, std::vector<Value>& a, std::string&) {
-    const fs::path pattern = a[0].as_str();
+    const fs::path pattern = P(a[0].as_str());
     const fs::path dir = pattern.has_parent_path() ? pattern.parent_path() : ".";
-    const std::string name = pattern.filename().string();
+    const std::string name = S(pattern.filename());
     std::vector<std::string> hits;
     std::error_code ec;
     for (auto it = fs::directory_iterator(dir, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
-        const std::string f = it->path().filename().string();
-        if (fnmatch(name.c_str(), f.c_str(), FNM_PERIOD) == 0)
-            hits.push_back(pattern.has_parent_path() ? (dir / f).string() : f);
+        const std::string f = S(it->path().filename());
+#ifdef _WIN32
+        const bool match = plat::fnmatch_period(name.c_str(), f.c_str());
+#else
+        const bool match = fnmatch(name.c_str(), f.c_str(), FNM_PERIOD) == 0;
+#endif
+        if (match)
+            hits.push_back(pattern.has_parent_path() ? S(dir / P(f)) : f);
     }
     std::sort(hits.begin(), hits.end());
     Value::List out;
@@ -185,15 +229,25 @@ Value fn_glob(NativeCtx&, std::vector<Value>& a, std::string&) {
 Value fn_remove_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const std::string& path = a[0].as_str();
     std::error_code ec;
-    if (!fs::exists(path, ec)) return Value::boolean(false);
-    if (!fs::is_regular_file(path, ec)) return fail(error, "remove_file", "'" + path + "' is not a regular file (use os.remove_dir() for directories)");
-    const bool removed = fs::remove(path, ec);
+    if (!fs::exists(P(path), ec)) return Value::boolean(false);
+    if (!fs::is_regular_file(P(path), ec)) return fail(error, "remove_file", "'" + path + "' is not a regular file (use os.remove_dir() for directories)");
+    const bool removed = fs::remove(P(path), ec);
     return ec ? fail(error, "remove_file", ec.message()) : Value::boolean(removed);
 }
 
 // {total, free, used}: bytes of the filesystem that holds `path`; `free` is
 // what a non-root user may still write.
 Value fn_disk_usage(NativeCtx&, std::vector<Value>& a, std::string& error) {
+#ifdef _WIN32
+    ULARGE_INTEGER avail{}, total{}, free_all{};
+    if (!GetDiskFreeSpaceExW(plat::widen(a[0].as_str()).c_str(), &avail, &total, &free_all))
+        return fail(error, "disk_usage", spawn::last_error());
+    Value::Dict d;
+    d["total"] = Value::integer(static_cast<long long>(total.QuadPart));
+    d["free"]  = Value::integer(static_cast<long long>(avail.QuadPart));
+    d["used"]  = Value::integer(static_cast<long long>(total.QuadPart - free_all.QuadPart));
+    return Value::dict(std::move(d));
+#else
     struct statvfs v{};
     if (::statvfs(a[0].as_str().c_str(), &v) != 0) return fail(error, "disk_usage", std::strerror(errno));
     const long long total = static_cast<long long>(v.f_blocks) * static_cast<long long>(v.f_frsize);
@@ -203,31 +257,47 @@ Value fn_disk_usage(NativeCtx&, std::vector<Value>& a, std::string& error) {
     d["free"]  = Value::integer(free_);
     d["used"]  = Value::integer(total - static_cast<long long>(v.f_bfree) * static_cast<long long>(v.f_frsize));
     return Value::dict(std::move(d));
+#endif
 }
 
 // A permission mode: an octal string ("640", "0750") or an int taken as is.
-bool parse_mode(const Value& v, mode_t& out) {
-    if (v.is_int()) { out = static_cast<mode_t>(v.as_int()); return v.as_int() >= 0 && v.as_int() <= 07777; }
+#ifdef _WIN32
+using Mode = unsigned;
+#else
+using Mode = mode_t;
+#endif
+bool parse_mode(const Value& v, Mode& out) {
+    if (v.is_int()) { out = static_cast<Mode>(v.as_int()); return v.as_int() >= 0 && v.as_int() <= 07777; }
     const std::string& s = v.as_str();
     char* end = nullptr;
     const unsigned long m = std::strtoul(s.c_str(), &end, 8);
-    out = static_cast<mode_t>(m);
+    out = static_cast<Mode>(m);
     return !s.empty() && *end == '\0' && m <= 07777;
 }
 
 Value fn_chmod(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    mode_t m;
+    Mode m;
     if (!parse_mode(a[1], m)) return fail(error, "chmod", "the mode is an octal string such as \"640\"");
+#ifdef _WIN32
+    // Windows only has a read-only attribute: the owner-write bit decides it.
+    if (_wchmod(plat::widen(a[0].as_str()).c_str(), (m & 0200) ? (_S_IREAD | _S_IWRITE) : _S_IREAD) != 0)
+        return fail(error, "chmod", std::strerror(errno));
+#else
     if (::chmod(a[0].as_str().c_str(), m) != 0) return fail(error, "chmod", std::strerror(errno));
+#endif
     return Value::boolean(true);
 }
 
 // Sets the process umask; returns the previous one as an octal string.
 Value fn_umask(NativeCtx&, std::vector<Value>& a, std::string& error) {
-    mode_t m;
+    Mode m;
     if (!parse_mode(a[0], m)) return fail(error, "umask", "the mask is an octal string such as \"027\"");
     char buf[8];
+    #ifdef _WIN32
+    std::snprintf(buf, sizeof buf, "%04o", static_cast<unsigned>(_umask(static_cast<int>(m))));
+#else
     std::snprintf(buf, sizeof buf, "%04o", static_cast<unsigned>(::umask(m)));
+#endif
     return Value::str(buf);
 }
 
@@ -262,12 +332,23 @@ Value fn_eprint(NativeCtx&, std::vector<Value>& a, std::string&) {
 // goes to stderr so stdout stays clean for a pipe.
 Value read_line(const std::string& prompt, bool secret) {
     if (!prompt.empty()) { std::cerr << prompt; std::cerr.flush(); }
+#ifdef _WIN32
+    const HANDLE console = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD old = 0;
+    const bool tty = secret && GetConsoleMode(console, &old);
+    if (tty) SetConsoleMode(console, old & ~static_cast<DWORD>(ENABLE_ECHO_INPUT));
+    std::string line;
+    const bool ok = static_cast<bool>(std::getline(std::cin, line));
+    if (tty) { SetConsoleMode(console, old); std::cerr << '\n'; }
+    if (ok && !line.empty() && line.back() == '\r') line.pop_back();
+#else
     termios old{};
     const bool tty = secret && ::isatty(STDIN_FILENO) && ::tcgetattr(STDIN_FILENO, &old) == 0;
     if (tty) { termios t = old; t.c_lflag &= ~static_cast<tcflag_t>(ECHO); ::tcsetattr(STDIN_FILENO, TCSANOW, &t); }
     std::string line;
     const bool ok = static_cast<bool>(std::getline(std::cin, line));
     if (tty) { ::tcsetattr(STDIN_FILENO, TCSANOW, &old); std::cerr << '\n'; }
+#endif
     return ok ? Value::str(std::move(line)) : Value::null();
 }
 
@@ -277,7 +358,7 @@ Value fn_input_secret(NativeCtx&, std::vector<Value>& a, std::string&) { return 
 // Parents too, like os.makedirs(). false if it already existed.
 Value fn_make_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::error_code ec;
-    const bool created = fs::create_directories(a[0].as_str(), ec);
+    const bool created = fs::create_directories(P(a[0].as_str()), ec);
     return ec ? fail(error, "make_dir", ec.message()) : Value::boolean(created);
 }
 
@@ -286,13 +367,17 @@ Value fn_make_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
 Value fn_remove_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const std::string& path = a[0].as_str();
     std::error_code ec;
-    if (!fs::exists(path, ec)) return Value::boolean(false);
-    if (!fs::is_directory(path, ec)) return fail(error, "remove_dir", "'" + path + "' is not a directory (use os.remove_file() for files)");
+    if (!fs::exists(P(path), ec)) return Value::boolean(false);
+    if (!fs::is_directory(P(path), ec)) return fail(error, "remove_dir", "'" + path + "' is not a directory (use os.remove_file() for files)");
     if (a.size() > 1 && a[1].as_bool()) {
-        const auto n = fs::remove_all(path, ec);
+        const auto n = fs::remove_all(P(path), ec);
         return ec ? fail(error, "remove_dir", ec.message()) : Value::boolean(n > 0);
     }
-    const bool removed = fs::remove(path, ec);
+    const bool removed = fs::remove(P(path), ec);
+#ifdef _WIN32
+    // MinGW/Wine report a non-empty dir as access denied, not ENOTEMPTY.
+    if (ec) { std::error_code e2; if (!fs::is_empty(P(path), e2) && !e2) ec = std::make_error_code(std::errc::directory_not_empty); }
+#endif
     if (ec == std::errc::directory_not_empty)
         return fail(error, "remove_dir", "'" + path + "' is not empty -- pass true as the second argument to remove it and everything inside");
     return ec ? fail(error, "remove_dir", ec.message()) : Value::boolean(removed);
@@ -301,9 +386,16 @@ Value fn_remove_dir(NativeCtx&, std::vector<Value>& a, std::string& error) {
 // Files only; the third argument allows overwriting.
 Value fn_copy_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::error_code ec;
-    if (!fs::is_regular_file(a[0].as_str(), ec)) return fail(error, "copy_file", "'" + a[0].as_str() + "' is not a regular file");
+    if (!fs::is_regular_file(P(a[0].as_str()), ec)) return fail(error, "copy_file", "'" + a[0].as_str() + "' is not a regular file");
     const auto mode = a.size() > 2 && a[2].as_bool() ? fs::copy_options::overwrite_existing : fs::copy_options::none;
-    const bool copied = fs::copy_file(a[0].as_str(), a[1].as_str(), mode, ec);
+#ifdef _WIN32
+    // MinGW's copy_file(overwrite_existing) fails with EEXIST on an existing target.
+    if (mode == fs::copy_options::overwrite_existing) {
+        const bool okc = CopyFileW(P(a[0].as_str()).c_str(), P(a[1].as_str()).c_str(), FALSE) != 0;
+        return okc ? Value::boolean(true) : fail(error, "copy_file", "could not copy (error " + std::to_string(GetLastError()) + ")");
+    }
+#endif
+    const bool copied = fs::copy_file(P(a[0].as_str()), P(a[1].as_str()), mode, ec);
     return ec ? fail(error, "copy_file", ec.message()) : Value::boolean(copied);
 }
 
@@ -313,15 +405,20 @@ Value fn_copy_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
 Value fn_move(NativeCtx&, std::vector<Value>& a, std::string& error) {
     const std::string &from = a[0].as_str(), &to = a[1].as_str();
     std::error_code ec;
-    if (!fs::exists(from, ec)) return fail(error, "move", "'" + from + "' does not exist");
-    fs::rename(from, to, ec);
+    if (!fs::exists(P(from), ec)) return fail(error, "move", "'" + from + "' does not exist");
+    fs::rename(P(from), P(to), ec);
     if (!ec) return Value::boolean(true);
-    if (ec != std::errc::cross_device_link) return fail(error, "move", ec.message());
-    const bool dir = fs::is_directory(from, ec);
-    if (dir) fs::copy(from, to, fs::copy_options::recursive, ec);
-    else     fs::copy_file(from, to, ec);
+#ifdef _WIN32
+    const bool other_device = ec == std::errc::cross_device_link || ec.value() == ERROR_NOT_SAME_DEVICE;
+#else
+    const bool other_device = ec == std::errc::cross_device_link;
+#endif
+    if (!other_device) return fail(error, "move", ec.message());
+    const bool dir = fs::is_directory(P(from), ec);
+    if (dir) fs::copy(P(from), P(to), fs::copy_options::recursive, ec);
+    else     fs::copy_file(P(from), P(to), ec);
     if (ec) return fail(error, "move", ec.message());
-    if (dir) fs::remove_all(from, ec); else fs::remove(from, ec);
+    if (dir) fs::remove_all(P(from), ec); else fs::remove(P(from), ec);
     return ec ? fail(error, "move", "copied to '" + to + "' but could not remove '" + from + "': " + ec.message())
               : Value::boolean(true);
 }
@@ -329,7 +426,7 @@ Value fn_move(NativeCtx&, std::vector<Value>& a, std::string& error) {
 Value fn_temp_dir(NativeCtx&, std::vector<Value>&, std::string& error) {
     std::error_code ec;
     fs::path p = fs::temp_directory_path(ec);
-    return ec ? fail(error, "temp_dir", ec.message()) : Value::str(p.string());
+    return ec ? fail(error, "temp_dir", ec.message()) : Value::str(S(p));
 }
 
 // A new, empty file only this process can read (0600), with the given
@@ -337,11 +434,25 @@ Value fn_temp_dir(NativeCtx&, std::vector<Value>&, std::string& error) {
 Value fn_temp_file(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::error_code ec;
     const std::string suffix = a.empty() ? "" : a[0].as_str();
+#ifdef _WIN32
+    // CREATE_NEW on a random name: never an existing file. The temp dir is per-user, so only this user can read it.
+    std::random_device rd;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        char name[32];
+        std::snprintf(name, sizeof name, "lux-%08x%08x", rd(), rd());
+        const fs::path path = fs::temp_directory_path(ec) / P(std::string(name) + suffix);
+        const HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) { CloseHandle(h); return Value::str(S(path)); }
+        if (GetLastError() != ERROR_FILE_EXISTS) return fail(error, "temp_file", spawn::last_error());
+    }
+    return fail(error, "temp_file", "could not find a free name");
+#else
     std::string path = (fs::temp_directory_path(ec) / ("lux-XXXXXX" + suffix)).string();
     const int fd = mkstemps(path.data(), static_cast<int>(suffix.size()));
     if (fd < 0) return fail(error, "temp_file", std::strerror(errno));
     ::close(fd);
     return Value::str(path);
+#endif
 }
 
 // ─── run() ──────────────────────────────────────────────────────────────────
@@ -376,6 +487,39 @@ Value fn_run(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::string out, err;
     size_t written = 0;
     char buf[4096];
+#ifdef _WIN32
+    // No poll() on pipes: a short-sleep loop over PeekNamedPipe and non-blocking writes does the same job.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
+    bool timed_out = false;
+    if (spawn::open_fd(c.in)) spawn::set_nonblock(c.in, /*write_end=*/true);
+    while (spawn::open_fd(c.out) || spawn::open_fd(c.err)) {
+        if (std::chrono::steady_clock::now() >= deadline) { timed_out = true; break; }
+        bool progress = false;
+        if (spawn::open_fd(c.in)) {
+            const long w = spawn::write_some(c.in, input.data() + written, input.size() - written);
+            if (w > 0) { written += static_cast<size_t>(w); progress = true; }
+            if (w < 0 || written == input.size()) { spawn::close_fd(c.in); c.in = spawn::kNoFd; progress = true; }   // EOF for the child
+        }
+        for (spawn::Fd* fd : {&c.out, &c.err}) {
+            if (!spawn::open_fd(*fd) || spawn::wait_readable(*fd, 0) != 1) continue;
+            const long r = spawn::read_some(*fd, buf, sizeof buf);
+            if (r > 0) { (fd == &c.out ? out : err).append(buf, static_cast<size_t>(r)); progress = true; }
+            else if (r != -2) { spawn::close_fd(*fd); *fd = spawn::kNoFd; progress = true; }
+        }
+        if (!progress) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    for (spawn::Fd fd : {c.in, c.out, c.err}) if (spawn::open_fd(fd)) spawn::close_fd(fd);
+    if (timed_out) spawn::kill_proc(c.pid, 9);
+    const int exit_code = spawn::wait_exit(c.pid);
+    spawn::release_pid(c.pid);
+    if (timed_out) return fail(error, "run", "'" + argv[0] + "' timed out after " + std::to_string(timeout) + "ms");
+
+    Value::Dict d;
+    d["status"] = Value::integer(exit_code);
+    d["stdout"] = Value::str(std::move(out));
+    d["stderr"] = Value::str(std::move(err));
+    return Value::dict(std::move(d));
+#else
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
     bool timed_out = false;
     while (c.out >= 0 || c.err >= 0) {
@@ -411,6 +555,7 @@ Value fn_run(NativeCtx&, std::vector<Value>& a, std::string& error) {
     d["stdout"] = Value::str(std::move(out));
     d["stderr"] = Value::str(std::move(err));
     return Value::dict(std::move(d));
+#endif
 }
 
 } // namespace
@@ -418,6 +563,7 @@ Value fn_run(NativeCtx&, std::vector<Value>& a, std::string& error) {
 LUX_MODULE(os, {
     {"getenv",        "s|x",  fn_getenv},
     {"cwd",           "",     fn_cwd},
+    {"name",          ">s",     fn_name},
     {"path_join",     "x*>s",   fn_path_join},
     {"path_basename", "s>s",    fn_path_basename},
     {"path_dirname",  "s>s",    fn_path_dirname},

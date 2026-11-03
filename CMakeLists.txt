@@ -13,17 +13,26 @@ set(CMAKE_C_STANDARD 11)
 # (lux, lux_llhttp) one by one, and the cost (PIC in the `lux` binary
 # itself, which did not need it) is negligible next to having to
 # recompile on demand.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT WIN32)   # PE has no PIC: the flag would only warn
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID)
-    message(FATAL_ERROR "Lux requires Linux: it uses epoll, sendfile(2) and SO_REUSEPORT.")
+# Linux (and Android) is the reference platform (epoll, sendfile(2), SO_REUSEPORT,
+# io_uring); Windows (MinGW-w64 / clang, UCRT) builds the same core over WSAPoll + a
+# per-OS layer (include/lux/platform.hpp, src/core/event_loop_win.cpp).
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ANDROID AND NOT WIN32)
+    message(FATAL_ERROR "Lux requires Linux or Windows (MinGW-w64): it uses epoll, sendfile(2) and SO_REUSEPORT.")
 endif()
 
 option(LUX_IO_URING "io_uring backend instead of epoll (Linux 5.1+)" OFF)
+if(WIN32 AND LUX_IO_URING)
+    message(WARNING "LUX_IO_URING is Linux-only: ignored on Windows")
+    set(LUX_IO_URING OFF CACHE BOOL "" FORCE)
+endif()
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
 # HTTPS in the server itself (tls: cert / key). Off by default: without it the
 # core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
@@ -65,7 +74,7 @@ find_package(Threads REQUIRED)
 # It is optional: without it the build proceeds and glibc's is used.
 option(LUX_JEMALLOC "Link jemalloc if available" ON)
 set(LUX_ALLOC "")
-if(LUX_JEMALLOC)
+if(LUX_JEMALLOC AND NOT WIN32)
     find_library(JEMALLOC_LIB NAMES jemalloc)
     if(JEMALLOC_LIB)
         set(LUX_ALLOC ${JEMALLOC_LIB})
@@ -103,6 +112,10 @@ if(LUX_IO_URING)
     list(APPEND LUX_SOURCES src/core/io_uring_loop.cpp)
 endif()
 
+if(WIN32)
+    list(APPEND LUX_SOURCES src/core/event_loop_win.cpp)
+endif()
+
 add_library(lux STATIC ${LUX_SOURCES})
 
 target_include_directories(lux PUBLIC
@@ -115,6 +128,12 @@ target_link_libraries(lux PUBLIC
     Threads::Threads
     ${LUX_ALLOC}
 )
+
+if(WIN32)
+    # Winsock + the TransmitFile/AcceptEx family; 64-bit off_t for sendfile's offset.
+    target_link_libraries(lux PUBLIC ws2_32 mswsock)
+    target_compile_definitions(lux PUBLIC _FILE_OFFSET_BITS=64 _WIN32_WINNT=0x0A00)   # WSAPoll needs Vista+
+endif()
 
 if(LUX_TLS)
     find_package(PkgConfig REQUIRED)
@@ -206,6 +225,17 @@ add_library(lux_script STATIC
 )
 target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_compile_definitions(lux_script PUBLIC LUX_NO_NATIVE)
+    # bcrypt: BCryptGenRandom (crypto.cpp); advapi32: Credential Manager (keyring);
+    # ws2_32: inet_pton / sockets; shell32: CommandLineToArgvW (main.cpp).
+    target_link_libraries(lux_script PUBLIC bcrypt advapi32 ws2_32 shell32)
+    # mailparse.cpp converts charsets with iconv when <iconv.h> exists (MSYS2 libiconv).
+    find_library(LUX_ICONV_LIB NAMES iconv libiconv)
+    if(LUX_ICONV_LIB)
+        target_link_libraries(lux_script PRIVATE ${LUX_ICONV_LIB})
+    endif()
+endif()
 
 # Every module registers itself with a namespace-scope object that nothing
 # else in the project references by symbol (LUX_REGISTER_MODULE,
@@ -222,6 +252,12 @@ function(lux_link_script target)
         -Wl,--whole-archive
         lux_script
         -Wl,--no-whole-archive)
+    if(WIN32)
+        # MinGW emits the `TLS init function` of every inline thread_local
+        # (lux::detail::current_token...) as a strong symbol in each object;
+        # with the whole archive pulled in, ld reports it as multiply defined.
+        target_link_options(${target} PRIVATE -Wl,--allow-multiple-definition)
+    endif()
 endfunction()
 
 # --native (phase 4/5, routes): native_build.cpp invokes g++ as a subprocess
@@ -296,13 +332,52 @@ endif()
 # library there too, whatever the .lux being compiled uses.
 set(LUX_NATIVE_EXTRA_LIBS "")
 function(lux_optional_module option label)
-    cmake_parse_arguments(M "" "" "PACKAGES;FILES" ${ARGN})
+    cmake_parse_arguments(M "" "" "PACKAGES;FILES;WIN_HEADERS;WIN_LIBS;WIN_SYSLIBS;WIN_DEFS" ${ARGN})
     if(NOT ${option})
         return()
     endif()
-    find_package(PkgConfig QUIET)
+    # Never pkg-config when targeting Windows: it would answer with the host's (Linux) libraries.
+    if(NOT WIN32)
+        find_package(PkgConfig QUIET)
+    endif()
     if(PkgConfig_FOUND)
         pkg_check_modules(_${option} QUIET ${M_PACKAGES})
+    endif()
+    if(NOT _${option}_FOUND AND WIN32)
+        # Windows usually has no pkg-config: look the headers and libraries up directly.
+        set(_win_incs "")
+        set(_win_libs "")
+        set(_win_ok TRUE)
+        foreach(_h ${M_WIN_HEADERS})
+            string(MAKE_C_IDENTIFIER "LUX_${option}_H_${_h}" _v)
+            find_path(${_v} ${_h} PATH_SUFFIXES cairo)
+            if(${_v})
+                list(APPEND _win_incs ${${_v}})
+            else()
+                set(_win_ok FALSE)
+            endif()
+        endforeach()
+        foreach(_l ${M_WIN_LIBS})
+            string(MAKE_C_IDENTIFIER "LUX_${option}_L_${_l}" _v)
+            find_library(${_v} NAMES ${_l} lib${_l})
+            if(${_v})
+                list(APPEND _win_libs ${${_v}})
+            else()
+                set(_win_ok FALSE)
+            endif()
+        endforeach()
+        if(_win_ok)
+            set(_${option}_FOUND TRUE)
+            set(_${option}_INCLUDE_DIRS ${_win_incs})
+            set(_${option}_LIBRARIES ${_win_libs})
+            # Static libraries still need their own system libs (and defines) on Windows.
+            list(APPEND _${option}_LIBRARIES ${M_WIN_SYSLIBS})
+            set(_${option}_LDFLAGS ${_win_libs})
+            foreach(_s ${M_WIN_SYSLIBS})
+                list(APPEND _${option}_LDFLAGS -l${_s})
+            endforeach()
+            target_compile_definitions(lux_script PRIVATE ${M_WIN_DEFS})
+        endif()
     endif()
     if(NOT _${option}_FOUND)
         message(STATUS "${label} module: SKIPPED (needs ${M_PACKAGES} development files)")
@@ -318,11 +393,17 @@ function(lux_optional_module option label)
 endfunction()
 
 set(_m src/lux_script/modules/base_modules)
-lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp)
-lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp ${_m}/imap.cpp ${_m}/mailparse.cpp)
-lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp)
-lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp)
-lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp)
+lux_optional_module(LUX_PDF    "pdf"       PACKAGES cairo                  FILES ${_m}/pdf.cpp
+                    WIN_HEADERS cairo.h WIN_LIBS cairo)
+lux_optional_module(LUX_HTTP   "http/mail" PACKAGES libcurl                FILES ${_m}/http.cpp ${_m}/mail.cpp ${_m}/imap.cpp ${_m}/mailparse.cpp
+                    WIN_HEADERS curl/curl.h WIN_LIBS curl
+                    WIN_SYSLIBS ws2_32 crypt32 bcrypt secur32 normaliz iphlpapi WIN_DEFS CURL_STATICLIB)
+lux_optional_module(LUX_CRYPTO "crypto"    PACKAGES libcrypto              FILES ${_m}/crypto.cpp
+                    WIN_HEADERS openssl/evp.h WIN_LIBS crypto)
+lux_optional_module(LUX_GZIP   "gzip"      PACKAGES zlib                   FILES ${_m}/gzip.cpp
+                    WIN_HEADERS zlib.h WIN_LIBS z)
+lux_optional_module(LUX_IMAGE  "image"     PACKAGES libjpeg libpng libwebp FILES ${_m}/image.cpp
+                    WIN_HEADERS jpeglib.h png.h webp/encode.h WIN_LIBS jpeg png webp)
 target_compile_definitions(lux_script PRIVATE LUX_NATIVE_EXTRA_LIBS="${LUX_NATIVE_EXTRA_LIBS}")
 target_compile_options(lux_script PRIVATE -Wall -Wextra)
 
@@ -341,7 +422,9 @@ lux_link_script(lux-bin)
 # HTTP, not guessed ahead of time. -rdynamic exports this binary's symbols
 # into the dynamic table so the .so resolves against THOSE, instead of
 # creating its own.
-target_link_options(lux-bin PRIVATE -rdynamic)
+if(NOT WIN32)   # PE executables export nothing by default and --native is off there
+    target_link_options(lux-bin PRIVATE -rdynamic)
+endif()
 
 # Frontend development tools.
 add_executable(dump_tokens src/lux_script/tools/dump_tokens.cpp)
@@ -411,7 +494,9 @@ lux_script_test(native_route_shadow)
 # the .so), so a bytecode state.incr() and a --native one, in the SAME test,
 # incremented DIFFERENT counters -- this test caught it (sequence 1,2,1,1,2
 # instead of 1,2,3,3,3) before this comment was written.
-target_link_options(test_native_route_shadow PRIVATE -rdynamic)
+if(NOT WIN32)
+    target_link_options(test_native_route_shadow PRIVATE -rdynamic)
+endif()
 
 # The postgres placeholder translator is a pure function: it is tested without a
 # server by including the driver's .cpp, to test THE code and not a copy.
@@ -512,5 +597,8 @@ if(LUX_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples)
         get_filename_component(name ${src} NAME_WE)
         add_executable(${name} ${src})
         target_link_libraries(${name} PRIVATE lux)
+        if(WIN32)
+            target_link_options(${name} PRIVATE -Wl,--allow-multiple-definition)  # see lux_link_script()
+        endif()
     endforeach()
 endif()

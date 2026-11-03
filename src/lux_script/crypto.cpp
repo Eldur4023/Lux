@@ -5,9 +5,14 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <sys/random.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+#ifdef _WIN32
+#  include <lux_script/platform_os.hpp>
+#  include <bcrypt.h>   // BCryptGenRandom (link: bcrypt)
+#else
+#  include <sys/random.h>
+#  include <sys/syscall.h>
+#  include <unistd.h>
+#endif
 #if defined(__x86_64__)
 #include <immintrin.h>
 #endif
@@ -401,12 +406,19 @@ std::string random_bytes(size_t n) {
         // targets Linux, and getrandom() has existed since Linux 3.17
         // (2014)/glibc 2.25.
         // syscall, not ::getrandom(): bionic only declares it from API 28 (the Android build targets 28 anyway).
+#ifdef _WIN32
+        // The system-preferred CSPRNG; fills the whole buffer or fails.
+        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(out.data()), static_cast<ULONG>(n), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+            return {};
+        got = n;
+#else
         ssize_t r = ::syscall(SYS_getrandom, out.data() + got, n - got, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
             return {};   // caller must treat empty as failure, never a fallback value
         }
         got += static_cast<size_t>(r);
+#endif
     }
     return out;
 }

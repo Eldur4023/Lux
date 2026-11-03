@@ -2,7 +2,7 @@
 #include <string>
 #include <memory>
 #include <atomic>
-#include <sys/epoll.h>
+#include <lux/platform.hpp>
 #include <chrono>
 #include <cstdint>
 #include "http_parser.hpp"

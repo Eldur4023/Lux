@@ -21,6 +21,10 @@ public:
     // max_connections: maximum simultaneous open connections (default 10 000).
     // Excess connections are immediately closed with 503.
     //
+    // listen_here: false = join the group without opening a listener (Windows,
+    // where SO_REUSEPORT does not exist: one server accepts and the group's
+    // handoff spreads the connections).
+    //
     // conn_count: optional shared counter — pass the same one to every
     // TcpServer instance so the limit is enforced globally across all threads.
     // If nullptr, a per-instance counter is created (single-thread behaviour).
@@ -28,7 +32,8 @@ public:
               EventLoop& loop, lux::DispatchFn dispatch,
               int max_connections = 10'000,
               std::shared_ptr<std::atomic<int>> conn_count = nullptr,
-              std::shared_ptr<Group> group = nullptr);
+              std::shared_ptr<Group> group = nullptr,
+              bool listen_here = true);
     ~TcpServer();
 
     // Stop accepting new connections without shutting down the event loop.

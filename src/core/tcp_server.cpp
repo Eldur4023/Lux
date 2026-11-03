@@ -1,12 +1,7 @@
 #include "tcp_server.hpp"
 #include "../http/http_connection.hpp"
 
-#include <sys/socket.h>
-#include <sys/epoll.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#include <lux/platform.hpp>
 #include <stdexcept>
 #include <cstring>
 #include <cerrno>
@@ -19,7 +14,8 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
                      EventLoop& loop, lux::DispatchFn dispatch,
                      int max_connections,
                      std::shared_ptr<std::atomic<int>> conn_count,
-                     std::shared_ptr<Group> group)
+                     std::shared_ptr<Group> group,
+                     bool listen_here)
     : loop_(loop)
     , dispatch_(std::move(dispatch))
     , max_connections_(max_connections)
@@ -32,14 +28,28 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
     bool use_ipv6 = (host == "::" || host.find(':') != std::string::npos);
     int family    = use_ipv6 ? AF_INET6 : AF_INET;
 
-    listen_fd_ = socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    // Windows has no SO_REUSEPORT: only one server listens and hands the
+    // accepted connections to the others through the group (see on_accept).
+    // The others join the group and never open a socket.
+    if (!listen_here) {
+        if (group_) { std::lock_guard lk(group_->m); group_->servers.push_back(this); }
+        return;
+    }
+
+    listen_fd_ = plat::sock_open(family);
     if (listen_fd_ < 0)
-        throw std::runtime_error(std::string("socket: ") + strerror(errno));
+        throw std::runtime_error("socket: " + plat::err_str());
 
     int one = 1;
+#ifdef _WIN32
+    // SO_REUSEADDR on Windows would let another process steal the port.
+    setsockopt(listen_fd_, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&one), sizeof(one));
+    setsockopt(listen_fd_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof(one));
+#else
     setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
     setsockopt(listen_fd_, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+#endif
 
     if (use_ipv6) {
         sockaddr_in6 addr{};
@@ -49,7 +59,7 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
         if (inet_pton(AF_INET6, h, &addr.sin6_addr) != 1)
             throw std::runtime_error("invalid IPv6 host: " + host);
         if (bind(listen_fd_, (sockaddr*)&addr, sizeof(addr)) < 0)
-            throw std::runtime_error(std::string("bind: ") + strerror(errno));
+            throw std::runtime_error("bind: " + plat::err_str());
     } else {
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -64,11 +74,11 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
                 throw std::runtime_error("invalid IPv4 host: " + host);
         }
         if (bind(listen_fd_, (sockaddr*)&addr, sizeof(addr)) < 0)
-            throw std::runtime_error(std::string("bind: ") + strerror(errno));
+            throw std::runtime_error("bind: " + plat::err_str());
     }
 
     if (listen(listen_fd_, SOMAXCONN) < 0)
-        throw std::runtime_error(std::string("listen: ") + strerror(errno));
+        throw std::runtime_error("listen: " + plat::err_str());
 
     register_listen_fd();
     if (group_) { std::lock_guard lk(group_->m); group_->servers.push_back(this); }
@@ -93,7 +103,7 @@ void TcpServer::pedir_parada() {
 void TcpServer::stop_accepting() {
     if (listen_fd_ >= 0) {
         loop_.remove(listen_fd_);
-        ::close(listen_fd_);
+        plat::sock_close(listen_fd_);
         listen_fd_ = -1;
     }
 }
@@ -103,8 +113,7 @@ void TcpServer::on_accept() {
         sockaddr_storage addr{};
         socklen_t addrlen = sizeof(addr);
 
-        int client_fd = accept4(listen_fd_, (sockaddr*)&addr, &addrlen,
-                                SOCK_NONBLOCK | SOCK_CLOEXEC);
+        int client_fd = plat::sock_accept(listen_fd_, (sockaddr*)&addr, &addrlen);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;
             if (errno == EINTR) continue;
@@ -183,7 +192,7 @@ void TcpServer::on_accept() {
                     if (listen_fd_ >= 0) register_listen_fd();
                 };
                 if (loop_.schedule_timer(500, rearm) < 0) {
-                    usleep(500'000);
+                    plat::usleep(500'000);
                     rearm();
                 }
                 return;
@@ -205,8 +214,8 @@ void TcpServer::on_accept() {
                 "Content-Length: 32\r\n"
                 "Connection: close\r\n\r\n"
                 "{\"error\":\"Too many connections\"}";
-            (void)::write(client_fd, resp, sizeof(resp) - 1);
-            ::close(client_fd);
+            (void)plat::sock_write(client_fd, resp, sizeof(resp) - 1);
+            plat::sock_close(client_fd);
             continue;
         }
 

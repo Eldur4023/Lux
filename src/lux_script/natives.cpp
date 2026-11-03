@@ -22,9 +22,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
+#include <lux_script/platform_os.hpp>
+#ifdef _WIN32
+#  include <io.h>
+#  include <fcntl.h>
+#  include <sys/stat.h>
+#else
+#  include <fcntl.h>
+#  include <unistd.h>
+#  include <sys/stat.h>
+#endif
 
 namespace lux_script {
 
@@ -203,12 +210,22 @@ void send_file_checked(lux::Request& req, lux::Response& res, const std::string&
         res.header("Content-Disposition", std::string(inline_ ? "inline" : "attachment") +
                    "; filename=" + quoted(filename) + "; filename*=UTF-8''" + percent(filename));
 
+    char buf[64];
+#ifdef _WIN32
+    std::error_code ec;
+    const auto mtime = std::filesystem::last_write_time(plat::to_path(file), ec);
+    const auto fsize = ec ? 0 : std::filesystem::file_size(plat::to_path(file), ec);
+    if (ec) return;
+    std::snprintf(buf, sizeof buf, "\"%llx-%llx\"",
+                  static_cast<unsigned long long>(std::chrono::duration_cast<std::chrono::nanoseconds>(mtime.time_since_epoch()).count()),
+                  static_cast<unsigned long long>(fsize));
+#else
     struct stat st{};
     if (::stat(file.c_str(), &st) != 0) return;
-    char buf[64];
     std::snprintf(buf, sizeof buf, "\"%llx-%llx\"",
                   static_cast<unsigned long long>(st.st_mtim.tv_sec) * 1000000000ull + static_cast<unsigned long long>(st.st_mtim.tv_nsec),
                   static_cast<unsigned long long>(st.st_size));
+#endif
     const std::string etag = buf;
     res.header("ETag", etag);
     if (!res.header_value("Cache-Control")) res.header("Cache-Control", "no-cache");   // revalidate with the ETag every time
@@ -1404,7 +1421,7 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             if (!dir.empty() && dir.back() != '/') dir += "/";
 
             std::error_code ec;
-            std::filesystem::create_directories(dir, ec);
+            std::filesystem::create_directories(plat::to_path(dir), ec);
 
             // `filename` is whatever the client sent: two uploads can
             // legitimately pick the same name, and an attacker can pick one
@@ -1442,8 +1459,13 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
                     }
                     candidate = stem + "-" + crypto::hex_encode(suffix) + ext;
                 }
+#ifdef _WIN32
+                fd = _wopen(plat::widen(dir + candidate).c_str(),
+                            _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+#else
                 fd = ::open((dir + candidate).c_str(),
                             O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0644);
+#endif
                 if (fd >= 0) { final_name = candidate; break; }
                 if (errno != EEXIST) {
                     error = "cannot write to " + dir + candidate + ": " + std::strerror(errno);
@@ -1458,7 +1480,11 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             std::string_view bytes = (*ctx.parts)[i].body;
             size_t written = 0;
             while (written < bytes.size()) {
+#ifdef _WIN32
+                long n = _write(fd, bytes.data() + written, static_cast<unsigned>(std::min<size_t>(bytes.size() - written, 1u << 30)));
+#else
                 ssize_t n = ::write(fd, bytes.data() + written, bytes.size() - written);
+#endif
                 if (n < 0) {
                     if (errno == EINTR) continue;
                     ::close(fd);

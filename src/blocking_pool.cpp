@@ -1,5 +1,6 @@
 #include <lux/blocking_pool.hpp>
 #include <thread>
+#include <lux/platform.hpp>
 
 namespace lux {
 
@@ -24,7 +25,7 @@ void BlockingPool::start(size_t core_workers, size_t max_workers,
 }
 
 void BlockingPool::worker_loop(bool overflow) {
-    pthread_setname_np(pthread_self(), "lux-blocking");
+    plat::set_thread_name("lux-blocking");
     for (;;) {
         std::function<void()> job;
         {

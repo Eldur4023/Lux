@@ -1922,6 +1922,7 @@ The handle-based `parse`/`rows`/`columns`/`row_count`/`to_csv`/`close` still wor
 | `make_dir` `remove_file` `remove_dir(dir[, recursive])` | `remove_dir` refuses a non-empty directory unless told |
 | `disk_usage(path)` | `{total, free, used}` bytes of the filesystem holding `path` |
 | `chmod(path, mode)` `umask(mask)` | Modes are octal strings (`"640"`); `umask` returns the previous mask |
+| `name()` | `"windows"`, `"linux"`, `"android"` or `"macos"`: the platform the binary was built for |
 | `temp_dir()` `temp_file([suffix])` | A new private (0600) temporary file |
 | **await** `read_file` `write_file` `append_file` `copy_file(from, to[, overwrite])` `move(from, to)` | `move` works across filesystems |
 | **await** `run(cmd[, args, options])` | `{status, stdout, stderr}`; options `input` (stdin), `cwd`, `env` (a `null` value unsets), `timeout_ms` (default 15 s, up to 120 s) |
