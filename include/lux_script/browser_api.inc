@@ -76,6 +76,7 @@ LUX_BROWSER_CALL(document, exit_fullscreen,  0, 0, 0)
 LUX_BROWSER_CALL(document, fullscreen_element, 0, 0, 0)
 LUX_BROWSER_CALL(document, active_element,   0, 0, 0)
 LUX_BROWSER_CALL(document, hidden,           0, 0, 0)
+LUX_BROWSER_CALL(document, element_from_point, 2, 2, 0)   // (x, y) in page coordinates; null if none
 // page.* -- store, timers, location, window-level events
 LUX_BROWSER_CALL(page, get,         1, 1, 0)
 LUX_BROWSER_CALL(page, set,         2, 2, 0)
@@ -253,6 +254,7 @@ LUX_BROWSER_AMETHOD("Socket", "wait_open", 0, 0, "bool", "__socket_wait_open")
 // Form (form_data) / File (input type=file)
 LUX_BROWSER_METHOD("Form", "add",      2, 2, nullptr)
 LUX_BROWSER_METHOD("Form", "add_file", 2, 2, nullptr)
+LUX_BROWSER_METHOD("Form", "progress", 0, 0, "Dict")      // {sent, total} bytes of the upload in flight
 LUX_BROWSER_METHOD("File", "name",         0, 0, "string")
 LUX_BROWSER_METHOD("File", "size",         0, 0, "int")
 LUX_BROWSER_METHOD("File", "path",         0, 0, "string")
