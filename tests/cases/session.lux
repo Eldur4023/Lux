@@ -56,3 +56,7 @@ group("/live"):
     ws endpoint("/chat", string token = "") origins("http://t.test"):
         ws.send("hi")
         ws.close()
+
+    ws endpoint("/any", string token = "") origins("*"):
+        ws.send("hi")
+        ws.close()

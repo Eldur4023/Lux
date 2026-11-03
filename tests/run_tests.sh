@@ -307,6 +307,13 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 -H "Connection: Upgr
        -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: http://t.test" \
        "http://127.0.0.1:$PORT/live/chat?token=$signed")
 [ "$code" = 101 ] && ok "and upgrades with a good token" || fail "and upgrades with a good token" 101 "$code"
+for spec in "/live/chat|http://evil.test|403|ws origin outside the allowlist is 403" "/live/any|http://evil.test|101|ws origins(\"*\") accepts any origin"; do
+    IFS='|' read -r wp wo want wn <<<"$spec"
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+           -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Origin: $wo" \
+           "http://127.0.0.1:$PORT$wp?token=$signed")
+    [ "$code" = "$want" ] && ok "$wn" || fail "$wn" "$want" "$code"
+done
 
 echo "== database =="
 rm -f "$HERE/cases/tests-suite.db"*
