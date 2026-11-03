@@ -119,7 +119,7 @@ struct SheetWriter {
                 w.uv(names.id(ss.name));
                 w.str(ss.value);
                 w.u8(uint8_t(ss.op));
-                w.u8(uint8_t((ss.icase ? 1 : 0) | (ss.from_end ? 2 : 0) | (ss.of_type ? 4 : 0)));
+                w.u8(uint8_t((ss.icase ? 1 : 0) | (ss.from_end ? 2 : 0) | (ss.of_type ? 4 : 0) | (ss.has_child ? 8 : 0)));
                 w.sv(ss.a);
                 w.sv(ss.b);
                 w.uv(ss.args.size());
@@ -145,7 +145,7 @@ struct SheetReader {
     bool selector(style::Selector& s, int nest) {
         if (nest > kMaxSelNest) return bad("selectores anidados en exceso");
         const uint8_t pseudo = r.u8();
-        if (pseudo > uint8_t(style::Pseudo::After)) return bad("pseudo-elemento invalido");
+        if (pseudo > uint8_t(style::Pseudo::Placeholder)) return bad("pseudo-elemento invalido");
         s.pseudo = style::Pseudo(pseudo);
         const int64_t spec = r.sv();
         if (spec < 0 || spec > INT32_MAX) return bad("especificidad invalida");
@@ -166,7 +166,7 @@ struct SheetReader {
             for (uint32_t k = 0; k < ns && r.ok; ++k) {
                 style::SimpleSel ss;
                 const uint8_t kind = r.u8();
-                if (kind > uint8_t(style::SimpleSel::Kind::OnlyOfType)) return bad("tipo de selector invalido");
+                if (kind > uint8_t(style::SimpleSel::Kind::Open)) return bad("tipo de selector invalido");
                 ss.kind = style::SimpleSel::Kind(kind);
                 const std::string* nm = name();
                 if (!nm) return false;
@@ -177,10 +177,11 @@ struct SheetReader {
                     ss.op != '$' && ss.op != '*')
                     return bad("operador de atributo invalido");
                 const uint8_t flags = r.u8();
-                if (flags > 7) return bad("banderas de selector invalidas");
+                if (flags > 15) return bad("banderas de selector invalidas");
                 ss.icase = flags & 1;
                 ss.from_end = flags & 2;
                 ss.of_type = flags & 4;
+                ss.has_child = flags & 8;
                 const int64_t a = r.sv(), b = r.sv();
                 if (a < -kMaxNth || a > kMaxNth || b < -kMaxNth || b > kMaxNth) return bad(":nth fuera de rango");
                 ss.a = int(a);
