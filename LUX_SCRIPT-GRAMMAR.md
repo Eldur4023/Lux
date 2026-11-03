@@ -676,7 +676,7 @@ parameter declared as a route segment is left over with no place in the pattern.
 accepts it after any route, but the checker rejects it outside a `ws` and rejects a `ws` that
 does not carry it. Browsers do not apply the same-origin policy to the WebSocket *handshake*,
 so without an allowlist any page could open the connection from a user's browser and inherit
-their session cookies.
+their session cookies. `origins("*")` explicitly allows any origin.
 
 ### The two route levels
 

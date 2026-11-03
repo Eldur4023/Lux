@@ -1145,7 +1145,8 @@ routes and their stream.
 **`origins(...)` is required**, and leaving it out is a compile error. Browsers do not apply
 the same-origin policy to the WebSocket handshake: without an allowlist, any site can open
 the connection from your user's browser and inherit their cookies. An origin outside the list
-gets a `403`.
+gets a `403`. `origins("*")` is the explicit opt-in to accept any origin
+(public, cookie-less endpoints only).
 
 ### Broadcasting to a room
 
