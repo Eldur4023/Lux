@@ -151,7 +151,38 @@ void parse_rules(const std::string& text, const std::string& media,
                 parse_rules(inner, media.empty() ? prelude : media + " and " + prelude, out, loader, depth);
             else if (name == "supports" || name == "layer")
                 parse_rules(inner, media, out, loader, depth);
-            i = end;   // @font-face, @keyframes, @page...: skipped
+            else if (name == "keyframes" || name == "-webkit-keyframes") {
+                // one selector-less Rule per keyframe offset; `media` carries "@keyframes|name|offset" (see Rule::keyframe)
+                size_t k = 0;
+                while (k < inner.size()) {
+                    const size_t kb = find_top(inner, k, "{");
+                    if (kb == std::string::npos) break;
+                    const size_t ke = block_end(inner, kb);
+                    const size_t kbody = (ke > kb + 1 && inner[ke - 1] == '}') ? ke - 1 : ke;
+                    const auto decls = parse_decls(inner.substr(kb + 1, kbody - kb - 1));
+                    std::string list = inner.substr(k, kb - k);
+                    size_t p0 = 0;
+                    while (p0 <= list.size()) {
+                        const size_t c = list.find(',', p0);
+                        const std::string sel = lower(trim(list.substr(p0, c == std::string::npos ? c : c - p0)));
+                        float off = -1;
+                        if (sel == "from") off = 0;
+                        else if (sel == "to") off = 1;
+                        else if (sel.size() > 1 && sel.back() == '%') { try { off = std::stof(sel) / 100.f; } catch (...) {} }
+                        if (off >= 0 && off <= 1 && !decls.empty()) {
+                            Rule r;
+                            r.media = "@keyframes|" + prelude + "|" + std::to_string(off);
+                            r.decls = decls;
+                            r.order = static_cast<int>(out.size());
+                            out.push_back(std::move(r));
+                        }
+                        if (c == std::string::npos) break;
+                        p0 = c + 1;
+                    }
+                    k = ke;
+                }
+            }
+            i = end;   // @font-face, @page...: skipped
             continue;
         }
 

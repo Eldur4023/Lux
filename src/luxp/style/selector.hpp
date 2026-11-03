@@ -18,7 +18,7 @@
 
 namespace luxium::style {
 
-enum class Pseudo { None, Before, After };
+enum class Pseudo { None, Before, After, Placeholder };
 
 struct Selector;   // complex selector
 
@@ -26,12 +26,13 @@ struct SimpleSel {
     enum class Kind {
         Id, Class, Attr, Not, Is, Nth, Root, Empty, Link, Hover, Active, Focus,
         Checked, Disabled, Enabled, FirstChild, LastChild, OnlyChild,
-        FirstOfType, LastOfType, OnlyOfType,
+        FirstOfType, LastOfType, OnlyOfType, Has, FocusWithin, FocusVisible, PlaceholderShown, Open,
     } kind = Kind::Class;
     std::string name;            // id / class / attribute name
     std::string value;           // attribute value
     char op = 0;                 // 0 exists, '=', '~', '|', '^', '$', '*'
     bool icase = false;
+    bool has_child = false;      // :has(> x): direct children only
     // :nth-*(an+b)
     int a = 0, b = 0;
     bool from_end = false, of_type = false;

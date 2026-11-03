@@ -23,6 +23,14 @@ struct Rule {
     std::vector<Decl> decls;
     std::string media;     // "" = always
     int order = 0;         // source order across the whole sheet set
+    // @keyframes: no selectors, media = "@keyframes|<name>|<offset 0..1>" (survives the compiled-page codec)
+    bool keyframe(std::string* name = nullptr, float* offset = nullptr) const {
+        if (!media.starts_with("@keyframes|")) return false;
+        const size_t bar = media.rfind('|');
+        if (name) *name = media.substr(11, bar - 11);
+        if (offset) *offset = std::stof(media.substr(bar + 1));
+        return true;
+    }
 };
 
 // Resolves an @import URL to the stylesheet text ("" if unavailable).  URLs
