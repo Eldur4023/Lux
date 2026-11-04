@@ -504,6 +504,7 @@ private:
         // A group of transactions (DbPool::tx_release) may be open: join it
         // and commit it with this batch.
         const bool joined = !sqlite3_get_autocommit(conns_[w]);
+        if (!joined) throttle_writer();
         if (writes.size() == 1 && !joined) { writes[0].work(w); return ""; }
 
         long long n = 0;
@@ -628,9 +629,25 @@ private:
         for (size_t i = 0; i < h->pending.size() && h->pending.any(); ++i)
             if (h->pending.test(i)) { g.bump(int(i)); h->pending.reset(i); }
         h->all = false;
+        h->self->wal_pages_.store(pages, std::memory_order_relaxed);
         if (h->checkpoints && pages >= kCheckpointPages) h->self->request_checkpoint();
         return SQLITE_OK;
     }
+    // Backpressure for the writer. Past kCheckpointPages the checkpointer is asked to copy the WAL back, but
+    // nothing slows the commits while it does: when they outrun the disk the WAL keeps growing during that copy and
+    // the RESTART that ends it (which holds every write) has all of it left to do -- seconds. Far past the mark (8x),
+    // each batch waits a moment before it commits, which also makes the batches bigger; it is bounded, so a
+    // checkpoint that cannot finish (a reader pinning an old snapshot) never stops the writes for good.
+    static int wal_high_pages() {
+        static const int v = [] { const char* e = std::getenv("LUX_WAL_HIGH_PAGES"); return e && *e ? std::max(100, std::atoi(e)) : kCheckpointPages * 8; }();
+        return v;
+    }
+    void throttle_writer() {
+        const int high = wal_high_pages();
+        for (int i = 0; i < 20 && wal_pages_.load(std::memory_order_relaxed) > high; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));   // up to 20 ms a batch
+    }
+    std::atomic<int> wal_pages_{0};
     void request_checkpoint() {
         { std::lock_guard<std::mutex> l(ckpt_m_); ckpt_due_ = true; }
         ckpt_cv_.notify_one();

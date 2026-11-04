@@ -9,6 +9,7 @@
 #include <functional>
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstring>
 #include <lux/platform.hpp>
 #ifndef _WIN32
@@ -371,8 +372,10 @@ public:
         // 1xx, 204 and 304 carry no body, and RFC 9110 forbids a Content-Length on the first two.
         const int sc = state_->status_code;
         if (sc >= 200 && sc != 204 && sc != 304) {
+            char num[24];
+            const auto r = std::to_chars(num, num + sizeof num, clen);
             out += "Content-Length: ";
-            out += std::to_string(clen);
+            out.append(num, r.ptr);
             out += "\r\n";
         }
         emit_headers(out);
@@ -439,7 +442,24 @@ private:
     // is deliberately NOT defaulted: it is inline-script/style dependent per
     // app, and a wrong default would silently break pages rather than
     // protect them.
+    // The status lines of the usual answers, ready made: no number to format, no reason phrase to look up.
+    static std::string_view ready_status_line(int code) noexcept {
+        switch (code) {
+            case 200: return "HTTP/1.1 200 OK\r\n";
+            case 201: return "HTTP/1.1 201 Created\r\n";
+            case 204: return "HTTP/1.1 204 No Content\r\n";
+            case 206: return "HTTP/1.1 206 Partial Content\r\n";
+            case 301: return "HTTP/1.1 301 Moved Permanently\r\n";
+            case 302: return "HTTP/1.1 302 Found\r\n";
+            case 304: return "HTTP/1.1 304 Not Modified\r\n";
+            case 400: return "HTTP/1.1 400 Bad Request\r\n";
+            case 404: return "HTTP/1.1 404 Not Found\r\n";
+            case 500: return "HTTP/1.1 500 Internal Server Error\r\n";
+            default:  return {};
+        }
+    }
     void append_status_line(std::string& out) const {
+        if (const auto ready = ready_status_line(state_->status_code); !ready.empty()) { out += ready; return; }
         out += "HTTP/1.1 ";
         out += std::to_string(state_->status_code);
         out += ' ';
@@ -462,8 +482,22 @@ private:
         const auto& configured = global_headers();
         for (const auto& [k, v] : configured)
             if (!has_header_ci(state_->headers, k)) line(k, v);
-        for (const auto& [k, v] : kDefaults)
-            if (!has_header_ci(state_->headers, k) && !has_header_ci(configured, k)) line(k, v);
+        // The three hardening defaults, as one block when nobody set any of them (nearly always).
+        bool set[3] = {false, false, false};
+        auto scan = [&](const std::vector<std::pair<std::string, std::string>>& hs) {
+            for (const auto& [k, v] : hs) {
+                if (k.size() == 22 && iequals(k, kDefaults[0].first)) set[0] = true;
+                else if (k.size() == 15 && iequals(k, kDefaults[1].first)) set[1] = true;
+                else if (k.size() == 15 && iequals(k, kDefaults[2].first)) set[2] = true;
+            }
+        };
+        scan(state_->headers);
+        scan(configured);
+        if (!set[0] && !set[1] && !set[2]) {
+            out += "X-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: strict-origin-when-cross-origin\r\n";
+        } else {
+            for (int i = 0; i < 3; ++i) if (!set[i]) line(kDefaults[i].first, kDefaults[i].second);
+        }
         for (const auto& c : state_->cookies) line("Set-Cookie", c);
     }
 
