@@ -33,6 +33,7 @@
 #include <sys/stat.h>
 #ifndef _WIN32
 #include <sys/resource.h>
+#include <fcntl.h>
 #include <sys/syscall.h>
 #include <linux/openat2.h>
 #endif
@@ -859,6 +860,17 @@ void App::run(const std::string& host, uint16_t port) {
             rl.rlim_cur = rl.rlim_max;
             ::setrlimit(RLIMIT_NOFILE, &rl);
             ::getrlimit(RLIMIT_NOFILE, &rl);
+        }
+        // The kernel grows the descriptor table by doubling it, and every doubling stalls all the
+        // threads of the process (expand_files waits for an RCU grace period): seen at ~260k open
+        // sockets as 20 ms in accept4 and a loop frozen for a second. Duplicating a descriptor onto a
+        // high number makes it that big once, now, while nothing is running; the table never shrinks.
+        {
+            const rlim_t top = rl.rlim_cur == RLIM_INFINITY ? rlim_t(1) << 19 : std::min<rlim_t>(rl.rlim_cur, rlim_t(1) << 19);
+            if (top > 4096) {
+                const int fd = ::fcntl(0, F_DUPFD_CLOEXEC, static_cast<int>(top) - 1);
+                if (fd >= 0) ::close(fd);
+            }
         }
         if (max_connections_ <= 0) {
             const rlim_t fds = rl.rlim_cur == RLIM_INFINITY ? rlim_t(1) << 20 : rl.rlim_cur;

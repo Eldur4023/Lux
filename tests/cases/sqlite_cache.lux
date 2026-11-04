@@ -1,0 +1,81 @@
+import sqlite
+
+app:
+    port 8830
+
+    sqlite:
+        file "./tests-sqlite-cache.db"
+        pool 4
+        result_cache_ms 400
+
+get endpoint("/__ping__"):
+    return { "ok": true }
+
+get endpoint("/setup"):
+    await sqlite.exec("drop table if exists items")
+    await sqlite.exec("drop table if exists other")
+    await sqlite.exec("create table items (id integer primary key, name text, n integer)")
+    await sqlite.exec("create table other (id integer primary key, v integer)")
+    await sqlite.exec("insert into items (id, name, n) values (1, 'one', 10), (2, 'two', 20)")
+    await sqlite.exec("insert into other (id, v) values (1, 5)")
+    return { "ok": true }
+
+get endpoint("/item/:id", int id):
+    List<Json> r = await sqlite.query("select id, name, n from items where id = ?", id)
+    return r
+
+get endpoint("/other"):
+    List<Json> r = await sqlite.query("select v from other where id = 1")
+    return r
+
+get endpoint("/join"):
+    List<Json> r = await sqlite.query("select i.name, o.v from items i join other o on o.id = 1 where i.id = 1")
+    return r
+
+post endpoint("/bump/:id", int id):
+    int n = await sqlite.exec("update items set n = n + 1 where id = ?", id)
+    return { "changed": n }
+
+post endpoint("/bump_other"):
+    await sqlite.exec("update other set v = v + 1 where id = 1")
+    return { "ok": true }
+
+# A handler that edits what it got: the next read must still see the database's rows.
+get endpoint("/mutate"):
+    List<Json> r = await sqlite.query("select id, name, n from items where id = 1")
+    r[0]["name"] = "MUTATED"
+    r.add({ "extra": 1 })
+    return r
+
+# Reads its own uncommitted write, then undoes it.
+post endpoint("/tx_peek"):
+    await sqlite.begin()
+    await sqlite.exec("update items set n = 999 where id = 1")
+    List<Json> inside = await sqlite.query("select n from items where id = 1")
+    await sqlite.rollback()
+    List<Json> after = await sqlite.query("select n from items where id = 1")
+    return { "inside": inside[0]["n"], "after": after[0]["n"] }
+
+get endpoint("/random"):
+    List<Json> r = await sqlite.query("select random() as r")
+    return r
+
+get endpoint("/now"):
+    List<Json> r = await sqlite.query("select strftime('%f', 'now') as t")
+    return r
+
+get endpoint("/ddl_read"):
+    List<Json> r = await sqlite.query("select * from shape")
+    return r
+
+post endpoint("/ddl_a"):
+    await sqlite.exec("drop table if exists shape")
+    await sqlite.exec("create table shape (a integer)")
+    await sqlite.exec("insert into shape values (1)")
+    return { "ok": true }
+
+post endpoint("/ddl_b"):
+    await sqlite.exec("drop table shape")
+    await sqlite.exec("create table shape (a integer, b integer)")
+    await sqlite.exec("insert into shape values (1, 2)")
+    return { "ok": true }

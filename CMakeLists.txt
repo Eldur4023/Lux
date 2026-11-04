@@ -580,6 +580,11 @@ add_test(NAME sqlite
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite.sh $<TARGET_FILE:lux-bin>
          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 set_tests_properties(sqlite PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+# The result cache: what makes a cached SELECT stale, and what must never be cached.
+add_test(NAME sqlite_cache
+         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_cache.sh $<TARGET_FILE:lux-bin>
+         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+set_tests_properties(sqlite_cache PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
 # The single writer and `replicate` (directories; s3/sftp need real targets).
 add_test(NAME sqlite_replica
          COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_sqlite_replica.sh $<TARGET_FILE:lux-bin>

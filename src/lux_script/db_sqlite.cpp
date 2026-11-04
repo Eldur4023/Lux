@@ -5,6 +5,8 @@
 #include <lux/logger.hpp>
 
 #include "sqlite_replica.hpp"
+#include "sqlite_result_cache.hpp"
+#include <bitset>
 
 #include <sqlite3.h>
 
@@ -141,6 +143,18 @@ public:
 
         if (!read_pool(options, error)) return false;
 
+        // Result cache (sqlite_result_cache.hpp): `result_cache off` turns it off, `result_cache_ms` bounds how long a
+        // result may be served (the cover for writers the hooks cannot see: another process), `result_cache_mb` its size.
+        {
+            ResultCache::Config rc;
+            auto opt = [&](const char* k) -> const std::string* { auto f = options.find(k); return f == options.end() ? nullptr : &f->second; };
+            if (const auto* v = opt("result_cache")) rc.enabled = !(*v == "off" || *v == "false" || *v == "0" || *v == "no");
+            if (const auto* v = opt("result_cache_ms")) rc.ttl_ms = std::max(1, std::atoi(v->c_str()));
+            if (const auto* v = opt("result_cache_mb")) rc.max_bytes = size_t(std::max(1, std::atoi(v->c_str()))) << 20;
+            if (std::getenv("LUX_NO_RESULT_CACHE")) rc.enabled = false;
+            rcache_ = std::make_unique<ResultCache>(rc);
+        }
+
         auto t = options.find("timeout_ms");
         if (t != options.end()) busy_timeout_ = std::atoi(t->second.c_str());
 
@@ -168,6 +182,7 @@ public:
         const size_t slots = inline_base() + kInlineSlots;
         conns_.assign(slots, nullptr);
         cache_.assign(slots, {});
+        hooks_.resize(slots);
         rc_.assign(slots, SQLITE_OK);
         deadline_ = std::vector<Deadline>(kInlineSlots);
         slow_.assign(kInlineSlots, {});
@@ -272,11 +287,18 @@ public:
         else             sqlite3_busy_handler(db, &busy_wait, &busy_timeout_);
         // Replicating, only the replicator checkpoints (see
         // sqlite_replica.cpp); otherwise the writing connections do.
+        auto hook = std::make_unique<ConnHook>();
+        hook->self = this;
+        hook->checkpoints = !replicator_ && !inline_slot;
         if (replicator_)       sqlite3_wal_autocheckpoint(db, 0);
         else if (!inline_slot) {
             std::call_once(ckpt_once_, [this] { ckpt_thread_ = std::thread([this] { checkpoint_loop(); }); });
-            sqlite3_wal_hook(db, &wal_hook, this);
         }
+        // Every connection tells the result cache which tables a commit changed, once the commit is visible.
+        sqlite3_update_hook(db, &update_hook, hook.get());
+        sqlite3_rollback_hook(db, &rollback_hook, hook.get());
+        sqlite3_wal_hook(db, &wal_hook, hook.get());
+        hooks_[worker] = std::move(hook);
         if (inline_slot)
             sqlite3_progress_handler(db, 1000, &past_deadline,
                                      &deadline_[worker - inline_base()]);
@@ -287,10 +309,27 @@ public:
 
     bool query(size_t worker, const std::string& sql, const std::vector<Value>& args,
                Value& out, std::string& error) override {
+        // A result still valid for this exact (sql, args) is handed out without touching SQLite. Not inside a
+        // transaction: it must see its own uncommitted writes.
+        thread_local std::string rkey;
+        bool use_cache = rcache_->config().enabled && conns_[worker] && sqlite3_get_autocommit(conns_[worker]) &&
+                         ResultCache::make_key(sql, args, rkey);
+        if (use_cache && rcache_->get(rkey, out)) return true;
+
         sqlite3_stmt* stmt = nullptr;
         Cached*       entry = nullptr;
         if (!prepare(worker, sql, args, &stmt, &entry, error)) return false;
         const bool cached = entry != nullptr;
+
+        // What to store, decided before the statement runs: the generations of its tables as they are now.
+        std::vector<ResultCache::Tag> tags;
+        uint64_t                      epoch = 0;
+        use_cache = use_cache && entry && entry->cacheable;
+        if (use_cache) {
+            epoch = rcache_->gens().epoch();
+            tags.reserve(entry->tables.size());
+            for (int t : entry->tables) tags.push_back({t, rcache_->gens().gen(t)});
+        }
 
         Value::List rows;
         int cols = -1;
@@ -332,6 +371,7 @@ public:
 
         release(stmt, cached);
         out = Value::list(std::move(rows));
+        if (use_cache && rcache_->admit(rkey)) rcache_->put(rkey, std::move(tags), epoch, out);
         return true;
     }
 
@@ -351,6 +391,7 @@ public:
         }
         release(stmt, cached);
         affected = sqlite3_changes(conns_[worker]);
+        if (is_ddl(sql) && hooks_[worker]) hooks_[worker]->all = true;   // the commit that follows invalidates every cached result
         return true;
     }
 
@@ -396,6 +437,9 @@ public:
     void shutdown() override { replicator_.reset(); stop_checkpointer(); }
 
     ~SqliteDriver() override {
+        if (rcache_ && std::getenv("LUX_DB_CACHE_STATS"))
+            lux::log().info("sqlite result cache: ", rcache_->hits(), " hits, ", rcache_->misses(), " misses, ", rcache_->stale(),
+                            " stale, ", rcache_->stores(), " stored");
         replicator_.reset();
         stop_checkpointer();
         // The statements first: sqlite3_close fails if any are still alive.
@@ -487,7 +531,38 @@ private:
 
     std::vector<sqlite3*> conns_;
     struct Col    { std::string name; bool is_bool = false; };
-    struct Cached { sqlite3_stmt* stmt; std::vector<Col> meta; int reprepares = -1; };
+    struct Cached { sqlite3_stmt* stmt; std::vector<Col> meta; int reprepares = -1; bool cacheable = false; std::vector<int> tables; };
+
+    // What the hooks of one connection know about the transaction in flight.
+    struct ConnHook {
+        SqliteDriver*              self = nullptr;
+        std::bitset<TableGens::kMax> pending;     // tables written by the open transaction
+        bool                       all = false;   // DDL, an attached database, too many tables: everything
+        bool                       checkpoints = false;
+    };
+    std::vector<std::unique_ptr<ConnHook>> hooks_;
+    std::unique_ptr<ResultCache>           rcache_;
+
+    static bool is_ddl(const std::string& sql) {
+        size_t i = 0;
+        while (i < sql.size() && std::isspace(static_cast<unsigned char>(sql[i]))) ++i;
+        size_t j = i;
+        while (j < sql.size() && std::isalpha(static_cast<unsigned char>(sql[j]))) ++j;
+        std::string kw = sql.substr(i, j - i);
+        for (auto& c : kw) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return kw == "CREATE" || kw == "DROP" || kw == "ALTER" || kw == "REINDEX" || kw == "VACUUM" || kw == "ANALYZE";
+    }
+    static void update_hook(void* u, int, const char* db, const char* table, sqlite3_int64) {
+        auto* h = static_cast<ConnHook*>(u);
+        if (!db || std::strcmp(db, "main") != 0 || !table) { h->all = true; return; }
+        const int id = h->self->rcache_->gens().id(table);
+        if (id < 0) h->all = true; else h->pending.set(size_t(id));
+    }
+    static void rollback_hook(void* u) {
+        auto* h = static_cast<ConnHook*>(u);
+        h->pending.reset();
+        h->all = false;
+    }
     std::vector<std::unordered_map<std::string, Cached>> cache_;
     std::vector<int>      rc_;   // result code of each slot's last failure
 
@@ -544,8 +619,16 @@ private:
     // on, then holds the writer (gate) only for the RESTART of what came in
     // meanwhile: a few pages, whose flush is ~2ms.
     static constexpr int kCheckpointPages = 4000;
-    static int wal_hook(void* self, sqlite3*, const char*, int pages) {
-        if (pages >= kCheckpointPages) static_cast<SqliteDriver*>(self)->request_checkpoint();
+    // After a commit is in the WAL (so readers can already see it): the written tables move to a new generation,
+    // then the checkpoint, if the WAL got long.
+    static int wal_hook(void* u, sqlite3*, const char*, int pages) {
+        auto* h = static_cast<ConnHook*>(u);
+        TableGens& g = h->self->rcache_->gens();
+        if (h->all) g.bump_all();
+        for (size_t i = 0; i < h->pending.size() && h->pending.any(); ++i)
+            if (h->pending.test(i)) { g.bump(int(i)); h->pending.reset(i); }
+        h->all = false;
+        if (h->checkpoints && pages >= kCheckpointPages) h->self->request_checkpoint();
         return SQLITE_OK;
     }
     void request_checkpoint() {
@@ -615,6 +698,44 @@ private:
         return slot;
     }
 
+    struct AuthCtx { std::vector<std::string> tables; bool ok = true; };
+    // Observes, never denies: a plain deterministic SELECT over ordinary tables of the main database is cacheable.
+    static int auth_cb(void* u, int action, const char* a1, const char* a2, const char* a3, const char*) {
+        auto* c = static_cast<AuthCtx*>(u);
+        switch (action) {
+            case SQLITE_SELECT: case SQLITE_RECURSIVE: break;
+            case SQLITE_READ:
+                if (!a1 || (a3 && std::strcmp(a3, "main") != 0) || plat::strncasecmp(a1, "sqlite_", 7) == 0) { c->ok = false; break; }
+                c->tables.emplace_back(a1);
+                break;
+            case SQLITE_FUNCTION: {
+                static const char* const kVolatile[] = {"random", "randomblob", "changes", "total_changes", "last_insert_rowid", "date", "time",
+                                                         "datetime", "julianday", "strftime", "unixepoch", "load_extension", "sqlite_offset"};
+                if (!a2) { c->ok = false; break; }
+                for (const char* f : kVolatile) if (plat::strncasecmp(a2, f, std::strlen(f) + 1) == 0) c->ok = false;
+                if (plat::strncasecmp(a2, "current_", 8) == 0) c->ok = false;
+                break;
+            }
+            default: c->ok = false; break;
+        }
+        return SQLITE_OK;
+    }
+    // update_hook does not fire for WITHOUT ROWID tables nor, reliably, for virtual ones: results over them are not cached.
+    static bool trackable(sqlite3* db, const std::string& name) {
+        sqlite3_stmt* st = nullptr;
+        if (sqlite3_prepare_v2(db, "select sql from sqlite_master where type = 'table' and name = ?1 collate nocase", -1, &st, nullptr) != SQLITE_OK) return false;
+        sqlite3_bind_text(st, 1, name.c_str(), -1, SQLITE_STATIC);
+        bool ok = true;
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const char* ddl = reinterpret_cast<const char*>(sqlite3_column_text(st, 0));
+            std::string up = ddl ? ddl : "";
+            for (auto& ch : up) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+            ok = up.find("WITHOUT ROWID") == std::string::npos && up.find("VIRTUAL TABLE") == std::string::npos;
+        }
+        sqlite3_finalize(st);
+        return ok;
+    }
+
     // Parameters ALWAYS go through bind, never concatenated: that is what makes
     // SQL injection impossible from Lux Script.
     bool prepare(size_t worker, const std::string& sql, const std::vector<Value>& args,
@@ -648,13 +769,29 @@ private:
             sqlite3_reset(*out);
             sqlite3_clear_bindings(*out);
         } else {
-            if (int rc = sqlite3_prepare_v2(db, eff_sql.c_str(), -1, out, nullptr); rc != SQLITE_OK) {
+            // What the statement reads, for the result cache: SQLite reports it while compiling.
+            AuthCtx auth;
+            const bool watch = rcache_->config().enabled && table.size() < kMaxCachedStatements;
+            if (watch) sqlite3_set_authorizer(db, &auth_cb, &auth);
+            const int prc = sqlite3_prepare_v2(db, eff_sql.c_str(), -1, out, nullptr);
+            if (watch) sqlite3_set_authorizer(db, nullptr, nullptr);
+            if (prc != SQLITE_OK) {
                 error = std::string("sqlite: ") + sqlite3_errmsg(db);
-                rc_[worker] = rc;
+                rc_[worker] = prc;
                 return false;
             }
-            if (table.size() < kMaxCachedStatements)
-                *entry = &table.emplace(eff_sql, Cached{*out, {}, -1}).first->second;
+            if (table.size() < kMaxCachedStatements) {
+                Cached c{*out, {}, -1, false, {}};
+                if (watch && auth.ok && sqlite3_stmt_readonly(*out) && !sqlite3_stmt_isexplain(*out)) {
+                    c.cacheable = true;
+                    for (const std::string& t : auth.tables) {
+                        const int id = trackable(db, t) ? rcache_->gens().id(t) : -1;
+                        if (id < 0) { c.cacheable = false; break; }
+                        if (std::find(c.tables.begin(), c.tables.end(), id) == c.tables.end()) c.tables.push_back(id);
+                    }
+                }
+                *entry = &table.emplace(eff_sql, std::move(c)).first->second;
+            }
         }
         const bool cached = *entry != nullptr;
 

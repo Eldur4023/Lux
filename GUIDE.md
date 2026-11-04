@@ -954,7 +954,7 @@ production.
 
 | Module | Keys |
 |---|---|
-| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica) |
+| `sqlite` | `file` (required), `pool`, `timeout_ms`, `replicate` (one line per replica), `result_cache` (`off` to disable), `result_cache_ms`, `result_cache_mb` |
 | `postgres` | `url`, or else `host` / `port` / `database` (required) / `user` / `password`; `pool` |
 | `mysql` | `host` / `port` / `database` / `user` / `password`; `pool` |
 
@@ -970,6 +970,22 @@ unique constraint say, fails alone. Your `await` returns once its batch has **co
 a query right after it sees the write. `last_id()` is the id of **your** insert, even with
 other requests' inserts in the same batch. Transactions (`begin()`) and statements that cannot
 run inside one (`pragma`, `vacuum`, `attach`) go to the pool as before.
+
+### SQLite: the result cache
+
+A `select` whose result is asked for again is answered from memory while the tables it reads have
+not been written: no statement runs, no row is rebuilt. Lux knows which tables a statement reads
+(SQLite reports it while compiling) and moves a table to a new generation after every commit that
+touched it, so a read after your `await exec(...)` always sees the write. What is **not** cached:
+anything inside a transaction (it must see its own writes), statements with `random()`, `changes()`,
+`last_insert_rowid()` or the date and time functions, `pragma`, tables created `WITHOUT ROWID`,
+virtual tables and attached databases. Every handler gets its own copy of the rows, so editing them
+changes nothing for the next request.
+
+One thing the cache cannot see is **another process** writing the file (a script, the `sqlite3`
+shell): that is picked up when the entry reaches `result_cache_ms` (default 1000). `result_cache_mb`
+caps the memory (default 64). `result_cache off` turns the cache off; so does the environment
+variable `LUX_NO_RESULT_CACHE`.
 
 `replicate` copies every commit, within a second, somewhere else. Give it as many times as
 you want:
