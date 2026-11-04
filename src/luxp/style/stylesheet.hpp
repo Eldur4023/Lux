@@ -23,6 +23,7 @@ struct Rule {
     std::vector<Decl> decls;
     std::string media;     // "" = always
     std::string container; // @container conditions ("[name] (query)"), joined by '\n' when nested; "" = none
+    std::string layer;     // @layer name (nested: "a.b"); "" = unlayered.  Rank = first appearance, see Resolver
     int order = 0;         // source order across the whole sheet set
     // @font-face: no selectors, media = "@font-face"; decls are the descriptors (font-family, src, font-weight...)
     bool font_face() const { return media == "@font-face"; }

@@ -106,6 +106,8 @@ std::string import_url(const std::string& prelude, std::string* media) {
     return url;
 }
 
+thread_local std::string g_layer;   // the @layer block being parsed ("" = none)
+
 void emit_style_rule(const std::string& selector_text, const std::string& body, const std::string& media, const std::string& container,
                      std::vector<Rule>& out, const Loader& loader, int depth, int nest);
 
@@ -173,6 +175,7 @@ void emit_style_rule(const std::string& selector_text, const std::string& body, 
     Rule rule;
     rule.media = media;
     rule.container = container;
+    rule.layer = g_layer;
     rule.selectors = parse_selector_list(selector_text);
     rule.decls = parse_decls(decl_text);
     if (!rule.selectors.empty() && !rule.decls.empty()) {
@@ -218,6 +221,18 @@ void parse_rules(const std::string& text, const std::string& media,
             if (stop == std::string::npos) break;
             const std::string prelude = trim(text.substr(j, stop - j));
             if (text[stop] == ';') {
+                if (name == "layer") {   // @layer a, b;  declares the order
+                    size_t from = 0;
+                    for (size_t q = 0; q <= prelude.size(); ++q) {
+                        if (q < prelude.size() && prelude[q] != ',') continue;
+                        const std::string nm = trim(prelude.substr(from, q - from));
+                        from = q + 1;
+                        if (nm.empty()) continue;
+                        Rule decl; decl.media = "@layerdecl"; decl.layer = g_layer.empty() ? nm : g_layer + "." + nm;
+                        decl.order = static_cast<int>(out.size());
+                        out.push_back(std::move(decl));
+                    }
+                }
                 if (name == "import" && loader && depth < 8) {
                     std::string m;
                     const std::string url = import_url(prelude, &m);
@@ -250,8 +265,17 @@ void parse_rules(const std::string& text, const std::string& media,
                 parse_rules(inner, (q.empty() ? prelude : q + " and " + prelude) + tail, out, loader, depth, container);
             } else if (name == "supports")
                 parse_rules(inner, media + "\x02" + prelude, out, loader, depth, container);
-            else if (name == "layer")
+            else if (name == "layer") {
+                // @layer name { } / @layer { } (anonymous: a layer of its own); nested names join with '.'
+                static thread_local int anon = 0;
+                const std::string saved = g_layer;
+                const std::string nm = prelude.empty() ? "\x01anon" + std::to_string(++anon) : trim(prelude);
+                g_layer = saved.empty() ? nm : saved + "." + nm;
+                Rule decl; decl.media = "@layerdecl"; decl.layer = g_layer; decl.order = static_cast<int>(out.size());
+                out.push_back(std::move(decl));   // fixes the layer's place in the order at its first appearance
                 parse_rules(inner, media, out, loader, depth, container);
+                g_layer = saved;
+            }
             else if (name == "container")
                 parse_rules(inner, media, out, loader, depth, container.empty() ? prelude : container + "\n" + prelude);
             else if (name == "property") {
