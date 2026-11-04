@@ -550,76 +550,123 @@ bool DocTemplate::render(Host& host, std::string& out) const { return run(host, 
 
 // ── the template as a block ─────────────────────────────────────────────────
 
+// Layout 2.  What the reader does not need is not written: the ids of holes, loops and ifs (it gets its
+// values from the trace, in order), the offsets of literals (they are consumed front to back from the
+// one arena, in program order), where a loop ends (its LoopNext says so) and the parts' positions.
+// An op is one byte, code in the low nibble and a small length in the high one (15 = more follows);
+// a part is one byte, 0 for a hole or its length + 1.
+namespace {
+void put_small(wire::Writer& w, uint8_t code, uint64_t v) {
+    if (v < 15) { w.u8(uint8_t(code | (v << 4))); }
+    else        { w.u8(uint8_t(code | (15 << 4))); w.uv(v - 15); }
+}
+}
+
 std::string DocTemplate::serialize() const {
     wire::Writer w;
-    w.uv(1);   // layout of this block
+    w.uv(2);   // layout of this block
     w.str(prologue_);
     w.str(lits_);
-    w.uv(parts_.size());
-    for (const Part& p : parts_) { w.uv(uint64_t(p.hole + 1)); w.uv(p.off); w.uv(p.len); }
     w.uv(ops_.size());
-    for (const Op& o : ops_) { w.u8(o.code); w.uv(o.a); w.uv(o.b); w.uv(o.c); }
+    for (size_t pc = 0; pc < ops_.size(); ++pc) {
+        const Op& o = ops_[pc];
+        switch (o.code) {
+            case Op::Static:     put_small(w, o.code, o.b); w.uv(o.c); break;
+            case Op::ElemOpen: case Op::AttrStatic:
+                                 put_small(w, o.code, o.b); break;
+            case Op::Text: case Op::AttrDyn: case Op::Leaf:
+                put_small(w, o.code, o.b);
+                for (uint32_t i = 0; i < o.b; ++i) {
+                    const Part& p = parts_[o.a + i];
+                    w.uv(p.hole >= 0 ? 0 : uint64_t(p.len) + 1);
+                }
+                break;
+            case Op::If:         put_small(w, o.code, o.b - pc); break;   // forward distance
+            case Op::Jump:       put_small(w, o.code, o.a - pc); break;
+            default:             w.u8(o.code); break;                     // End, ElemBody, ElemClose, LoopBegin, LoopNext
+        }
+    }
     return std::move(w.out);
 }
 
 std::unique_ptr<DocTemplate> DocTemplate::from_bytes(const std::string& bytes, std::string* err) {
     auto fail = [&](const char* why) -> std::unique_ptr<DocTemplate> { if (err) *err = why; return nullptr; };
     wire::Reader r{bytes};
-    if (r.uv() != 1) return fail("plantilla de documento de otra version");
+    if (r.uv() != 2) return fail("plantilla de documento de otra version");
     std::unique_ptr<DocTemplate> t(new DocTemplate());
     t->prologue_ = r.str(1u << 24);
     t->lits_ = r.str(1u << 26);
-    const uint32_t np = r.count(1u << 22, 3);
-    t->parts_.reserve(np);
-    for (uint32_t i = 0; i < np && r.ok; ++i) {
-        Part p;
-        p.hole = int64_t(r.uv()) - 1;
-        p.off = r.uv32();
-        p.len = r.uv32();
-        if (p.hole < 0 && (uint64_t(p.off) + p.len > t->lits_.size())) return fail("plantilla con un literal fuera de rango");
-        t->parts_.push_back(p);
-    }
-    const uint32_t no = r.count(1u << 22, 4);
+    const uint32_t no = r.count(1u << 22, 1);
+    if (!r.ok) return fail("plantilla de documento truncada");
     t->ops_.reserve(no);
-    for (uint32_t i = 0; i < no && r.ok; ++i) {
-        Op o;
-        const uint8_t code = r.u8();
+    size_t lit = 0;             // the arena, consumed in program order
+    std::vector<size_t> loops;  // pc of each open LoopBegin
+    auto small = [&](uint8_t byte) -> uint64_t { const uint8_t v = byte >> 4; return v < 15 ? v : 15 + r.uv(); };
+    auto take = [&](uint64_t n) { if (n > t->lits_.size() - lit) { r.ok = false; return size_t(0); } const size_t at = lit; lit += size_t(n); return at; };
+    for (uint32_t pc = 0; pc < no && r.ok; ++pc) {
+        const uint8_t byte = r.u8();
+        const uint8_t code = byte & 15;
         if (code > Op::Jump) return fail("plantilla con una operacion desconocida");
+        Op o;
         o.code = Op::Code(code);
-        o.a = r.uv32(); o.b = r.uv32(); o.c = r.uv32();
+        switch (o.code) {
+            case Op::Static: {
+                const uint64_t len = small(byte);
+                o.b = uint32_t(len); o.c = r.uv32();
+                o.a = uint32_t(take(len));
+                break;
+            }
+            case Op::ElemOpen: case Op::AttrStatic: {
+                const uint64_t len = small(byte);
+                o.b = uint32_t(len);
+                o.a = uint32_t(take(len));
+                break;
+            }
+            case Op::Text: case Op::AttrDyn: case Op::Leaf: {
+                const uint64_t n = small(byte);
+                if (n > r.in.size() - r.at || n > (1u << 22) - t->parts_.size()) return fail("plantilla con partes de mas");
+                o.a = uint32_t(t->parts_.size());
+                o.b = uint32_t(n);
+                for (uint64_t i = 0; i < n && r.ok; ++i) {
+                    const uint64_t tag = r.uv();
+                    Part p;
+                    if (tag == 0) { p.hole = 0; }   // the id is not needed: the values come from the trace
+                    else { p.len = uint32_t(tag - 1); p.off = uint32_t(take(tag - 1)); }
+                    t->parts_.push_back(p);
+                }
+                break;
+            }
+            case Op::If: {
+                const uint64_t d = small(byte);
+                if (d == 0 || d >= no - pc) return fail("plantilla con un salto fuera de rango");
+                o.b = uint32_t(pc + d);
+                break;
+            }
+            case Op::Jump: {
+                const uint64_t d = small(byte);
+                if (d == 0 || d >= no - pc) return fail("plantilla con un salto fuera de rango");
+                o.a = uint32_t(pc + d);
+                break;
+            }
+            case Op::LoopBegin: loops.push_back(pc); break;
+            case Op::LoopNext:
+                if (loops.empty()) return fail("plantilla con un bucle mal cerrado");
+                o.b = uint32_t(loops.back() + 1);
+                t->ops_[loops.back()].b = pc + 1;
+                loops.pop_back();
+                break;
+            default: break;   // End, ElemBody, ElemClose
+        }
         t->ops_.push_back(o);
     }
     if (!r.done()) return fail("plantilla de documento truncada");
+    if (!loops.empty()) return fail("plantilla con un bucle sin cerrar");
     const size_t n = t->ops_.size();
     if (n == 0 || t->ops_[n - 1].code != Op::End) return fail("plantilla sin final");
-    // Shape.  Everything that could loop or leave the program is checked here, so running it
-    // terminates (jumps go forward, a loop's one backward jump is its LoopNext) and stays inside.
-    std::vector<size_t> loops;   // pc of each open LoopBegin
-    for (size_t pc = 0; pc < n; ++pc) {
-        const Op& o = t->ops_[pc];
-        switch (o.code) {
-            case Op::End: if (pc != n - 1) return fail("plantilla con un final en medio"); break;
-            case Op::Static: case Op::ElemOpen: case Op::AttrStatic:
-                if (uint64_t(o.a) + o.b > t->lits_.size()) return fail("plantilla con bytes fuera de rango");
-                break;
-            case Op::Text: case Op::AttrDyn: case Op::Leaf:
-                if (uint64_t(o.a) + o.b > t->parts_.size()) return fail("plantilla con partes fuera de rango");
-                break;
-            case Op::LoopBegin:
-                if (o.b <= pc + 1 || o.b >= n) return fail("plantilla con un bucle mal cerrado");
-                loops.push_back(pc);
-                break;
-            case Op::LoopNext:
-                if (loops.empty() || o.b != loops.back() + 1 || t->ops_[loops.back()].b != pc + 1)
-                    return fail("plantilla con un bucle mal cerrado");
-                loops.pop_back();
-                break;
-            case Op::If: if (o.b <= pc || o.b >= n) return fail("plantilla con un salto fuera de rango"); break;
-            case Op::Jump: if (o.a <= pc || o.a >= n) return fail("plantilla con un salto fuera de rango"); break;
-            default: break;
-        }
-    }
-    if (!loops.empty()) return fail("plantilla con un bucle sin cerrar");
+    for (size_t pc = 0; pc + 1 < n; ++pc)
+        if (t->ops_[pc].code == Op::End) return fail("plantilla con un final en medio");
+    // A LoopBegin whose end lies past the program, or an If/Jump inside nothing, cannot happen: the
+    // distances were checked against the op count when they were read, and loops pair by nesting.
     return t;
 }
 
