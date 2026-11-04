@@ -339,6 +339,7 @@ public:
         // step: that step is where a re-prepare happens.
         std::vector<Col>  local;
         std::vector<Col>& meta = entry ? entry->meta : local;
+        bool unique = entry && entry->unique_cols;
 
         for (;;) {
             int rc = sqlite3_step(stmt);
@@ -358,14 +359,20 @@ public:
                         const char* col = sqlite3_column_name(stmt, i);
                         meta[i] = { col ? std::string(col) : std::to_string(i), decltype_is_bool(stmt, i) };
                     }
-                    if (entry) entry->reprepares = rp;
+                    // Distinct names: a row can be built by appending, no lookup per column (a repeated name
+                    // keeps the old behaviour: the last value wins).
+                    unique = true;
+                    for (int i = 0; i < cols && unique; ++i)
+                        for (int j = 0; j < i; ++j) if (meta[i].name == meta[j].name) { unique = false; break; }
+                    if (entry) { entry->reprepares = rp; entry->unique_cols = unique; }
                 }
             }
             Value::Dict row;
             // The column count is known: without this the dictionary grew in
             // steps and it was five reallocations per row.
             row.reserve(static_cast<size_t>(cols));
-            for (int i = 0; i < cols; ++i) row[meta[i].name] = column_value(stmt, i, meta[i].is_bool);
+            if (unique) for (int i = 0; i < cols; ++i) row.append(std::string(meta[i].name), column_value(stmt, i, meta[i].is_bool));
+            else        for (int i = 0; i < cols; ++i) row[meta[i].name] = column_value(stmt, i, meta[i].is_bool);
             rows.push_back(Value::dict(std::move(row)));
         }
 
@@ -532,7 +539,7 @@ private:
 
     std::vector<sqlite3*> conns_;
     struct Col    { std::string name; bool is_bool = false; };
-    struct Cached { sqlite3_stmt* stmt; std::vector<Col> meta; int reprepares = -1; bool cacheable = false; std::vector<int> tables; };
+    struct Cached { sqlite3_stmt* stmt; std::vector<Col> meta; int reprepares = -1; bool cacheable = false; std::vector<int> tables; bool unique_cols = false; };
 
     // What the hooks of one connection know about the transaction in flight.
     struct ConnHook {

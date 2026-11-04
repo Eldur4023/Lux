@@ -68,6 +68,10 @@ for i in $(seq 1 60); do curl -s "http://127.0.0.1:$PORT/item/2" > /dev/null & p
 for p in $pids; do wait "$p" 2>/dev/null; done
 check "the final read has every write" GET /item/2 200 '"n":140'
 
+echo "== rows =="
+check "a repeated column name keeps the last value" GET /dupcols 200 '"a":2'
+check "and the others" GET /dupcols 200 '"b":3'
+
 echo "== a write from outside =="
 check "before" GET /item/1 200 '"n":12'
 sqlite3 "$HERE/cases/tests-sqlite-cache.db" "update items set n = 77 where id = 1" 2>/dev/null

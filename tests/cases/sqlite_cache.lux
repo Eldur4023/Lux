@@ -79,3 +79,7 @@ post endpoint("/ddl_b"):
     await sqlite.exec("create table shape (a integer, b integer)")
     await sqlite.exec("insert into shape values (1, 2)")
     return { "ok": true }
+
+get endpoint("/dupcols"):
+    List<Json> r = await sqlite.query("select 1 as a, 2 as a, 3 as b")
+    return r
