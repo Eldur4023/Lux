@@ -95,7 +95,15 @@ bool blob_inflate(const Blob& b, std::string& out, std::string* err);
 // The three sections of a page, plain.
 struct PageSections {
     std::string document, sheet, program;   // program empty = no script
+    // A page whose stylesheets travel as separate blocks (so each is cached and shared by every page
+    // that uses it): `sheet` is the first, these follow in document order.
+    std::vector<std::string> more_sheets;
 };
+
+using SheetBlobs = std::vector<Blob>;   // one block per stylesheet source, in document order
+
+// The rules of every sheet block of a page, in order (their cascade order renumbered across them).
+bool decode_page_sheet(const PageSections& s, std::vector<style::Rule>& rules, std::string* err);
 
 // A page as it travels.
 struct WirePage {
@@ -113,23 +121,23 @@ using Resources = std::vector<std::pair<std::string, std::string>>;
 std::string encode_container(const std::vector<WirePage>& pages, const Resources& resources);
 // A container of one page and no resources, assembled straight from blobs the
 // caller already holds: what a server answers per request.
-std::string encode_single_page(const std::string& name, const Blob& document, const Blob& sheet, const Blob& program,
+std::string encode_single_page(const std::string& name, const Blob& document, const SheetBlobs& sheet, const Blob& program,
                                const HaveSet* have = nullptr);
 // The same container written in place, for a document that is rendered straight into the
 // response: begin_single_page() starts `out` (empty) and returns where the document goes;
 // the caller appends it there; finish_single_page() fixes its length and adds the sections.
 size_t begin_single_page(std::string& out, const std::string& name);
-void   finish_single_page(std::string& out, size_t document_at, const Blob& sheet, const Blob& program,
+void   finish_single_page(std::string& out, size_t document_at, const SheetBlobs& sheet, const Blob& program,
                           const HaveSet* have = nullptr);
 // The same, deflating the document first when level > 0 and that makes it smaller (zlib level 1 is
 // ~3x the bytes saved per CPU spent that level 9 is; the sections that never change are kept deflated
 // at 9 already).  The reader takes either, section by section.
-void   finish_single_page(std::string& out, size_t document_at, const Blob& sheet, const Blob& program, int level,
+void   finish_single_page(std::string& out, size_t document_at, const SheetBlobs& sheet, const Blob& program, int level,
                           const HaveSet* have = nullptr);
 // A page whose document travels as `tmpl` (DocTemplate::serialize(), a block with an id: left out as
 // a reference when the client holds it) plus `trace` (DocTemplate::trace()), deflated at `level` if > 0.
 std::string encode_traced_page(const std::string& name, const Blob& tmpl, const std::string& trace, int level,
-                               const Blob& sheet, const Blob& program, const HaveSet* have = nullptr);
+                               const SheetBlobs& sheet, const Blob& program, const HaveSet* have = nullptr);
 // Everything compressed (blob_deflate): for a file written once.
 std::string encode_container(const Container& c);
 // Well-formedness, and every section inflated to plain bytes; each section is
@@ -175,6 +183,7 @@ std::string   scripts_key(dom::Node& document);   // what translate_scripts read
 
 struct StylesResult {
     std::vector<style::Rule>  rules;
+    std::vector<size_t>       ends;     // rules.size() after each stylesheet source, in document order
     std::vector<std::string>  warnings;
 };
 StylesResult translate_styles(dom::Node& document, const Fetcher& fetch);

@@ -497,7 +497,7 @@ LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& 
         // deflating the values then costs nothing that matters; the later ones go out plain.
         const int level = zlevel ? zlevel : (have.has(plan->doc_blob.id) ? 0 : 6);
         li::send_luxp(ctx.req, ctx.res,
-                      luxium::page::encode_traced_page("index.html", plan->doc_blob, tr, level, sheet->blob,
+                      luxium::page::encode_traced_page("index.html", plan->doc_blob, tr, level, sheet->blobs,
                                                        plan->layout ? patched : plan->program, &have),
                       luxium::page::kLuxpMime);
         return LuxpOutcome::Sent;
@@ -505,7 +505,7 @@ LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& 
 
     // The document is rendered straight into the response, after the container's header.
     std::string body;
-    body.reserve(plan->size_hint.load(std::memory_order_relaxed) + sheet->blob.data.size() + plan->program.data.size() + 96);
+    body.reserve(plan->size_hint.load(std::memory_order_relaxed) + sheet->blobs.size() * 128 + plan->program.data.size() + 96);
     const size_t doc_at = luxium::page::begin_single_page(body, "index.html");
     if (!plan->doc->run(host, body)) return LuxpOutcome::Translate;   // the HTML path reports why
     plan->size_hint.store(body.size() - doc_at, std::memory_order_relaxed);
@@ -514,7 +514,7 @@ LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& 
 
     luxium::page::Blob patched;
     if (plan->layout && !patched_program(*plan, host, patched)) return LuxpOutcome::Translate;
-    luxium::page::finish_single_page(body, doc_at, sheet->blob, plan->layout ? patched : plan->program, zlevel, &have);
+    luxium::page::finish_single_page(body, doc_at, sheet->blobs, plan->layout ? patched : plan->program, zlevel, &have);
     ctx.res.header("Vary", "Accept, X-Luxp-Have");
     li::send_luxp(ctx.req, ctx.res, std::move(body), luxium::page::kLuxpMime);
     return LuxpOutcome::Sent;

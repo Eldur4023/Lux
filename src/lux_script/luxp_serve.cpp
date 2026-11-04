@@ -197,8 +197,37 @@ std::shared_ptr<const SheetData> build_sheet(luxium::dom::Node& doc, const std::
         return bytes;
     });
     data->plain = luxium::page::encode_sheet(styles.rules);
-    data->blob = blob_deflate(data->plain, deflate_level);
-    data->blob.id = luxium::page::block_id(data->plain);
+    size_t from = 0;
+    for (size_t end : styles.ends) {   // one block per source; a source with no rules adds none
+        if (end == from) continue;
+        const std::vector<luxium::style::Rule> part(styles.rules.begin() + from, styles.rules.begin() + end);
+        const std::string plain = luxium::page::encode_sheet(part);
+        luxium::page::Blob b = blob_deflate(plain, deflate_level);
+        b.id = luxium::page::block_id(plain);
+        data->blobs.push_back(std::move(b));
+        from = end;
+    }
+    if (const char* v = std::getenv("LUX_LUXP_CHECK"); v && *v == '1' && data->blobs.size() > 1) {
+        // The blocks, decoded the way a client does and put together, must be the sheet written whole.
+        luxium::page::PageSections sections;
+        std::string why;
+        std::vector<luxium::style::Rule> rules;
+        size_t from2 = 0;
+        for (size_t end : styles.ends) {
+            if (end == from2) continue;
+            const std::string plain = luxium::page::encode_sheet(std::vector<luxium::style::Rule>(styles.rules.begin() + from2, styles.rules.begin() + end));
+            if (sections.sheet.empty()) sections.sheet = plain; else sections.more_sheets.push_back(plain);
+            from2 = end;
+        }
+        if (!luxium::page::decode_page_sheet(sections, rules, &why) || luxium::page::encode_sheet(rules) != data->plain)
+            lux::log().error("luxp: a page's stylesheet blocks do not add up to its sheet (", why, ")");
+    }
+    if (data->blobs.empty()) {   // no stylesheet at all: an empty one
+        const std::string plain = luxium::page::encode_sheet({});
+        luxium::page::Blob b = blob_deflate(plain, deflate_level);
+        b.id = luxium::page::block_id(plain);
+        data->blobs.push_back(std::move(b));
+    }
     return data;
 }
 
@@ -261,7 +290,7 @@ std::optional<std::string> html_to_luxp(const std::string& html, const std::stri
     }
     auto sheet = sheet_for(doc, url_path);
     return luxium::page::encode_single_page("index.html", blob_plain(luxium::page::encode_document(doc)),
-                                            sheet->blob, program->blob, have);
+                                            sheet->blobs, program->blob, have);
 }
 
 void send_page(const lux::Request& req, lux::Response& res, const std::string& html, bool allow_luxp) {

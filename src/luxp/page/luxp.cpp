@@ -173,6 +173,14 @@ void put_blob(wire::Writer& w, const Blob& b, const HaveSet* have = nullptr) {
     w.str(b.data);
 }
 
+// The sheet section: one block as any section, or (flag 3) a count and that many blocks.
+void put_sheet(wire::Writer& w, const SheetBlobs& sheet, const HaveSet* have) {
+    if (sheet.size() == 1) { put_blob(w, sheet[0], have); return; }
+    w.u8(3);
+    w.uv(sheet.size());
+    for (const Blob& b : sheet) put_blob(w, b, have);
+}
+
 bool get_blob(wire::Reader& r, Blob& b, std::string* err, BlockCache* cache, bool* from_cache) {
     const uint8_t flag = r.u8();
     const uint8_t kind = flag & 3;
@@ -224,16 +232,16 @@ std::string encode_container(const std::vector<WirePage>& pages, const Resources
     return w.out;
 }
 
-std::string encode_single_page(const std::string& name, const Blob& document, const Blob& sheet, const Blob& program,
+std::string encode_single_page(const std::string& name, const Blob& document, const SheetBlobs& sheet, const Blob& program,
                                const HaveSet* have) {
     wire::Writer w;
-    w.out.reserve(32 + name.size() + document.data.size() + sheet.data.size() + program.data.size());
+    w.out.reserve(32 + name.size() + document.data.size() + sheet.size() * 128 + program.data.size());
     w.out = "LUXP";
     w.out += kVersion;
     w.uv(1);
     w.str(name);
     put_blob(w, document);
-    put_blob(w, sheet, have);
+    put_sheet(w, sheet, have);
     put_blob(w, program, have);
     w.uv(0);
     return std::move(w.out);
@@ -261,20 +269,20 @@ size_t begin_single_page(std::string& out, const std::string& name) {
     return out.size();
 }
 
-void finish_single_page(std::string& out, size_t document_at, const Blob& sheet, const Blob& program,
+void finish_single_page(std::string& out, size_t document_at, const SheetBlobs& sheet, const Blob& program,
                         const HaveSet* have) {
     const auto n = uint32_t(out.size() - document_at);
     put_uv5(out, document_at - 10, n);
     put_uv5(out, document_at - 5, n);
     wire::Writer w;
     w.out = std::move(out);
-    put_blob(w, sheet, have);
+    put_sheet(w, sheet, have);
     put_blob(w, program, have);
     w.uv(0);
     out = std::move(w.out);
 }
 
-void finish_single_page(std::string& out, size_t document_at, const Blob& sheet, const Blob& program, int level,
+void finish_single_page(std::string& out, size_t document_at, const SheetBlobs& sheet, const Blob& program, int level,
                         const HaveSet* have) {
 #ifdef LUXP_ZLIB
     const size_t n = out.size() - document_at;
@@ -314,7 +322,7 @@ void finish_single_page(std::string& out, size_t document_at, const Blob& sheet,
             w.uv(uint32_t(n));
             w.uv(uint32_t(zlen));
             w.out.append(z.data(), zlen);
-            put_blob(w, sheet, have);
+            put_sheet(w, sheet, have);
             put_blob(w, program, have);
             w.uv(0);
             out = std::move(w.out);
@@ -326,9 +334,9 @@ void finish_single_page(std::string& out, size_t document_at, const Blob& sheet,
 }
 
 std::string encode_traced_page(const std::string& name, const Blob& tmpl, const std::string& trace, int level,
-                               const Blob& sheet, const Blob& program, const HaveSet* have) {
+                               const SheetBlobs& sheet, const Blob& program, const HaveSet* have) {
     wire::Writer w;
-    w.out.reserve(48 + name.size() + trace.size() + sheet.data.size() + program.data.size());
+    w.out.reserve(48 + name.size() + trace.size() + sheet.size() * 128 + program.data.size());
     w.out = "LUXP";
     w.out += kVersion;
     w.uv(1);
@@ -337,7 +345,7 @@ std::string encode_traced_page(const std::string& name, const Blob& tmpl, const 
     put_blob(w, tmpl, have);
     Blob t = level > 0 ? blob_deflate(trace, level) : blob_plain(trace);
     put_blob(w, t);
-    put_blob(w, sheet, have);
+    put_sheet(w, sheet, have);
     put_blob(w, program, have);
     w.uv(0);
     return std::move(w.out);
@@ -395,6 +403,19 @@ bool decode_container(const std::string& s, Container& out, std::string* err, Bl
                 if (plain_total > kMaxBytes) return fail(".luxp demasiado grande");
                 continue;
             }
+            if (k == 1 && r.at < s.size() && (uint8_t(s[r.at]) & 3) == 3) {   // several stylesheet blocks
+                r.at++;
+                const uint32_t n = r.count(256, 2);
+                if (!r.ok || n == 0) return fail(".luxp con una hoja de estilos mal formada");
+                for (uint32_t j = 0; j < n && r.ok; ++j) {
+                    Blob b;
+                    bool fc = false;
+                    std::string one;
+                    if (!get_blob(r, b, err, cache, &fc) || !settle(b, one, fc)) { out = {}; return false; }
+                    if (j == 0) p.sheet = std::move(one); else p.more_sheets.push_back(std::move(one));
+                }
+                continue;
+            }
             if (!get_blob(r, blobs[k], err, cache, &from_cache) || !settle(blobs[k], *plain[k], from_cache)) { out = {}; return false; }
         }
         if (r.ok && name.empty()) return fail(".luxp con una pagina sin nombre");
@@ -408,6 +429,18 @@ bool decode_container(const std::string& s, Container& out, std::string* err, Bl
         out.resources.emplace_back(std::move(name), std::move(bytes));
     }
     if (!r.done()) { out = {}; return fail(".luxp truncado o con bytes sobrantes"); }
+    return true;
+}
+
+bool decode_page_sheet(const PageSections& s, std::vector<style::Rule>& rules, std::string* err) {
+    if (!decode_sheet(s.sheet, rules, err)) return false;
+    for (const std::string& more : s.more_sheets) {
+        std::vector<style::Rule> extra;
+        if (!decode_sheet(more, extra, err)) return false;
+        for (auto& r : extra) rules.push_back(std::move(r));
+    }
+    if (!s.more_sheets.empty())
+        for (size_t i = 0; i < rules.size(); ++i) rules[i].order = static_cast<int>(i);   // one cascade across the blocks
     return true;
 }
 
@@ -575,11 +608,12 @@ StylesResult translate_styles(dom::Node& doc, const Fetcher& fetch) {
         if (el->is_element("style")) {
             style::parse_sheet(el->text_content(), t.rules,
                                [&](const std::string& url) { return fetch(url).value_or(""); });
+            t.ends.push_back(t.rules.size());
             continue;
         }
         const std::string href = el->attr_or("href");
         auto sheet = fetch(href);
-        if (!sheet) { t.warnings.push_back("stylesheet not found: " + href); continue; }
+        if (!sheet) { t.warnings.push_back("stylesheet not found: " + href); t.ends.push_back(t.rules.size()); continue; }
         const std::string dir = href.substr(0, href.rfind('/') + 1);
         const size_t first = t.rules.size();
         style::parse_sheet(*sheet, t.rules, [&](const std::string& url) {
@@ -590,6 +624,7 @@ StylesResult translate_styles(dom::Node& doc, const Fetcher& fetch) {
             for (size_t k = first; k < t.rules.size(); ++k)
                 for (auto& d : t.rules[k].decls)
                     if (d.value.find("url(") != std::string::npos) d.value = rewrite_urls(d.value, dir);
+        t.ends.push_back(t.rules.size());
     }
     for (size_t i = 0; i < t.rules.size(); ++i) t.rules[i].order = static_cast<int>(i);
     return t;

@@ -20,8 +20,10 @@
 namespace lux_script::luxp_internal {
 
 struct SheetData {
-    luxium::page::Blob blob;    // compressed once
-    std::string        plain;   // for comparing (LUX_LUXP_CHECK)
+    // One block per stylesheet source (a <link>, a <style>), compressed once and identified by its content:
+    // a stylesheet several pages share is the same block in all of them, and a client keeps it once.
+    luxium::page::SheetBlobs blobs;
+    std::string        plain;   // every rule together, for comparing (LUX_LUXP_CHECK)
     std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> deps;
 };
 
