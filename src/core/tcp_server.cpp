@@ -84,6 +84,17 @@ TcpServer::TcpServer(const std::string& host, uint16_t port,
     if (group_) { std::lock_guard lk(group_->m); group_->servers.push_back(this); }
 }
 
+void TcpServer::prefer_cpu(int cpu) {
+#if defined(__linux__)
+#  ifndef SO_INCOMING_CPU
+#    define SO_INCOMING_CPU 49
+#  endif
+    if (listen_fd_ >= 0) setsockopt(listen_fd_, SOL_SOCKET, SO_INCOMING_CPU, &cpu, sizeof cpu);
+#else
+    (void)cpu;
+#endif
+}
+
 void TcpServer::register_listen_fd() {
     loop_.add(listen_fd_, EPOLLIN, [this](uint32_t) { on_accept(); });
 }

@@ -1817,6 +1817,21 @@ What stays on bytecode today: `ws`/`sse` routes, a constructor with a body, a fu
 native route reports the route's own line in `"at"`, where bytecode reports the line inside the
 function that failed.
 
+### Tuning knobs
+
+Environment variables, read at startup:
+
+| Variable | Effect |
+|---|---|
+| `LUX_THREADS=N` | event loops and pool threads, instead of one per CPU the process may use |
+| `LUX_PIN_THREADS=1` | pins loop *i* to the *i*-th usable CPU and asks the kernel (`SO_INCOMING_CPU`) to hand it the connections whose packets arrive there. Meant for a NIC with receive-side scaling; on loopback it changes nothing and the tail gets worse, so it is off |
+| `LUX_NO_RESULT_CACHE=1` | turns the sqlite result cache off (section 12) |
+| `LUX_WAL_HIGH_PAGES=N` | the WAL size (pages, default 32000) past which each write batch waits up to 20 ms for the checkpointer |
+| `LUX_DB_CACHE_STATS=1` | logs the result cache's hits and misses at shutdown |
+
+For a production build, `-DLUX_LTO=ON` and a profile-guided pass (`tools/pgo.sh`) shave a few
+percent off the instructions per request.
+
 ## 23. Native modules
 
 Beyond `sqlite`/`postgres`/`mysql`, `import` reaches the compiled-in modules below. A call is

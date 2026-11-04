@@ -16,6 +16,7 @@
 #include <csignal>
 #ifndef _WIN32
 #include <sched.h>
+#include <pthread.h>
 #endif
 #include <iostream>
 #include <memory>
@@ -824,6 +825,33 @@ void App::run(const std::string& host, uint16_t port) {
     }
     num_threads = std::max(1u, num_threads);
 
+    // LUX_PIN_THREADS=1: loop i runs on the i-th cpu this process may use, and its listener asks the kernel for the
+    // connections whose packets arrive there (SO_INCOMING_CPU): the packet, the socket and the loop that serves it
+    // then share a cpu, which is what a NIC with receive-side scaling can give. Off by default: pinned threads do
+    // not share a busy host well, and on loopback (every packet is received on the sender's cpu) it changes nothing.
+    std::vector<int> pin_cpus;
+#ifndef _WIN32
+    if (const char* e = std::getenv("LUX_PIN_THREADS"); e && *e && *e != '0') {
+        cpu_set_t mask;
+        CPU_ZERO(&mask);
+        if (::sched_getaffinity(0, sizeof(mask), &mask) == 0)
+            for (int c = 0; c < CPU_SETSIZE; ++c) if (CPU_ISSET(c, &mask)) pin_cpus.push_back(c);
+    }
+#endif
+    auto pin_to = [&pin_cpus](unsigned index) -> int {
+#ifndef _WIN32
+        if (pin_cpus.empty()) return -1;
+        const int cpu = pin_cpus[index % pin_cpus.size()];
+        cpu_set_t one;
+        CPU_ZERO(&one);
+        CPU_SET(cpu, &one);
+        return ::pthread_setaffinity_np(::pthread_self(), sizeof(one), &one) == 0 ? cpu : -1;
+#else
+        (void)index;
+        return -1;
+#endif
+    };
+
     // Shared pool for route handlers with no `await` at all: pure CPU-bound
     // work (see BlockingAwaitable, blocking_pool.hpp) that would otherwise
     // run inline on whichever core's loop accepted the connection, blocking
@@ -985,12 +1013,14 @@ void App::run(const std::string& host, uint16_t port) {
     std::vector<std::thread> threads;
     threads.reserve(num_threads - 1);
     for (unsigned i = 1; i < num_threads; ++i) {
-        threads.emplace_back([&]() {
+        threads.emplace_back([&, i]() {
             plat::set_thread_name("lux-loop");
+            const int cpu = pin_to(i);
             core::EventLoop loop;
             core::TcpServer server(host, port, loop, dispatch,
                                    max_connections_, shared_conn_count, group,
                                    /*listen_here=*/kWorkersListen);
+            if (cpu >= 0) server.prefer_cpu(cpu);
             {
                 std::lock_guard<std::mutex> lk(all_mutex);
                 all_loops.push_back(&loop);
@@ -1008,8 +1038,10 @@ void App::run(const std::string& host, uint16_t port) {
     }
 
     // ── Main thread (core 0) ──────────────────────────────────────────────────
+    const int main_cpu = pin_to(0);
     core::TcpServer main_server(host, port, main_loop, dispatch,
                                 max_connections_, shared_conn_count, group);
+    if (main_cpu >= 0) main_server.prefer_cpu(main_cpu);
     {
         std::lock_guard<std::mutex> lk(all_mutex);
         all_servers.push_back(&main_server);
