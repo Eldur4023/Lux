@@ -15,11 +15,22 @@ struct bio_st;
 
 namespace lux::http {
 
+// The textual IP of a socket address, "" for a family other than IPv4/IPv6.
+inline std::string peer_ip_of(const sockaddr_storage& ss) {
+    char buf[INET6_ADDRSTRLEN]{};
+    if (ss.ss_family == AF_INET)
+        inet_ntop(AF_INET, &reinterpret_cast<const sockaddr_in*>(&ss)->sin_addr, buf, sizeof buf);
+    else if (ss.ss_family == AF_INET6)
+        inet_ntop(AF_INET6, &reinterpret_cast<const sockaddr_in6*>(&ss)->sin6_addr, buf, sizeof buf);
+    return buf;
+}
+
 class HttpConnection : public std::enable_shared_from_this<HttpConnection> {
 public:
     HttpConnection(int fd, core::EventLoop& loop, lux::DispatchFn dispatch,
                    std::shared_ptr<std::atomic<int>> conn_count = nullptr,
-                   std::shared_ptr<std::atomic<int>> loop_count = nullptr);
+                   std::shared_ptr<std::atomic<int>> loop_count = nullptr,
+                   std::string peer_ip = {});   // from accept(): saves the getpeername(2) on the first request
     ~HttpConnection();
 
     void start();

@@ -23,7 +23,7 @@ namespace luxium::page {
 namespace {
 
 constexpr char     kVersion  = 5;   // 5: sections as blobs, LEB128
-constexpr uint64_t kMaxBytes = 1ull << 30;
+constexpr uint64_t kMaxBytes = 64ull << 20;   // plain bytes of all the sections of a container
 constexpr uint32_t kMaxItems = 1u << 16;
 constexpr uint32_t kMaxSection = 1u << 28;   // plain size of one section
 
@@ -75,13 +75,13 @@ Blob blob_plain(std::string bytes) {
     return b;
 }
 
-Blob blob_deflate(const std::string& bytes) {
+Blob blob_deflate(const std::string& bytes, int level) {
 #ifdef LUXP_ZLIB
     if (bytes.size() >= 64 && bytes.size() <= kMaxSection) {
         uLongf zlen = compressBound(bytes.size());
         std::string z(zlen, '\0');
         if (compress2(reinterpret_cast<Bytef*>(z.data()), &zlen,
-                      reinterpret_cast<const Bytef*>(bytes.data()), bytes.size(), 9) == Z_OK &&
+                      reinterpret_cast<const Bytef*>(bytes.data()), bytes.size(), level) == Z_OK &&
             zlen < bytes.size()) {
             z.resize(zlen);
             Blob b;
@@ -170,6 +170,40 @@ std::string encode_single_page(const std::string& name, const Blob& document, co
     return std::move(w.out);
 }
 
+namespace {
+// A uint32 as a 5-byte LEB128 at `at`: room reserved before the value is known. The reader
+// takes non-minimal encodings (Reader::uv only bounds the length).
+void put_uv5(std::string& out, size_t at, uint32_t v) {
+    for (int i = 0; i < 4; ++i) out[at + i] = char(((v >> (7 * i)) & 0x7F) | 0x80);
+    out[at + 4] = char(v >> 28);
+}
+}
+
+size_t begin_single_page(std::string& out, const std::string& name) {
+    wire::Writer w;
+    w.out = std::move(out);
+    w.out += "LUXP";
+    w.out += kVersion;
+    w.uv(1);
+    w.str(name);
+    w.u8(0);                    // the document: plain
+    w.out.append(10, '\0');     // its raw_size and its length, as two padded LEBs
+    out = std::move(w.out);
+    return out.size();
+}
+
+void finish_single_page(std::string& out, size_t document_at, const Blob& sheet, const Blob& program) {
+    const auto n = uint32_t(out.size() - document_at);
+    put_uv5(out, document_at - 10, n);
+    put_uv5(out, document_at - 5, n);
+    wire::Writer w;
+    w.out = std::move(out);
+    put_blob(w, sheet);
+    put_blob(w, program);
+    w.uv(0);
+    out = std::move(w.out);
+}
+
 std::string encode_container(const Container& c) {
     std::vector<WirePage> pages;
     for (const auto& [name, s] : c.pages)
@@ -196,6 +230,7 @@ bool decode_container(const std::string& s, Container& out, std::string* err) {
             if (!get_blob(r, blobs[k], err)) { out = {}; return false; }
             plain_total += blobs[k].raw_size;
             if (plain_total > kMaxBytes) return fail(".luxp demasiado grande");
+            if (!blobs[k].zlib) { *plain[k] = std::move(blobs[k].data); continue; }   // already read once
             if (!blob_inflate(blobs[k], *plain[k], err)) { out = {}; return false; }
         }
         if (r.ok && name.empty()) return fail(".luxp con una pagina sin nombre");

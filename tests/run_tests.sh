@@ -627,6 +627,7 @@ check_html() {
 check_luxp "render() -> .luxp with the template's data"    '/hello?who=Zoe' 'Zoe'
 check_luxp "{{ }} inside the page's <script>"               '/hello?who=Zoe' 'Hola desde LuxScript, '
 check_luxp "<link> through a static mount, and its @import" '/hello'         'rebeccapurple'
+check_luxp "{{ }} in a <script>: a backslash, a quote and a line break stay in the string" '/hello?who=a%5Cb%22c%0Ad' 'Hola desde LuxScript, '
 check_luxp "constant render(): translated at startup"       '/fixed'         'cambiada por LuxScript'
 check "same route, any other browser: HTML" GET '/hello?who=Zoe' 200 '<h1 id="t">Hola Zoe</h1>'
 check_luxp "plan: values in text and attributes"          '/plan?who=Zoe&n=3'   'Item <2> & "co" '"'"'x'"'"
@@ -753,6 +754,37 @@ t1=$(date +%s)
 if kill -0 "$SRV" 2>/dev/null; then fail "SIGTERM with an open sse stream exits promptly" "exit within 10 s" "still running after $((t1 - t0)) s"
 else ok "SIGTERM with an open sse stream exits promptly ($((t1 - t0)) s, not the 30 s grace period)"; fi
 kill_wait $SRV; SRV=""
+
+echo "== static mount: validators, small-file cache, precompressed variants =="
+mkdir -p "$TMP/site"
+printf 'body{}\n' > "$TMP/site/a.css"; printf 'x\n' > "$TMP/site/report-20261104.css"; printf 'y\n' > "$TMP/site/app.abc123ef.js"
+printf '<html>i</html>\n' > "$TMP/site/index.html"
+gzip -k "$TMP/site/a.css"; touch "$TMP/site/a.css.gz"   # not older than the file
+printf 'app:\n    port 8089\n\n    static "/" -> "%s" spa\n' "$TMP/site" > "$TMP/site.lux"
+next_server "$TMP/site.lux" /index.html || exit 1
+hdr() { curl -sSi --max-time 5 "$@" | tr -d '\r'; }
+h=$(hdr "http://127.0.0.1:$PORT/report-20261104.css")
+[[ "$h" == *"max-age=3600, must-revalidate"* && "$h" != *immutable* ]] && ok "a digits-only name is not a hash" || fail "digits-only name" "no immutable" "$h"
+h=$(hdr "http://127.0.0.1:$PORT/app.abc123ef.js")
+[[ "$h" == *immutable* ]] && ok "a hex hash name is immutable" || fail "hashed name" "immutable" "$h"
+h=$(hdr "http://127.0.0.1:$PORT/a.css"); etag=$(grep -i '^etag' <<<"$h" | cut -d' ' -f2); lm=$(grep -i '^last-modified' <<<"$h" | cut -d' ' -f2-)
+[ -n "$lm" ] && ok "static: Last-Modified" || fail "static Last-Modified" "a date" "$h"
+h=$(hdr -H "If-None-Match: W/\"zz\", $etag" "http://127.0.0.1:$PORT/a.css")
+[[ "$h" == "HTTP/1.1 304"* && "${h,,}" != *content-length* ]] && ok "static: 304 for an ETag in a list, no Content-Length" || fail "static 304 list" "304 without Content-Length" "$h"
+h=$(hdr -H "If-Modified-Since: $lm" "http://127.0.0.1:$PORT/a.css")
+[[ "$h" == "HTTP/1.1 304"* ]] && ok "static: 304 for If-Modified-Since" || fail "static IMS" "304" "$h"
+h=$(hdr -H "If-Modified-Since: Thu, 01 Jan 1970 00:00:00 GMT" "http://127.0.0.1:$PORT/a.css")
+[[ "$h" == "HTTP/1.1 200"* ]] && ok "static: an older If-Modified-Since is a 200" || fail "static IMS old" "200" "$h"
+h=$(hdr -H "Accept-Encoding: gzip" "http://127.0.0.1:$PORT/a.css")
+[[ "${h,,}" == *"content-encoding: gzip"* && "${h,,}" == *"vary: accept-encoding"* ]] && ok "static: precompressed .gz variant" || fail "static .gz" "Content-Encoding: gzip" "$h"
+[ "$(curl -s -H 'Accept-Encoding: gzip' "http://127.0.0.1:$PORT/a.css" | gzip -dc)" = "body{}" ] && ok "static: the .gz body is the file's" || fail "static .gz body" "body{}" "?"
+[ "$(curl -s -H 'Accept-Encoding: gzip;q=0' "http://127.0.0.1:$PORT/a.css")" = "body{}" ] && ok "static: gzip;q=0 gets the plain file" || fail "static q=0" "body{}" "?"
+[ "$(curl -s -r 0-3 "http://127.0.0.1:$PORT/a.css")" = "body" ] && ok "static: Range bypasses the cache" || fail "static Range" "body" "?"
+# the cache notices a change within a second
+printf 'p{}\n' > "$TMP/site/a.css"; rm -f "$TMP/site/a.css.gz"; sleep 1.3
+[ "$(curl -s "http://127.0.0.1:$PORT/a.css")" = "p{}" ] && ok "static: the cache follows a changed file" || fail "static cache revalidation" "p{}" "$(curl -s "http://127.0.0.1:$PORT/a.css")"
+h=$(hdr -H "Accept-Encoding: gzip" "http://127.0.0.1:$PORT/a.css")
+[[ "${h,,}" != *"content-encoding"* ]] && ok "static: a removed variant is no longer served" || fail "static removed .gz" "no Content-Encoding" "$h"
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
 

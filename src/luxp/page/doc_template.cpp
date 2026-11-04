@@ -159,7 +159,8 @@ struct DocTemplate::Item {
     std::string        bytes;          // Static: whole encoded nodes
     uint32_t           count = 0;      //   ...and how many
     std::vector<Piece> parts;          // Text
-    struct Attr { uint32_t name = 0; std::vector<Piece> parts; bool dynamic = false; };
+    struct Attr { uint32_t name = 0; std::vector<Piece> parts; bool dynamic = false; std::string enc; };
+    std::string        head;           // Elem: type, name, attr count, pre-encoded
     uint32_t           name = 0;       // Elem
     std::vector<Attr>  attrs;
     std::vector<Item>  children;       // Elem's children; the body of a Loop; the `then` of an If
@@ -313,6 +314,13 @@ struct Builder {
             if (pos != toks.size()) return fail("una estructura se abre y se cierra en elementos distintos");
         }
         if (is_static(it)) return static_item(n, out);   // the original subtree, written once
+        it.head += char(dom::NodeType::Element);
+        put_uv(it.head, it.name);
+        put_uv(it.head, it.attrs.size());
+        for (auto& a : it.attrs) {
+            put_uv(a.enc, a.name);
+            if (!a.dynamic) put_str(a.enc, a.parts.empty() ? std::string() : a.parts[0].lit);
+        }
         out = std::move(it);
         return true;
     }
@@ -445,18 +453,14 @@ bool render_seq(const std::vector<Item>& seq, DocTemplate::Host& h, std::string&
                 break;
             case Kind::Elem: {
                 flush(buf, count, pending);
-                buf += char(dom::NodeType::Element);
-                put_uv(buf, it.name);
-                put_uv(buf, it.attrs.size());
-                std::string value;
+                buf += it.head;
                 for (const auto& a : it.attrs) {
-                    put_uv(buf, a.name);
-                    if (!a.dynamic) {
-                        put_str(buf, a.parts.empty() ? std::string() : a.parts[0].lit);
-                    } else {
-                        value.clear();
-                        if (!assemble(a.parts, h, value)) return false;
-                        put_str(buf, value);
+                    buf += a.enc;
+                    if (a.dynamic) {
+                        const size_t len_at = reserve_count(buf);
+                        const size_t start = buf.size();
+                        if (!assemble(a.parts, h, buf)) return false;
+                        patch_count(buf, len_at, uint32_t(buf.size() - start));
                     }
                 }
                 const size_t at = reserve_count(buf);
@@ -518,7 +522,7 @@ std::unique_ptr<DocTemplate> DocTemplate::build(const dom::Node& skeleton, const
 }
 
 bool DocTemplate::render(Host& host, std::string& out) const {
-    out = prologue_;
+    out += prologue_;
     out += char(dom::NodeType::Document);
     const size_t at = reserve_count(out);
     uint32_t count = 0;

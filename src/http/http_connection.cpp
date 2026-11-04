@@ -26,7 +26,8 @@ namespace lux::http {
 HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
                                lux::DispatchFn dispatch,
                                std::shared_ptr<std::atomic<int>> conn_count,
-                               std::shared_ptr<std::atomic<int>> loop_count)
+                               std::shared_ptr<std::atomic<int>> loop_count,
+                               std::string peer_ip)
     : fd_(fd)
     , loop_(loop)
     , dispatch_(std::move(dispatch))
@@ -34,6 +35,8 @@ HttpConnection::HttpConnection(int fd, core::EventLoop& loop,
     , loop_count_(std::move(loop_count))
     , parser_([this](ParsedRequest req) { this->dispatch(std::move(req)); },
               [this]() { this->on_headers_complete(); })
+    , peer_ip_(std::move(peer_ip))
+    , peer_ip_done_(!peer_ip_.empty())
 {}
 
 void HttpConnection::start() {
@@ -367,15 +370,7 @@ void HttpConnection::dispatch(ParsedRequest req_parsed) {
     if (!peer_ip_done_ &&
         ::getpeername(fd_, reinterpret_cast<sockaddr*>(&ss), &sslen) == 0) {
         peer_ip_done_ = true;
-        char ipbuf[INET6_ADDRSTRLEN]{};
-        if (ss.ss_family == AF_INET) {
-            inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&ss)->sin_addr,
-                      ipbuf, sizeof(ipbuf));
-        } else if (ss.ss_family == AF_INET6) {
-            inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&ss)->sin6_addr,
-                      ipbuf, sizeof(ipbuf));
-        }
-        peer_ip_ = ipbuf;
+        peer_ip_ = peer_ip_of(ss);
     }
     req_ptr->remote_ip = peer_ip_;
 
@@ -605,6 +600,19 @@ void HttpConnection::finish_dispatch(lux::Request& request,
     // A big body goes out with the head (writev) from where it is, not
     // copied behind it first; a small one is cheaper to copy than to split.
     std::string built = response.build_head();
+    if (file_fd_ >= 0 && file_remaining_ <= 16384) {
+        // A small file goes out with its head in one send: head + sendfile(2) is two
+        // syscalls and two segments for a few KB.
+        const size_t head = built.size(), want = file_remaining_;
+        built.resize(head + want);
+        if (plat::pread(file_fd_, built.data() + head, want, file_offset_) == static_cast<ssize_t>(want)) {
+            ::close(file_fd_);
+            file_fd_ = -1; file_offset_ = 0; file_remaining_ = 0;
+            send_response(std::move(built));
+            return;
+        }
+        built.resize(head);   // the file shrank under us: the sendfile path deals with it
+    }
     if (request.method != "HEAD" && response.sendfile_path().empty()) {
         if (response.body().size() < 16384) {
             built += response.body();
@@ -800,7 +808,7 @@ void HttpConnection::do_sendfile() {
     if (ssl_ && BIO_get_ktls_send(SSL_get_wbio(ssl_))) {
         while (file_remaining_ > 0) {
             ssize_t n = tls_ret(static_cast<int>(SSL_sendfile(ssl_, file_fd_, file_offset_,
-                                    std::min(file_remaining_, size_t{256 * 1024}), 0)), false);
+                                    std::min(file_remaining_, size_t{1024 * 1024}), 0)), false);
             if (n < 0) {
                 if (errno == EAGAIN) { arm(EPOLLOUT); return; }
                 close(); return;
@@ -830,7 +838,7 @@ void HttpConnection::do_sendfile() {
     // Zero-copy kernel transfer, plaintext only.
     while (file_remaining_ > 0) {
         ssize_t n = plat::sendfile(fd_, file_fd_, &file_offset_,
-                               std::min(file_remaining_, size_t{256 * 1024}));
+                               std::min(file_remaining_, size_t{1024 * 1024}));
         if (n < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 arm(EPOLLOUT); // socket buffer full — resume when drains

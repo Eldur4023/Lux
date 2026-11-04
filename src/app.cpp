@@ -38,6 +38,9 @@
 #endif
 
 #include <lux/mime.hpp>
+#include <lux/http_cache.hpp>
+#include <list>
+#include <unordered_map>
 
 namespace lux {
 
@@ -145,28 +148,31 @@ static int root_fd_for(const App::StaticMount& m) {
 
 #endif // !_WIN32
 
-// Cache-Control, Content-Type, ETag and the 304, then the file itself.
-// `fd`, if not -1, is the file already open, and is taken over.
-static void send_static(const Request& req, Response& res, std::string file,
-                        const std::string& etag, std::uintmax_t filesize, int fd = -1) {
-    // Hashed filenames (e.g. app.abc123ef.js) → immutable for 1 year.
-    // Detects a hash segment: last component after '.' or '-' is ≥8 hex chars.
-    // Everything else → must-revalidate with short max-age.
+// A hashed asset name (app.abc123ef.js): the last '.'/'-' segment is >= 8 hex digits
+// with at least one a-f (report-20261104.css is a date, not a hash).
+static bool is_hex_hash(std::string_view s) {
+    const auto pos = s.find_last_of(".-");
+    if (pos == std::string_view::npos) return false;
+    const auto seg = s.substr(pos + 1);
+    if (seg.size() < 8) return false;
+    bool letter = false;
+    for (unsigned char c : seg) {
+        if (!std::isxdigit(c)) return false;
+        letter |= std::isalpha(c) != 0;
+    }
+    return letter;
+}
+
+// Content-Type and Cache-Control of the static file `full` (a path).
+// Hashed filenames (e.g. app.abc123ef.js) → immutable for 1 year.
+// Everything else → must-revalidate with short max-age.
+static void static_class(const std::string& full, std::string& ct, const char*& cache_ctrl) {
     // Name, extension and stem by hand: std::filesystem split the whole
     // path into components for each.
-    const std::string& full = file;
     const std::string_view name = std::string_view(full).substr(full.rfind('/') + 1);
     const size_t dot = name.rfind('.');
     const std::string_view ext  = dot == std::string_view::npos || dot == 0 ? std::string_view() : name.substr(dot);
-    const std::string stem(name.substr(0, name.size() - ext.size()));
-    auto is_hex_hash = [](const std::string& s) -> bool {
-        auto pos = s.find_last_of(".-");
-        if (pos == std::string::npos) return false;
-        const auto seg = s.substr(pos + 1);
-        if (seg.size() < 8) return false;
-        return std::all_of(seg.begin(), seg.end(),
-                           [](unsigned char c){ return std::isxdigit(c); });
-    };
+    const std::string_view stem = name.substr(0, name.size() - ext.size());
     // An index.html — whether requested directly, served for a bare
     // directory, or reached through the `spa` fallback — is the one
     // static file whose CONTENT changes on every deploy without its
@@ -180,28 +186,184 @@ static void send_static(const Request& req, Response& res, std::string file,
     // revalidation below on every load instead of skipping it for
     // max-age) costs one cheap 304 round trip per navigation, not a
     // full re-download.
-    const char* cache_ctrl = name == "index.html"
+    cache_ctrl = name == "index.html"
         ? "no-cache"
         : is_hex_hash(stem)
             ? "public, max-age=31536000, immutable"
             : "public, max-age=3600, must-revalidate";
-
-    res.header("ETag",          etag);
-    res.header("Cache-Control", cache_ctrl);
-    res.header("Content-Type",  mime_for_ext(ext));  // lux/mime.hpp
-
-    // ── 304 Not Modified ──────────────────────────────────────────────────
-    auto inm = req.header("if-none-match");
-    if (inm && *inm == etag) {
-        if (fd >= 0) ::close(fd);
-        res.status(304).send("");
-        return;
-    }
-
-    // ── Serve via sendfile(2) — zero-copy ─────────────────────────────────
-    if (fd >= 0) res.send_file_fd(fd, std::move(file), filesize);
-    else         res.send_file(file, filesize);
+    ct = mime_for_ext(ext);   // lux/mime.hpp
 }
+
+// The validators of one representation of a static file.
+struct StaticMeta { std::string etag, last_modified; std::time_t mtime = 0; };
+
+// Does an Accept-Encoding value list `tok` with a non-zero q?
+static bool accepts_encoding(std::string_view ae, std::string_view tok) {
+    auto trim = [](std::string_view t) {
+        while (!t.empty() && (t.front() == ' ' || t.front() == '\t')) t.remove_prefix(1);
+        while (!t.empty() && (t.back()  == ' ' || t.back()  == '\t')) t.remove_suffix(1);
+        return t;
+    };
+    while (!ae.empty()) {
+        const size_t comma = ae.find(',');
+        std::string_view item = ae.substr(0, comma);
+        ae = comma == std::string_view::npos ? std::string_view() : ae.substr(comma + 1);
+        const size_t semi = item.find(';');
+        const std::string_view name = trim(item.substr(0, semi));
+        if (name.size() != tok.size() ||
+            !std::equal(name.begin(), name.end(), tok.begin(),
+                        [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; })) continue;
+        if (semi == std::string_view::npos) return true;
+        const std::string_view q = trim(item.substr(semi + 1));
+        return !(q.size() > 1 && (q[0] == 'q' || q[0] == 'Q') && q.find_first_of("123456789") == std::string_view::npos);
+    }
+    return false;
+}
+
+// ETag, Cache-Control, Content-Type, Last-Modified (and Content-Encoding / Vary) of a static
+// response; true if the request's validators make it a 304 (already answered).
+static bool static_headers(const Request& req, Response& res, const std::string& ct, const char* cc,
+                           const StaticMeta& meta, const char* encoding, bool vary) {
+    res.header("ETag",          meta.etag);
+    res.header("Cache-Control", cc);
+    res.header("Content-Type",  ct);
+    res.header("Last-Modified", meta.last_modified);
+    if (encoding) res.header("Content-Encoding", encoding);
+    if (vary)     res.header("Vary", "Accept-Encoding");
+
+    // RFC 9110 §13.1.3: If-Modified-Since is only looked at without an If-None-Match.
+    bool fresh = false;
+    if (auto inm = req.header("if-none-match")) fresh = etag_listed(*inm, meta.etag);
+    else if (auto ims = req.header("if-modified-since")) {
+        std::time_t t = 0;
+        fresh = parse_http_date(*ims, t) && meta.mtime <= t;
+    }
+    if (fresh) res.status(304).send("");
+    return fresh;
+}
+
+// The portable path (no openat2): the file by its path.
+static void send_static(const Request& req, Response& res, std::string file,
+                        const std::filesystem::file_time_type& mtime, std::uintmax_t filesize) {
+    std::string ct; const char* cc;
+    static_class(file, ct, cc);
+    const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::file_clock::to_sys(mtime));
+    if (static_headers(req, res, ct, cc, {make_etag(mtime, filesize), http_date(t), t}, nullptr, false)) return;
+    res.send_file(file, filesize);   // zero-copy: sendfile(2)
+}
+
+#ifndef _WIN32
+
+// Files this small are kept in memory, per thread: a hit is one hash lookup (and, once a second,
+// a few fstatat) instead of openat2 + fstat + the file read/sendfile.
+constexpr size_t kSmallFile = 64 * 1024, kSmallCacheCap = 16u << 20;
+
+// What identifies a file's content for the cache: a change in any of it drops the entry.
+struct FileSig {
+    dev_t dev; ino_t ino; time_t sec; long nsec; off_t size;
+    explicit FileSig(const struct stat& st = {}) : dev(st.st_dev), ino(st.st_ino), sec(st.st_mtim.tv_sec),
+                                                   nsec(st.st_mtim.tv_nsec), size(st.st_size) {}
+    bool operator==(const FileSig& o) const {
+        return dev == o.dev && ino == o.ino && sec == o.sec && nsec == o.nsec && size == o.size;
+    }
+};
+
+constexpr const char* kSuffix[3]   = {"", ".br", ".gz"};          // identity, brotli, gzip
+constexpr const char* kEncoding[3] = {nullptr, "br", "gzip"};
+
+struct SmallEntry {
+    std::string key;                       // mount root + resolved path under it
+    std::string body[3];
+    StaticMeta  meta[3];
+    FileSig     sig[3];
+    bool        has[3] = {true, false, false};   // which variants exist (precompressed .br / .gz)
+    std::string ct, cc;
+    std::chrono::steady_clock::time_point checked_at;
+    size_t      bytes = 0;
+};
+
+class SmallCache {
+public:
+    SmallEntry* find(const std::string& key) {
+        const auto it = map_.find(key);
+        if (it == map_.end()) return nullptr;
+        lru_.splice(lru_.begin(), lru_, it->second);
+        return &*it->second;
+    }
+    void erase(const std::string& key) {
+        const auto it = map_.find(key);
+        if (it == map_.end()) return;
+        bytes_ -= it->second->bytes;
+        lru_.erase(it->second);
+        map_.erase(it);
+    }
+    void put(SmallEntry e) {
+        erase(e.key);
+        bytes_ += e.bytes;
+        lru_.push_front(std::move(e));
+        map_[lru_.front().key] = lru_.begin();
+        while (bytes_ > kSmallCacheCap && lru_.size() > 1) erase(std::string(lru_.back().key));
+    }
+private:
+    std::list<SmallEntry> lru_;   // most recently used first
+    std::unordered_map<std::string, std::list<SmallEntry>::iterator> map_;
+    size_t bytes_ = 0;
+};
+
+// Only plain relative names are cached: "a/../index.html" or "x//y" would be aliases of
+// one file, and the cache must not grow with URLs.
+static bool plain_rel(std::string_view f) {
+    while (!f.empty()) {
+        const size_t slash = f.find('/');
+        const auto part = f.substr(0, slash);
+        if (part.empty() || part == "." || part == "..") return false;
+        f = slash == std::string_view::npos ? std::string_view() : f.substr(slash + 1);
+    }
+    return true;
+}
+
+static std::filesystem::file_time_type file_time_of(const struct stat& st) {
+    return std::chrono::file_clock::from_sys(
+        std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(
+            std::chrono::seconds(st.st_mtim.tv_sec) + std::chrono::nanoseconds(st.st_mtim.tv_nsec))));
+}
+
+// The validators of file variant `i` (0 = the file, 1 = its .br, 2 = its .gz).
+static StaticMeta meta_of(const struct stat& st, int i) {
+    StaticMeta sm{make_etag(file_time_of(st), static_cast<std::uintmax_t>(st.st_size)),
+                  http_date(st.st_mtim.tv_sec), st.st_mtim.tv_sec};
+    if (i) { sm.etag.pop_back(); sm.etag += i == 1 ? "-br\"" : "-gz\""; }
+    return sm;
+}
+
+// Answers from the cache; false on a miss (or an entry the disk no longer matches).
+static bool serve_small(SmallCache& cache, int root_fd, const std::string& key, const std::string& file,
+                        const Request& req, Response& res) {
+    SmallEntry* e = cache.find(key);
+    if (!e) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - e->checked_at >= std::chrono::seconds(1)) {
+        // At most once a second per entry, as root_fd_for does for the root: the file and its
+        // variants must be the very ones the entry was made from, and absent ones still absent.
+        for (int i = 0; i < 3; ++i) {
+            struct stat st{};
+            const bool exists = ::fstatat(root_fd, (file + kSuffix[i]).c_str(), &st, 0) == 0;
+            if (exists != e->has[i] || (exists && !(FileSig(st) == e->sig[i]))) { cache.erase(key); return false; }
+        }
+        e->checked_at = now;
+    }
+    int pick = 0;
+    if (const std::string* ae = req.header("accept-encoding")) {
+        if (e->has[1] && accepts_encoding(*ae, "br")) pick = 1;
+        else if (e->has[2] && accepts_encoding(*ae, "gzip")) pick = 2;
+    }
+    if (static_headers(req, res, e->ct, e->cc.c_str(), e->meta[pick], kEncoding[pick], e->has[1] || e->has[2])) return true;
+    res.header("Accept-Ranges", pick ? "none" : "bytes");
+    res.send(e->body[pick]);
+    return true;
+}
+
+#endif // !_WIN32
 
 // Serves `req` from mount `m`: the file, a 304, or the error.
 // Sets ETag, Cache-Control, and honours If-None-Match for 304 responses.
@@ -244,6 +406,14 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
             struct stat st{};
             int fd = -1;
             std::string file = rel.substr(1);
+            // A Range request is the connection's business (sendfile + offsets): no cache.
+            const bool ranged = req.header("range") != nullptr;
+            thread_local SmallCache cache;
+            if (!ranged) {
+                // Cached under the resolved name: a directory's is its index.html.
+                std::string cfile = file.empty() || file.back() == '/' ? file + "index.html" : file;
+                if (serve_small(cache, root_fd, m.root + '/' + cfile, cfile, req, res)) return;
+            }
             int r;
             if (file.empty() || file.back() == '/') {
                 // A directory by definition (the mount root, "docs/"): straight to
@@ -274,11 +444,84 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
                 file = "index.html";
             }
             if (r == 0) {
-                const auto mtime = std::chrono::file_clock::from_sys(
-                    std::chrono::system_clock::time_point(std::chrono::duration_cast<std::chrono::system_clock::duration>(
-                        std::chrono::seconds(st.st_mtim.tv_sec) + std::chrono::nanoseconds(st.st_mtim.tv_nsec))));
                 const auto size = static_cast<std::uintmax_t>(st.st_size);
-                return send_static(req, res, m.root + '/' + file, make_etag(mtime, size), size, fd);
+                std::string ct; const char* cc;
+                static_class(file, ct, cc);
+
+                // Precompressed variants (app.js.br, app.js.gz), if no older than the file.
+                struct Alt { int fd = -1; struct stat st{}; bool ok = false; } alt[3];
+                auto open_alt = [&](int i) {
+                    Alt& a = alt[i];
+                    if (open_beneath(root_fd, file + kSuffix[i], a.st, a.fd) == 0 && S_ISREG(a.st.st_mode) &&
+                        FileSig(a.st).sec * 1000000000LL + FileSig(a.st).nsec >= FileSig(st).sec * 1000000000LL + FileSig(st).nsec)
+                        a.ok = true;
+                    else if (a.fd >= 0) { ::close(a.fd); a.fd = -1; }
+                };
+                const std::string* ae = ranged ? nullptr : req.header("accept-encoding");
+                bool cache_it = !ranged && size <= kSmallFile && plain_rel(file);
+                if (cache_it) { open_alt(1); open_alt(2); }   // the entry records them all
+                else if (ae) {
+                    // A big file without variants is asked again on every request: remember the
+                    // answer for a second instead of failing two openat2 each time.
+                    thread_local std::unordered_map<std::string, std::chrono::steady_clock::time_point> no_variant;
+                    const auto now = std::chrono::steady_clock::now();
+                    const std::string vkey = m.root + '/' + file;
+                    const auto nv = no_variant.find(vkey);
+                    if (nv == no_variant.end() || now - nv->second >= std::chrono::seconds(1)) {
+                        if (accepts_encoding(*ae, "br")) open_alt(1);
+                        if (!alt[1].ok && accepts_encoding(*ae, "gzip")) open_alt(2);
+                        if (!alt[1].ok && !alt[2].ok) {
+                            if (no_variant.size() >= 1024) no_variant.clear();
+                            no_variant[vkey] = now;
+                        } else if (nv != no_variant.end()) no_variant.erase(vkey);
+                    }
+                }
+                int pick = 0;
+                if (ae) {
+                    if (alt[1].ok && accepts_encoding(*ae, "br")) pick = 1;
+                    else if (alt[2].ok && accepts_encoding(*ae, "gzip")) pick = 2;
+                }
+                auto stat_of = [&](int i) -> const struct stat& { return i ? alt[i].st : st; };
+                auto fd_of   = [&](int i) -> int& { return i ? alt[i].fd : fd; };
+                auto close_all = [&](int keep) {
+                    for (int i = 0; i < 3; ++i) if (i != keep && fd_of(i) >= 0) { ::close(fd_of(i)); fd_of(i) = -1; }
+                };
+
+                if (cache_it) {
+                    SmallEntry e;
+                    e.key = m.root + '/' + file;
+                    for (int i = 0; i < 3 && cache_it; ++i) {
+                        if (i && !alt[i].ok) continue;
+                        const auto n = static_cast<size_t>(stat_of(i).st_size);
+                        e.body[i].resize(n);
+                        cache_it = n <= kSmallFile && ::pread(fd_of(i), e.body[i].data(), n, 0) == static_cast<ssize_t>(n);
+                        e.has[i] = true;
+                        e.meta[i] = meta_of(stat_of(i), i);
+                        e.sig[i] = FileSig(stat_of(i));
+                        e.bytes += n;
+                    }
+                    if (cache_it) {
+                        e.ct = ct; e.cc = cc;
+                        e.checked_at = std::chrono::steady_clock::now();
+                        e.bytes += e.key.size() + 512;
+                        close_all(-1);
+                        const std::string key = e.key;
+                        cache.put(std::move(e));
+                        serve_small(cache, root_fd, key, file, req, res);
+                        return;
+                    }
+                }
+
+                const bool vary = alt[1].ok || alt[2].ok;
+                if (static_headers(req, res, ct, cc, meta_of(stat_of(pick), pick), kEncoding[pick], vary)) {
+                    close_all(-1);
+                    return;
+                }
+                const int sfd = std::exchange(fd_of(pick), -1);
+                close_all(-1);
+                res.send_file_fd(sfd, m.root + '/' + file + kSuffix[pick], static_cast<std::uintmax_t>(stat_of(pick).st_size));
+                if (pick) res.header("Accept-Ranges", "none");   // the bytes are the encoded ones
+                return;
             }
             // r == -1: no openat2, resolved the portable way below.
         }
@@ -349,7 +592,7 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
         auto filesize = fs::file_size(canonical_file, size_ec);
         if (mtime_ec || size_ec) return fail(500, R"({"error":"Cannot stat file"})");
         // '/'-separated UTF-8-ish string on both: send_static() splits the name on '/'.
-        send_static(req, res, canonical_file.generic_string(), make_etag(mtime, filesize), filesize);
+        send_static(req, res, canonical_file.generic_string(), mtime, filesize);
     }
 }
 

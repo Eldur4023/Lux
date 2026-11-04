@@ -77,7 +77,7 @@ private:
     bool stopping_ = false;
 
     void on_accept();
-    void adopt(int client_fd);
+    void adopt(int client_fd, std::string peer_ip);
     void register_listen_fd();
 };
 

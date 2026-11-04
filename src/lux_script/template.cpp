@@ -161,8 +161,39 @@ private:
         return &names.emplace_back(f);
     }
 
+    // Where the literal text so far leaves the output: outside a <script>, inside its opening tag
+    // (attributes: a {{ }} there is escaped as HTML), or in its body (escaped as a LuxScript/JS string).
+    enum class ScriptState : uint8_t { Outside, Tag, Body };
+    ScriptState script_ = ScriptState::Outside;
+    char        quote_  = 0;   // open attribute quote inside the tag
+
+    void track_script(const std::string& t) {
+        auto at = [&](size_t i, std::string_view word) {
+            if (i + word.size() > t.size()) return false;
+            for (size_t k = 0; k < word.size(); ++k)
+                if (std::tolower(static_cast<unsigned char>(t[i + k])) != word[k]) return false;
+            return true;
+        };
+        for (size_t i = 0; i < t.size(); ++i) {
+            switch (script_) {
+                case ScriptState::Outside:
+                    if (t[i] == '<' && at(i, "<script")) { script_ = ScriptState::Tag; quote_ = 0; i += 6; }
+                    break;
+                case ScriptState::Tag:
+                    if (quote_)                           { if (t[i] == quote_) quote_ = 0; }
+                    else if (t[i] == '"' || t[i] == '\'') quote_ = t[i];
+                    else if (t[i] == '>')                 script_ = ScriptState::Body;
+                    break;
+                case ScriptState::Body:
+                    if (t[i] == '<' && at(i, "</script")) { script_ = ScriptState::Outside; i += 7; }
+                    break;
+            }
+        }
+    }
+
     size_t text(std::string t) {
         if (t.empty()) return SIZE_MAX;
+        track_script(t);
         out_.texts.push_back(std::move(t));
         out_.code.push_back({Template::Op::Text,
                              static_cast<uint32_t>(out_.texts.size() - 1), 0, 0, 0, {}});
@@ -358,9 +389,10 @@ void Compiler::body(const std::string& src, const std::string& file,
             }
             size_t k = expression(content, loc, file);
             if (k == SIZE_MAX) continue;
+            // b = 1: inside a <script> body, where the value is a string's content (see write_template_script)
             out_.code.push_back({raw ? Template::Op::WriteRaw
                                        : Template::Op::Write,
-                                 static_cast<uint32_t>(k), 0, 0, 0, loc});
+                                 static_cast<uint32_t>(k), !raw && script_ == ScriptState::Body ? 1u : 0u, 0, 0, loc});
             continue;
         }
 
@@ -569,6 +601,37 @@ void write_template_value(const Value& v, bool escape, std::string& out) {
     }
 }
 
+// A {{ }} inside a <script> body sits between quotes of a LuxScript (or JS) string: HTML escaping
+// does not protect that, a backslash or a line break ends the literal. So: \ " and the
+// whitespace controls as escapes, and & < > ' as entities, as everywhere else -- LuxScript
+// strings have no \u escape, and a raw "</script" would end the script.
+void write_template_script(const Value& v, std::string& out) {
+    if (v.is_int()) { write_template_value(v, false, out); return; }
+    const std::string text = v.is_str() ? std::string() : v.to_string();
+    const std::string& in = v.is_str() ? v.as_str() : text;
+    size_t clean = 0;
+    for (size_t i = 0; i < in.size(); ++i) {
+        const char* rep = nullptr;
+        switch (in[i]) {
+            case '\\': rep = "\\\\"; break;
+            case '"':  rep = "\\\"";  break;
+            case '\n': rep = "\\n";   break;
+            case '\r': rep = "\\r";   break;
+            case '\t': rep = "\\t";   break;
+            case '\0': rep = "\\0";   break;
+            case '&':  rep = "&amp;"; break;
+            case '<':  rep = "&lt;";  break;
+            case '>':  rep = "&gt;";  break;
+            case '\'': rep = "&#39;"; break;
+            default: continue;
+        }
+        out.append(in, clean, i - clean);
+        out += rep;
+        clean = i + 1;
+    }
+    out.append(in, clean, std::string::npos);
+}
+
 Value template_loop_value(size_t i, size_t n) {
     Value::Dict d;
     d.reserve(5);
@@ -669,7 +732,7 @@ bool render_template(const Template& p, std::vector<Value> values,
                 Value tmp;
                 const Value* v = evaluate(in.a, tmp);
                 if (!v) return false;
-                write_template_value(*v, true, out);
+                if (in.b) write_template_script(*v, out); else write_template_value(*v, true, out);
                 ++pc;
                 break;
             }

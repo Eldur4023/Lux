@@ -1,3 +1,4 @@
+#include <cstring>
 #include "html/tokenizer.hpp"
 
 #include <algorithm>
@@ -82,11 +83,20 @@ bool is_ws(char c) {
 }
 std::string lower(std::string_view s) {
     std::string out(s);
-    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : out) if (c >= 'A' && c <= 'Z') c = char(c | 0x20);
     return out;
 }
 int count_lines(std::string_view s) {
-    return static_cast<int>(std::count(s.begin(), s.end(), '\n'));
+    // byte accumulators: GCC vectorizes this ~10x better than std::count
+    size_t n = 0, i = 0;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
+    while (i < s.size()) {
+        const size_t e = std::min(s.size(), i + 255);
+        unsigned char c = 0;
+        for (; i < e; ++i) c += p[i] == '\n';
+        n += c;
+    }
+    return static_cast<int>(n);
 }
 
 constexpr size_t kNpos = std::string_view::npos;
@@ -94,12 +104,15 @@ constexpr size_t kNpos = std::string_view::npos;
 // Case-insensitive find of `needle` starting at `from`.
 size_t ifind(std::string_view s, size_t from, std::string_view needle) {
     if (needle.empty() || s.size() < needle.size()) return kNpos;
-    for (size_t i = from; i + needle.size() <= s.size(); ++i) {
-        size_t j = 0;
-        while (j < needle.size() &&
-               std::tolower(static_cast<unsigned char>(s[i + j])) ==
-                   std::tolower(static_cast<unsigned char>(needle[j])))
-            ++j;
+    auto low = [](unsigned char c) { return (c >= 'A' && c <= 'Z') ? char(c | 0x20) : char(c); };
+    const char first = needle[0];   // '<': no case
+    const size_t last = s.size() - needle.size();
+    for (size_t i = from; i <= last; ++i) {
+        const void* p = std::memchr(s.data() + i, first, last - i + 1);
+        if (!p) return kNpos;
+        i = size_t(static_cast<const char*>(p) - s.data());
+        size_t j = 1;
+        while (j < needle.size() && low(static_cast<unsigned char>(s[i + j])) == low(static_cast<unsigned char>(needle[j]))) ++j;
         if (j == needle.size()) return i;
     }
     return kNpos;

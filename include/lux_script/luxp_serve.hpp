@@ -90,7 +90,7 @@ enum class LuxpOutcome {
 // Answers a request that wants a .luxp from the template's plan.  `slots` are
 // the template's data in the order of Template::names (what render_template
 // takes).
-LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, const std::vector<Value>& slots);
+LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& slots);   // the loops write their variables into `slots`
 LuxpOutcome luxp_respond_slots(NativeCtx& ctx, size_t template_index, const Value* slots, size_t n);
 
 // lux pack: entry_html, every local page it links to and the resources they

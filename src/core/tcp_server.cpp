@@ -241,19 +241,19 @@ void TcpServer::on_accept() {
                 if (int n = s->live_->load(std::memory_order_relaxed); n < least) { least = n; to = s; }
             to->live_->fetch_add(1, std::memory_order_relaxed);
             if (to != this) {
-                to->loop_.post([to, client_fd] { to->adopt(client_fd); });
+                to->loop_.post([to, client_fd, ip = http::peer_ip_of(addr)]() mutable { to->adopt(client_fd, std::move(ip)); });
                 continue;
             }
         } else {
             live_->fetch_add(1, std::memory_order_relaxed);
         }
-        adopt(client_fd);
+        adopt(client_fd, http::peer_ip_of(addr));
     }
 }
 
-void TcpServer::adopt(int client_fd) {
+void TcpServer::adopt(int client_fd, std::string peer_ip) {
     auto conn = std::make_shared<http::HttpConnection>(
-        client_fd, loop_, dispatch_, conn_count_, live_);
+        client_fd, loop_, dispatch_, conn_count_, live_, std::move(peer_ip));
 
     conn->start();
 

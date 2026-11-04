@@ -24,7 +24,7 @@ struct SheetData {
 // *relative_used: some URL was relative to the page (its answer depends on
 // the path it is served from).
 std::shared_ptr<const SheetData> build_sheet(luxium::dom::Node& doc, const std::string& url_path,
-                                             bool* relative_used = nullptr);
+                                             bool* relative_used = nullptr, int deflate_level = 9);
 
 // Has any file the sheet came from changed on disk?
 bool sheet_stale(const SheetData& s);

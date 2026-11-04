@@ -46,8 +46,9 @@ struct Blob {
     bool        zlib = false;
 };
 Blob blob_plain(std::string bytes);
-// zlib level 9 when this build has zlib and it helps; plain otherwise.
-Blob blob_deflate(const std::string& bytes);
+// zlib (level 9: for what is compressed once and kept; 1 for what is rebuilt per script)
+// when this build has zlib and it helps; plain otherwise.
+Blob blob_deflate(const std::string& bytes, int level = 9);
 bool blob_inflate(const Blob& b, std::string& out, std::string* err);
 
 // The three sections of a page, plain.
@@ -72,6 +73,11 @@ std::string encode_container(const std::vector<WirePage>& pages, const Resources
 // A container of one page and no resources, assembled straight from blobs the
 // caller already holds: what a server answers per request.
 std::string encode_single_page(const std::string& name, const Blob& document, const Blob& sheet, const Blob& program);
+// The same container written in place, for a document that is rendered straight into the
+// response: begin_single_page() starts `out` (empty) and returns where the document goes;
+// the caller appends it there; finish_single_page() fixes its length and adds the sections.
+size_t begin_single_page(std::string& out, const std::string& name);
+void   finish_single_page(std::string& out, size_t document_at, const Blob& sheet, const Blob& program);
 // Everything compressed (blob_deflate): for a file written once.
 std::string encode_container(const Container& c);
 // Well-formedness, and every section inflated to plain bytes; each section is

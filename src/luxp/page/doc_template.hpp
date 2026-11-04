@@ -67,7 +67,7 @@ public:
     static std::unique_ptr<DocTemplate> build(const dom::Node& skeleton, const std::string& skeleton_html,
                                               std::string* why_not);
 
-    // Writes the document section (what encode_document() writes) into `out`.
+    // Appends the document section (what encode_document() writes) to `out`.
     // false if the host failed (its error is its own).
     bool render(Host& host, std::string& out) const;
 

@@ -4371,6 +4371,10 @@ std::string generate_native_template(const Template& t, const std::string& fnkey
                 // {{ it.field }} of a record row: written from the struct,
                 // as lux_tpl_write would write that value.
                 const bool esc = in.op == Template::Op::Write;
+                if (esc && in.b) {   // inside a <script> body: no fast path, the same bytes as the interpreter
+                    body += eval(in.a) + "    lux_tpl_write_script(*v, out);\n";
+                    break;
+                }
                 std::string fast;
                 for (const auto& [lpc, L] : rec_open) {
                     const auto f = campo(t.exprs[in.a], t.code[lpc].slot);
@@ -5134,6 +5138,9 @@ std::string route_runtime_prelude() {
         "    }\n"
         "    std::string done() { s.resize(w - s.data()); return std::move(s); }\n"
         "};\n"
+        "inline void lux_tpl_write_script(const Value& v, LuxOut& out) {\n"
+        "    std::string t; lux_script::write_template_script(v, t); out.lit(t.data(), t.size());\n"
+        "}\n"
         "inline void lux_tpl_write(const Value& v, bool escape, LuxOut& out) {\n"
         "    if (v.is_str()) { if (escape) out.esc(v.as_str()); else out.lit(v.as_str().data(), v.as_str().size()); }\n"
         "    else if (v.is_int()) out.num(v.as_int());\n"

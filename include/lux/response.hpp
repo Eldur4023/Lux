@@ -11,6 +11,10 @@
 #include <cctype>
 #include <cstring>
 #include <lux/platform.hpp>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#endif
 #include <cerrno>
 #include <iostream>
 #include <utility>
@@ -204,11 +208,33 @@ public:
         for (const auto& comp : path) {
             if (comp == "..") return fail(403, "Forbidden");
         }
+#ifndef _WIN32
+        struct stat st{};
+        return send_file_stat(path, st);
+#else
         std::error_code ec;
         auto sz = std::filesystem::file_size(path, ec);
         if (ec) { state_->status_code = 500; state_->body = "Cannot stat file"; return *this; }
         return send_file(path, sz);
+#endif
     }
+
+#ifndef _WIN32
+    // send_file() with one open + fstat: the connection sends that fd instead of
+    // opening the path again, and the caller gets the stat (ETag, size) for free.
+    // A missing file is a 404, not a 500.
+    Response& send_file_stat(const std::filesystem::path& path, struct stat& st) {
+        for (const auto& comp : path) {
+            if (comp == "..") return fail(403, "Forbidden");
+        }
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0) return errno == EACCES ? fail(403, "Forbidden") : fail(404, "Not Found");
+        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) { ::close(fd); return fail(404, "Not Found"); }
+        if (!has_header_ci(state_->headers, "Content-Type"))
+            header("Content-Type", mime_for_ext(path.extension().string()));
+        return send_file_fd(fd, path.string(), static_cast<std::uintmax_t>(st.st_size));
+    }
+#endif
 
     // Overload for callers that already have the file size — skips the extra stat(2).
     // Advertises Range support up front, on the FIRST (non-ranged) response
@@ -262,7 +288,11 @@ public:
     //   res.serve_file_from("./uploads", req.param("name").value_or(""));
     //
     Response& serve_file_from(const std::filesystem::path& root,
-                               const std::filesystem::path& user_path) {
+                               const std::filesystem::path& user_path
+#ifndef _WIN32
+                               , struct stat* st_out = nullptr   // filled when the file is sent
+#endif
+                               ) {
         namespace fs = std::filesystem;
         std::error_code ec;
         // canonical() resolves ALL symlinks (unlike weakly_canonical), which
@@ -277,7 +307,12 @@ public:
         auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
                                        canonical_file.begin(), canonical_file.end());
         if (ri != canonical_root.end()) return fail(403, "Forbidden");
+#ifndef _WIN32
+        struct stat local{};
+        return send_file_stat(canonical_file, st_out ? *st_out : local);
+#else
         return send_file(canonical_file);
+#endif
     }
 
     // ── Framework-internal ───────────────────────────────────────────────────
@@ -333,9 +368,13 @@ public:
         std::string out;
         out.reserve(256);
         append_status_line(out);
-        out += "Content-Length: ";
-        out += std::to_string(clen);
-        out += "\r\n";
+        // 1xx, 204 and 304 carry no body, and RFC 9110 forbids a Content-Length on the first two.
+        const int sc = state_->status_code;
+        if (sc >= 200 && sc != 204 && sc != 304) {
+            out += "Content-Length: ";
+            out += std::to_string(clen);
+            out += "\r\n";
+        }
         emit_headers(out);
         out += "\r\n";
         return out;

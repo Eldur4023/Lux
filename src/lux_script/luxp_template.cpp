@@ -65,6 +65,7 @@ bool skeleton_range(const Template& t, size_t b, size_t e, std::string& out, int
                 ++pc;
                 break;
             case Template::Op::Write:
+                if (in.b) return false;   // inside a <script> body: the program would differ per request
                 out += luxium::page::template_marker('H', in.a);
                 ++pc;
                 break;
@@ -119,9 +120,10 @@ bool skeleton_range(const Template& t, size_t b, size_t e, std::string& out, int
 
 class TplHost final : public DocTemplate::Host {
 public:
-    TplHost(const Template& t, const std::vector<Value>& slots, NativeCtx& ctx)
+    // Works on the caller's slots (the loops write their variables into them): no copy.
+    TplHost(const Template& t, std::vector<Value>& slots, NativeCtx& ctx)
         : t_(t), ctx_(ctx), values_(slots) {
-        values_.resize(t.names.size());
+        if (values_.size() < t.names.size()) values_.resize(t.names.size());
     }
 
     bool hole(uint32_t id, std::string& out) override {
@@ -195,7 +197,7 @@ private:
 
     const Template&    t_;
     NativeCtx&         ctx_;
-    std::vector<Value> values_;
+    std::vector<Value>& values_;
     std::vector<Value> lists_;   // each running loop's list, alive for as long as it runs
 };
 
@@ -285,31 +287,34 @@ void luxp_attach_plan(Template& t) {
     t.luxp = plan;
 }
 
-LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, const std::vector<Value>& slots) {
+LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& slots) {
     Plan* plan = const_cast<Plan*>(static_cast<const Plan*>(t.luxp.get()));
     if (!plan) return LuxpOutcome::Translate;
     if (plan->html_only) return LuxpOutcome::HtmlOnly;
 
-    TplHost host(t, slots, ctx);
-    std::string doc;
-    doc.reserve(plan->size_hint.load(std::memory_order_relaxed) + 64);
-    if (!plan->doc->render(host, doc)) return LuxpOutcome::Translate;   // the HTML path reports why
-    plan->size_hint.store(doc.size(), std::memory_order_relaxed);
-
+    // The document is rendered straight into the response, after the container's header.
     auto sheet = current_sheet(*plan);
-    static const bool check = env_on("LUX_LUXP_CHECK");
-    if (check && !plan_matches_translation(ctx, t, slots, doc, *sheet)) return LuxpOutcome::Translate;
+    TplHost host(t, slots, ctx);
+    std::string body;
+    body.reserve(plan->size_hint.load(std::memory_order_relaxed) + sheet->blob.data.size() + plan->program.data.size() + 96);
+    const size_t doc_at = luxium::page::begin_single_page(body, "index.html");
+    if (!plan->doc->render(host, body)) return LuxpOutcome::Translate;   // the HTML path reports why
+    plan->size_hint.store(body.size() - doc_at, std::memory_order_relaxed);
 
+    static const bool check = env_on("LUX_LUXP_CHECK");
+    if (check && !plan_matches_translation(ctx, t, slots, body.substr(doc_at), *sheet)) return LuxpOutcome::Translate;
+
+    luxium::page::finish_single_page(body, doc_at, sheet->blob, plan->program);
     ctx.res.header("Vary", "Accept")
         .header("Content-Type", luxium::page::kLuxpMime)
-        .send(luxium::page::encode_single_page("index.html", luxium::page::blob_plain(std::move(doc)),
-                                               sheet->blob, plan->program));
+        .send(std::move(body));
     return LuxpOutcome::Sent;
 }
 
 LuxpOutcome luxp_respond_slots(NativeCtx& ctx, size_t template_index, const Value* slots, size_t n) {
     if (!ctx.templates || template_index >= ctx.templates->size()) return LuxpOutcome::Translate;
-    return luxp_respond(ctx, (*ctx.templates)[template_index], std::vector<Value>(slots, slots + n));
+    std::vector<Value> copy(slots, slots + n);   // the caller's array is still read if this falls back
+    return luxp_respond(ctx, (*ctx.templates)[template_index], copy);
 }
 
 } // namespace lux_script

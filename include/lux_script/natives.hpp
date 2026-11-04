@@ -161,6 +161,7 @@ struct NativeCtx {
 bool  eval_template_expr(NativeCtx& ctx, size_t tpl, uint32_t k, const std::vector<Value>& slots,
                          Value& out, std::string& error);
 void  write_template_value(const Value& v, bool escape, std::string& out);
+void  write_template_script(const Value& v, std::string& out);   // {{ }} inside a <script> body
 void  escape_html(const std::string& in, std::string& out);
 Value template_loop_value(size_t i, size_t n);
 
