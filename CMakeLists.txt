@@ -33,6 +33,29 @@ if(WIN32 AND LUX_IO_URING)
     message(WARNING "LUX_IO_URING is Linux-only: ignored on Windows")
     set(LUX_IO_URING OFF CACHE BOOL "" FORCE)
 endif()
+# Optimised builds.  LTO keeps "fat" objects so the .a archives still link into the
+# .so that --native generates (a plain slim-LTO archive would not).  PGO is two
+# steps (tools/pgo.sh): build with -DLUX_PGO=gen, run a representative load, then
+# rebuild the same tree with -DLUX_PGO=use.  On the forum bench both together cut
+# ~4% of the instructions per request (SQLite, outside this tree, is half of them).
+option(LUX_LTO "Link-time optimisation (-flto, fat objects)" OFF)
+set(LUX_PGO "" CACHE STRING "Profile-guided build: gen (instrumented) or use (apply the profile)")
+set(LUX_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the instrumented binary writes its .gcda files")
+if(NOT WIN32)
+    if(LUX_LTO)
+        add_compile_options(-flto=auto -ffat-lto-objects)
+        add_link_options(-flto=auto)
+    endif()
+    if(LUX_PGO STREQUAL "gen")
+        add_compile_options(-fprofile-generate=${LUX_PGO_DIR} -fprofile-update=prefer-atomic)
+        add_link_options(-fprofile-generate=${LUX_PGO_DIR})
+    elseif(LUX_PGO STREQUAL "use")
+        add_compile_options(-fprofile-use=${LUX_PGO_DIR} -fprofile-correction -Wno-missing-profile)
+    elseif(NOT LUX_PGO STREQUAL "")
+        message(FATAL_ERROR "LUX_PGO must be gen, use or empty")
+    endif()
+endif()
+
 option(LUX_EXAMPLES "Build the examples in examples/"                 ON)
 # HTTPS in the server itself (tls: cert / key). Off by default: without it the
 # core links no OpenSSL and the binary keeps its size; TLS is then the proxy's job.
