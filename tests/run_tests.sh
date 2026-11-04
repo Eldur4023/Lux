@@ -628,6 +628,16 @@ check_luxp "render() -> .luxp with the template's data"    '/hello?who=Zoe' 'Zoe
 check_luxp "{{ }} inside the page's <script>"               '/hello?who=Zoe' 'Hola desde LuxScript, '
 check_luxp "<link> through a static mount, and its @import" '/hello'         'rebeccapurple'
 check_luxp "{{ }} in a <script>: a backslash, a quote and a line break stay in the string" '/hello?who=a%5Cb%22c%0Ad' 'Hola desde LuxScript, '
+# the program is compiled once and its string constants patched per request: each answer carries its own value
+check_luxp "{{ }} in a <script>: the program holds this request's value"   '/hello?who=Zoe' 'Zoe!!'
+check_luxp "{{ }} in a <script>: ...and the next request's, not the first's" '/hello?who=Ana' 'Ana!!'
+check_luxp "{{ }} in a <script>: an escaped value reaches the constant decoded" '/hello?who=a%5Cb%22c%0Ad' 'a\b"c'
+# a .luxp carries an ETag (a hash of its bytes); a client that holds those bytes gets a 304 without a body
+luxp_etag=$(curl -sS --max-time 10 -D - -o /dev/null -H "Accept: application/x-luxp" "http://127.0.0.1:$PORT/hello?who=Zoe" | tr -d '\r' | awk 'tolower($1)=="etag:" {print $2}')
+luxp_304=$(curl -sS --max-time 10 -o "$TMP/body304" -w '%{http_code} %{size_download}' -H "Accept: application/x-luxp" -H "If-None-Match: $luxp_etag" "http://127.0.0.1:$PORT/hello?who=Zoe")
+[ -n "$luxp_etag" ] && [ "$luxp_304" = "304 0" ] && ok ".luxp: ETag, and If-None-Match answers 304 with no body" || fail ".luxp: ETag + 304" "304 0" "etag=$luxp_etag got=$luxp_304"
+luxp_other=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Accept: application/x-luxp" -H "If-None-Match: $luxp_etag" "http://127.0.0.1:$PORT/hello?who=Ana")
+[ "$luxp_other" = "200" ] && ok ".luxp: the same ETag does not match a different page" || fail ".luxp: other page" "200" "$luxp_other"
 check_luxp "constant render(): translated at startup"       '/fixed'         'cambiada por LuxScript'
 check "same route, any other browser: HTML" GET '/hello?who=Zoe' 200 '<h1 id="t">Hola Zoe</h1>'
 check_luxp "plan: values in text and attributes"          '/plan?who=Zoe&n=3'   'Item <2> & "co" '"'"'x'"'"

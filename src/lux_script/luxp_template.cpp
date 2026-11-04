@@ -19,6 +19,7 @@
 #include <page/luxp.hpp>
 #include <script/bytecode_io.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 
@@ -36,6 +37,12 @@ struct Plan {
     std::atomic<std::shared_ptr<const li::SheetData>> sheet;
     std::atomic<int64_t>                              checked{0};
     luxium::page::Blob                                program;    // compressed once; empty without a script
+    // A script with {{ }} in string literals: the program is compiled once with a marker in each such constant,
+    // and every request patches the constants (no recompiling) -- see patched_program().
+    struct Part { std::string lit; int64_t hole = -1; };
+    struct Patch { size_t string = 0; std::vector<Part> parts; };   // an entry of the program's string table
+    std::shared_ptr<const luxium::script::Layout>     layout;     // set with patches
+    std::vector<Patch>                                patches;    // sorted by string index
     std::atomic<size_t>                               size_hint{0};
 };
 
@@ -65,8 +72,12 @@ bool skeleton_range(const Template& t, size_t b, size_t e, std::string& out, int
                 ++pc;
                 break;
             case Template::Op::Write:
-                if (in.b) return false;   // inside a <script> body: the program would differ per request
-                out += luxium::page::template_marker('H', in.a);
+                if (in.b) {   // inside a <script> body: a string literal's content, patched into the program's constants
+                    if (depth > 0) return false;   // under an if/for the number of scripts would depend on the data
+                    out += luxium::page::template_marker('S', in.a);
+                } else {
+                    out += luxium::page::template_marker('H', in.a);
+                }
                 ++pc;
                 break;
             case Template::Op::WriteRaw:
@@ -131,6 +142,26 @@ public:
         const Value* v = evaluate(id, tmp);
         if (!v) return false;
         write_template_value(*v, false, out);   // raw: the document stores the string, not its HTML escape
+        return true;
+    }
+
+    // What a string literal's constant holds for {{ id }}: the lexer has decoded the \" \\ \n escapes the source
+    // carried, so only the entities (& < > ' -- see write_template_script) are left of the escaping.
+    bool constant_text(uint32_t id, std::string& out) {
+        Value tmp;
+        const Value* v = evaluate(id, tmp);
+        if (!v) return false;
+        if (v->is_int()) { write_template_value(*v, false, out); return true; }
+        const std::string text = v->is_str() ? std::string() : v->to_string();
+        for (char c : v->is_str() ? v->as_str() : text) {
+            switch (c) {
+                case '&':  out += "&amp;"; break;
+                case '<':  out += "&lt;"; break;
+                case '>':  out += "&gt;"; break;
+                case '\'': out += "&#39;"; break;
+                default:   out += c;
+            }
+        }
         return true;
     }
 
@@ -243,6 +274,61 @@ bool plan_matches_translation(NativeCtx& ctx, const Template& t, const std::vect
     return false;
 }
 
+// The string table of a program compiled from a skeleton: the entries holding S markers become patches.
+// False when a marker is somewhere a constant cannot take it (the compiler would have refused most such
+// places already): then the template gets no plan.
+bool find_patches(const luxium::script::Layout& layout, Plan& plan) {
+    constexpr char kStart = '\x01', kEnd = '\x02';
+    for (size_t k = 0; k < layout.strings.size(); ++k) {
+        const std::string& s = layout.strings[k];
+        if (s.find(kStart) == std::string::npos) continue;
+        Plan::Patch patch;
+        patch.string = k;
+        std::string lit;
+        for (size_t i = 0; i < s.size();) {
+            if (s[i] != kStart) { lit += s[i++]; continue; }
+            if (i + 2 >= s.size() || s[i + 1] != 'S') return false;
+            size_t j = i + 2;
+            uint64_t id = 0;
+            size_t digits = 0;
+            while (j < s.size() && s[j] >= '0' && s[j] <= '9' && digits < 9) { id = id * 10 + uint64_t(s[j++] - '0'); ++digits; }
+            if (!digits || j >= s.size() || s[j] != kEnd) return false;
+            if (!lit.empty()) patch.parts.push_back({std::move(lit), -1});
+            lit.clear();
+            patch.parts.push_back({{}, int64_t(id)});
+            i = j + 1;
+        }
+        if (!lit.empty()) patch.parts.push_back({std::move(lit), -1});
+        plan.patches.push_back(std::move(patch));
+    }
+    return !plan.patches.empty();
+}
+
+// The program for this request: the plan's, serialized once, with each patched string rebuilt from the
+// holes' values.  Same bytes the translation of the filled page gives (the tests compare them).
+bool patched_program(const Plan& plan, TplHost& host, luxium::page::Blob& out) {
+    std::vector<std::pair<uint32_t, std::string>> values;   // each hole evaluated once
+    std::vector<std::pair<size_t, std::string>> replaced;
+    replaced.reserve(plan.patches.size());
+    for (const auto& patch : plan.patches) {
+        std::string text;
+        for (const auto& part : patch.parts) {
+            if (part.hole < 0) { text += part.lit; continue; }
+            const uint32_t id = uint32_t(part.hole);
+            auto it = std::find_if(values.begin(), values.end(), [&](const auto& v) { return v.first == id; });
+            if (it == values.end()) {
+                std::string v;
+                if (!host.constant_text(id, v)) return false;
+                it = values.insert(values.end(), {id, std::move(v)});
+            }
+            text += it->second;
+        }
+        replaced.emplace_back(patch.string, std::move(text));
+    }
+    out = luxium::page::blob_deflate(luxium::script::assemble(*plan.layout, replaced), 1);   // per request: speed over the last bytes
+    return true;
+}
+
 } // namespace
 
 void luxp_attach_plan(Template& t) {
@@ -266,13 +352,24 @@ void luxp_attach_plan(Template& t) {
     // The program is what the page's <script>s say, with no data in them (a
     // marker in a script made build() refuse above).
     luxium::page::ScriptsResult scripts = luxium::page::translate_scripts(*page.document);
+    const bool script_holes = skeleton.find("\x01S") != std::string::npos;
     if (scripts.uses_javascript || !scripts.errors.empty()) {
+        // With {{ }} in the scripts an error may be the marker's (outside a string literal, say): the filled
+        // page is what decides, so no plan -- translated per request, as before.
+        if (script_holes && !scripts.uses_javascript) return;
         plan->doc.reset();
         plan->html_only = true;
         t.luxp = plan;
         return;
     }
-    plan->program = luxium::page::blob_deflate(scripts.program ? luxium::script::serialize(*scripts.program) : std::string());
+    if (script_holes) {
+        if (!scripts.program) return;
+        auto layout = std::make_shared<luxium::script::Layout>(luxium::script::serialize_layout(*scripts.program));
+        if (!find_patches(*layout, *plan)) return;
+        plan->layout = std::move(layout);
+    } else {
+        plan->program = luxium::page::blob_deflate(scripts.program ? luxium::script::serialize(*scripts.program) : std::string());
+    }
 
     // The sheet depends on the path the page is served from only when a URL
     // in it is relative; a template is not tied to one route, so those get no plan.
@@ -304,10 +401,11 @@ LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& 
     static const bool check = env_on("LUX_LUXP_CHECK");
     if (check && !plan_matches_translation(ctx, t, slots, body.substr(doc_at), *sheet)) return LuxpOutcome::Translate;
 
-    luxium::page::finish_single_page(body, doc_at, sheet->blob, plan->program);
-    ctx.res.header("Vary", "Accept")
-        .header("Content-Type", luxium::page::kLuxpMime)
-        .send(std::move(body));
+    luxium::page::Blob patched;
+    if (plan->layout && !patched_program(*plan, host, patched)) return LuxpOutcome::Translate;
+    luxium::page::finish_single_page(body, doc_at, sheet->blob, plan->layout ? patched : plan->program);
+    ctx.res.header("Vary", "Accept");
+    li::send_luxp(ctx.req, ctx.res, std::move(body), luxium::page::kLuxpMime);
     return LuxpOutcome::Sent;
 }
 

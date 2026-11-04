@@ -266,7 +266,7 @@ void send_page(const lux::Request& req, lux::Response& res, const std::string& h
     if (allow_luxp && wants_luxp(req)) {
         std::string err;
         if (auto luxp = html_to_luxp(html, req.path, &err)) {
-            res.header("Content-Type", luxium::page::kLuxpMime).send(std::move(*luxp));
+            li::send_luxp(req, res, std::move(*luxp), luxium::page::kLuxpMime);
             return;
         }
         if (err != kUsesJavaScript) lux::log().warn("luxp: ", req.path, " answered as HTML: ", err);

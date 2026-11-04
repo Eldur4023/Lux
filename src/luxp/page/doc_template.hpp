@@ -19,6 +19,8 @@
 //      back to the raw string -- so the hole holds the RAW string
 //   R  a value written raw (|safe): HTML the parser would have to parse; not
 //      expressible, build() refuses the template
+//   S  a value inside a <script> body: not part of the document (a script's text is never encoded), it only
+//      lets the template's scripts compile; the producer patches the program's constants (luxp_template.cpp)
 //   L  a loop starts / I an if starts / N its else / E the block ends
 //
 // What makes a template ineligible (build() returns null and says why; the

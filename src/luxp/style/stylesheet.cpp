@@ -106,8 +106,103 @@ std::string import_url(const std::string& prelude, std::string* media) {
     return url;
 }
 
+void emit_style_rule(const std::string& selector_text, const std::string& body, const std::string& media, const std::string& container,
+                     std::vector<Rule>& out, const Loader& loader, int depth, int nest);
+
+// The body of a style rule, split into its declarations and the blocks nested in it (CSS nesting):
+// "a: b; .c { ... } d: e; &:hover { ... }" -> decls "a: b; d: e;" and [(".c", "..."), ("&:hover", "...")].
+void split_nested(const std::string& body, std::string& decls, std::vector<std::pair<std::string, std::string>>& nested) {
+    std::string cur;
+    int paren = 0;
+    char quote = 0;
+    for (size_t i = 0; i < body.size(); ++i) {
+        const char c = body[i];
+        if (quote) { cur += c; if (c == quote) quote = 0; continue; }
+        if (c == '"' || c == '\'') { quote = c; cur += c; continue; }
+        if (c == '(') ++paren;
+        else if (c == ')') --paren;
+        if (paren == 0 && c == ';') { decls += cur + ";"; cur.clear(); continue; }
+        if (paren == 0 && c == '{' && !trim(cur).starts_with("--")) {
+            const size_t end = block_end(body, i);
+            const size_t inner_end = (end > i + 1 && body[end - 1] == '}') ? end - 1 : end;
+            nested.emplace_back(trim(cur), body.substr(i + 1, inner_end - i - 1));
+            cur.clear();
+            i = end - 1;
+            continue;
+        }
+        cur += c;
+    }
+    decls += cur;
+}
+
+// The parent's selector list inside a nested selector: & is the parent (":is(parent)"); a selector without & is a
+// descendant of it ("> a" too: the combinator stays).
+std::string nest_selector(const std::string& nested, const std::string& parent, const char* wrap = "is") {
+    std::string out;
+    int paren = 0;
+    size_t from = 0;
+    auto one = [&](std::string sel) {
+        sel = trim(sel);
+        if (sel.empty()) return;
+        std::string r;
+        bool has_amp = false;
+        const std::string P = std::string(":") + wrap + "(" + parent + ")";
+        for (size_t k = 0; k < sel.size(); ++k) {
+            if (sel[k] == '&') { has_amp = true; r += P; }
+            else if (sel.compare(k, 6, ":scope") == 0 && std::string(wrap) == "where") { has_amp = true; r += P; k += 5; }
+            else r += sel[k];
+        }
+        if (!has_amp) r = P + " " + sel;
+        if (!out.empty()) out += ", ";
+        out += r;
+    };
+    for (size_t i = 0; i < nested.size(); ++i) {
+        if (nested[i] == '(') ++paren;
+        else if (nested[i] == ')') --paren;
+        else if (nested[i] == ',' && paren == 0) { one(nested.substr(from, i - from)); from = i + 1; }
+    }
+    one(nested.substr(from));
+    return out;
+}
+
+void emit_style_rule(const std::string& selector_text, const std::string& body, const std::string& media, const std::string& container,
+                     std::vector<Rule>& out, const Loader& loader, int depth, int nest) {
+    std::string decl_text;
+    std::vector<std::pair<std::string, std::string>> nested;
+    split_nested(body, decl_text, nested);
+    Rule rule;
+    rule.media = media;
+    rule.container = container;
+    rule.selectors = parse_selector_list(selector_text);
+    rule.decls = parse_decls(decl_text);
+    if (!rule.selectors.empty() && !rule.decls.empty()) {
+        rule.order = static_cast<int>(out.size());
+        out.push_back(std::move(rule));
+    }
+    if (nest > 8) return;
+    for (const auto& [prelude, block] : nested) {
+        if (prelude.empty()) continue;
+        if (prelude[0] == '@') {   // @media/@supports/@container inside a rule: the same selector, under the condition
+            size_t j = 1;
+            while (j < prelude.size() && (std::isalnum(static_cast<unsigned char>(prelude[j])) || prelude[j] == '-')) ++j;
+            const std::string name = lower(prelude.substr(1, j - 1)), cond = trim(prelude.substr(j));
+            std::string m = media, c = container;
+            if (name == "media") {
+                const size_t sep = m.find('\x02');
+                const std::string q = sep == std::string::npos ? m : m.substr(0, sep);
+                m = (q.empty() ? cond : q + " and " + cond) + (sep == std::string::npos ? std::string() : m.substr(sep));
+            } else if (name == "supports") m += "\x02" + cond;
+            else if (name == "container") c = c.empty() ? cond : c + "\n" + cond;
+            else if (name != "layer") continue;
+            emit_style_rule(selector_text, block, m, c, out, loader, depth, nest + 1);
+        } else {
+            emit_style_rule(nest_selector(prelude, selector_text), block, media, container, out, loader, depth, nest + 1);
+        }
+    }
+}
+
 void parse_rules(const std::string& text, const std::string& media,
-                 std::vector<Rule>& out, const Loader& loader, int depth) {
+                 std::vector<Rule>& out, const Loader& loader, int depth, const std::string& container = "") {
     size_t i = 0;
     while (i < text.size()) {
         while (i < text.size() && (std::isspace(static_cast<unsigned char>(text[i])) || text[i] == ';')) ++i;
@@ -147,10 +242,40 @@ void parse_rules(const std::string& text, const std::string& media,
             const size_t end = block_end(text, stop);
             const size_t inner_end = (end > stop + 1 && text[end - 1] == '}') ? end - 1 : end;
             const std::string inner = text.substr(stop + 1, inner_end - stop - 1);
-            if (name == "media")
-                parse_rules(inner, media.empty() ? prelude : media + " and " + prelude, out, loader, depth);
-            else if (name == "supports" || name == "layer")
-                parse_rules(inner, media, out, loader, depth);
+            if (name == "media") {
+                // the query part of `media` ends at the first \x02; the @supports conditions after it stay last
+                const size_t sep = media.find('\x02');
+                const std::string q = sep == std::string::npos ? media : media.substr(0, sep);
+                const std::string tail = sep == std::string::npos ? std::string() : media.substr(sep);
+                parse_rules(inner, (q.empty() ? prelude : q + " and " + prelude) + tail, out, loader, depth, container);
+            } else if (name == "supports")
+                parse_rules(inner, media + "\x02" + prelude, out, loader, depth, container);
+            else if (name == "layer")
+                parse_rules(inner, media, out, loader, depth, container);
+            else if (name == "container")
+                parse_rules(inner, media, out, loader, depth, container.empty() ? prelude : container + "\n" + prelude);
+            else if (name == "property") {
+                Rule r;
+                r.media = "@property|" + prelude;
+                r.decls = parse_decls(inner);
+                r.order = static_cast<int>(out.size());
+                if (!r.decls.empty()) out.push_back(std::move(r));
+            } else if (name == "scope") {
+                // @scope (.root) [to (.limit)] { rules }: the rules apply inside .root (the limit is not modelled)
+                std::string root = prelude;
+                if (const size_t to = lower(root).find(" to "); to != std::string::npos) root = root.substr(0, to);
+                root = trim(root);
+                if (root.size() >= 2 && root.front() == '(' && root.back() == ')') root = trim(root.substr(1, root.size() - 2));
+                size_t k = 0;
+                while (!root.empty() && k < inner.size()) {
+                    const size_t sb = find_top(inner, k, "{");
+                    if (sb == std::string::npos) break;
+                    const size_t se = block_end(inner, sb);
+                    const size_t sbe = (se > sb + 1 && inner[se - 1] == '}') ? se - 1 : se;
+                    emit_style_rule(nest_selector(trim(inner.substr(k, sb - k)), root, "where"), inner.substr(sb + 1, sbe - sb - 1), media, container, out, loader, depth, 1);
+                    k = se;
+                }
+            }
             else if (name == "keyframes" || name == "-webkit-keyframes") {
                 // one selector-less Rule per keyframe offset; `media` carries "@keyframes|name|offset" (see Rule::keyframe)
                 size_t k = 0;
@@ -182,22 +307,22 @@ void parse_rules(const std::string& text, const std::string& media,
                     k = ke;
                 }
             }
-            i = end;   // @font-face, @page...: skipped
+            else if (name == "font-face") {
+                Rule r;
+                r.media = "@font-face";
+                r.decls = parse_decls(inner);
+                r.order = static_cast<int>(out.size());
+                if (!r.decls.empty()) out.push_back(std::move(r));
+            }
+            i = end;   // @page...: skipped
             continue;
         }
 
         const size_t brace = find_top(text, i, "{");
         if (brace == std::string::npos) break;
         const size_t end = block_end(text, brace);
-        Rule rule;
-        rule.media = media;
-        rule.selectors = parse_selector_list(text.substr(i, brace - i));
         const size_t body_end = (end > brace + 1 && text[end - 1] == '}') ? end - 1 : end;
-        rule.decls = parse_decls(text.substr(brace + 1, body_end - brace - 1));
-        if (!rule.selectors.empty() && !rule.decls.empty()) {
-            rule.order = static_cast<int>(out.size());
-            out.push_back(std::move(rule));
-        }
+        emit_style_rule(text.substr(i, brace - i), text.substr(brace + 1, body_end - brace - 1), media, container, out, loader, depth, 0);
         i = end;
     }
 }
@@ -353,7 +478,88 @@ bool eval_one_query(std::string q, float vw, float vh) {
 
 } // namespace
 
-bool media_matches(const std::string& media, float vw, float vh) {
+void split_container_prelude(const std::string& prelude, std::string& name, std::string& cond) {
+    const std::string p = trim(prelude);
+    size_t j = 0;
+    while (j < p.size() && !std::isspace(static_cast<unsigned char>(p[j])) && p[j] != '(') ++j;
+    const std::string first = lower(p.substr(0, j));
+    if (j == 0 || first == "not") { name.clear(); cond = p; return; }
+    name = p.substr(0, j);
+    cond = trim(p.substr(j));
+}
+
+bool container_query_matches(const std::string& cond, float w, float h) {
+    std::string c = lower(cond);
+    for (const auto& [from, to] : {std::pair<std::string, std::string>{"inline-size", "width"}, {"block-size", "height"}})
+        for (size_t p = c.find(from); p != std::string::npos; p = c.find(from, p + to.size())) c.replace(p, from.size(), to);
+    return eval_one_query(c, w, h);
+}
+
+namespace {
+
+SupportsHook g_supports_hook = nullptr;
+
+bool eval_supports(const std::string& cond_raw, int depth = 0);
+
+// `a` joined by a top-level word ("and"/"or"): the operands, or just {a} if the word is not there
+std::vector<std::string> split_word(const std::string& c, const std::string& word) {
+    std::vector<std::string> out;
+    int d = 0; size_t from = 0;
+    for (size_t i = 0; i + word.size() + 2 <= c.size(); ++i) {
+        if (c[i] == '(') ++d;
+        else if (c[i] == ')') --d;
+        else if (d == 0 && std::isspace(static_cast<unsigned char>(c[i])) &&
+                 lower(c.substr(i + 1, word.size())) == word && std::isspace(static_cast<unsigned char>(c[i + 1 + word.size()]))) {
+            out.push_back(c.substr(from, i - from));
+            from = i + 2 + word.size();
+            i = from - 1;
+        }
+    }
+    out.push_back(c.substr(from));
+    return out;
+}
+
+bool eval_supports(const std::string& cond_raw, int depth) {
+    if (depth > 8) return false;
+    const std::string c = trim(cond_raw);
+    if (c.empty()) return false;
+    if (lower(c.substr(0, 3)) == "not" && c.size() > 3 && (std::isspace(static_cast<unsigned char>(c[3])) || c[3] == '('))
+        return !eval_supports(c.substr(3), depth + 1);
+    const auto ors = split_word(c, "or");
+    if (ors.size() > 1) { for (const auto& o : ors) if (eval_supports(o, depth + 1)) return true; return false; }
+    const auto ands = split_word(c, "and");
+    if (ands.size() > 1) { for (const auto& a : ands) if (!eval_supports(a, depth + 1)) return false; return true; }
+    if (lower(c.substr(0, 9)) == "selector(") {
+        const size_t e = c.rfind(')');
+        return e != std::string::npos && e > 9 && !parse_selector_list(c.substr(9, e - 9)).empty();
+    }
+    if (c.front() != '(' || c.back() != ')') return false;   // font-tech(), font-format()...: not claimed
+    const std::string inner = trim(c.substr(1, c.size() - 2));
+    const size_t colon = find_top(inner, 0, ":");
+    if (colon == std::string::npos) return eval_supports(inner, depth + 1);   // ((a) and (b))
+    const std::string name = trim(inner.substr(0, colon)), value = trim(inner.substr(colon + 1));
+    if (name.empty() || value.empty()) return false;
+    if (name.starts_with("--")) return true;
+    return g_supports_hook ? g_supports_hook(lower(name), value) : true;
+}
+
+} // namespace
+
+void set_supports_hook(SupportsHook hook) { g_supports_hook = hook; }
+
+bool media_matches(const std::string& media_all, float vw, float vh) {
+    // "<queries>\x02<@supports cond>\x02<cond>...": the queries as before, every condition must hold
+    std::string media = media_all;
+    if (const size_t sep = media_all.find('\x02'); sep != std::string::npos) {
+        media = media_all.substr(0, sep);
+        size_t from = sep + 1;
+        while (from <= media_all.size()) {
+            const size_t next = media_all.find('\x02', from);
+            if (!eval_supports(media_all.substr(from, next == std::string::npos ? next : next - from))) return false;
+            if (next == std::string::npos) break;
+            from = next + 1;
+        }
+    }
     if (trim(media).empty()) return true;
     // "A and B" built by nesting is a conjunction; a comma list is a disjunction.
     // Nested @media joins with " and " only between whole queries, so split on

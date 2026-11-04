@@ -17,6 +17,7 @@
 
 #include <cctype>
 #include <cstring>
+#include <vector>
 
 namespace luxium::page {
 
@@ -42,6 +43,45 @@ void url_refs(const std::string& text, std::vector<std::string>& out) {
         while (j < text.size() && !std::strchr("\"') \t\r\n", text[j])) ++j;
         if (is_local(text.substr(i, j - i))) out.push_back(text.substr(i, j - i));
     }
+}
+
+
+// url(x) in a linked sheet is relative to THAT sheet; the page that loads the compiled sheet resolves it
+// against itself, so each relative one is rewritten to be relative to the page (or root-absolute).
+std::string normalize_path(const std::string& p) {
+    std::vector<std::string> parts;
+    size_t i = 0;
+    const bool root = !p.empty() && p[0] == '/';
+    while (i <= p.size()) {
+        size_t e = p.find('/', i);
+        if (e == std::string::npos) e = p.size();
+        const std::string seg = p.substr(i, e - i);
+        if (seg == "..") { if (!parts.empty() && parts.back() != "..") parts.pop_back(); else if (!root) parts.push_back(seg); }
+        else if (!seg.empty() && seg != ".") parts.push_back(seg);
+        i = e + 1;
+    }
+    std::string out = root ? "/" : "";
+    for (size_t k = 0; k < parts.size(); ++k) out += (k ? "/" : "") + parts[k];
+    return out;
+}
+
+std::string rewrite_urls(const std::string& v, const std::string& dir) {
+    std::string out;
+    size_t pos = 0;
+    for (size_t p = v.find("url("); p != std::string::npos; p = v.find("url(", pos)) {
+        size_t i = p + 4;
+        while (i < v.size() && std::isspace(static_cast<unsigned char>(v[i]))) ++i;
+        const char q = (i < v.size() && (v[i] == '"' || v[i] == '\'')) ? v[i] : 0;
+        if (q) ++i;
+        size_t j = i;
+        while (j < v.size() && (q ? v[j] != q : !std::strchr(") \t\r\n", v[j]))) ++j;
+        const std::string arg = v.substr(i, j - i);
+        const bool local = !arg.empty() && arg[0] != '/' && arg[0] != '#' && arg.find(':') == std::string::npos;
+        out += v.substr(pos, i - pos);
+        out += local ? normalize_path(dir + arg) : arg;
+        pos = j;
+    }
+    return out + v.substr(pos);
 }
 
 void dom_refs(const dom::Node& n, Translation& t) {
@@ -286,10 +326,15 @@ StylesResult translate_styles(dom::Node& doc, const Fetcher& fetch) {
         auto sheet = fetch(href);
         if (!sheet) { t.warnings.push_back("stylesheet not found: " + href); continue; }
         const std::string dir = href.substr(0, href.rfind('/') + 1);
+        const size_t first = t.rules.size();
         style::parse_sheet(*sheet, t.rules, [&](const std::string& url) {
             const bool abs = !url.empty() && (url[0] == '/' || url.find(':') != std::string::npos);
             return fetch(abs ? url : dir + url).value_or("");
         });
+        if (!dir.empty() && dir.find(':') == std::string::npos)   // an http(s) href is its own base: left as it was
+            for (size_t k = first; k < t.rules.size(); ++k)
+                for (auto& d : t.rules[k].decls)
+                    if (d.value.find("url(") != std::string::npos) d.value = rewrite_urls(d.value, dir);
     }
     for (size_t i = 0; i < t.rules.size(); ++i) t.rules[i].order = static_cast<int>(i);
     return t;

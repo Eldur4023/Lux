@@ -175,7 +175,7 @@ bool verify_chunk(const Compiled& c, size_t fi, std::string* err) {
 
 } // namespace
 
-std::string serialize(const Compiled& c) {
+Layout serialize_layout(const Compiled& c) {
     lux_script::BrowserProfile browser;   // native ids are the browser table's
     std::vector<std::string> names;       // native name table
     auto name_index = [&](int id) {
@@ -227,15 +227,35 @@ std::string serialize(const Compiled& c) {
     int prev = 0;
     for (int l : c.line_map) { body.sv(int64_t(l) - prev); prev = l; }
 
+    Layout l;
     Writer w;
     w.out = "LUXBC";
     w.uv(kFormat);
     w.uv(kOpCount);
     w.uv(names.size());
     for (const auto& n : names) w.str(n);
-    w.uv(strings.names.size());
-    for (const auto& n : strings.names) w.str(n);
-    return w.out + body.out;
+    l.head = std::move(w.out);
+    l.strings = std::move(strings.names);
+    l.body = std::move(body.out);
+    return l;
+}
+
+std::string serialize(const Compiled& c) {
+    return assemble(serialize_layout(c), {});
+}
+
+std::string assemble(const Layout& l, const std::vector<std::pair<size_t, std::string>>& replaced) {
+    Writer w;
+    w.out.reserve(l.head.size() + l.body.size() + 16 + l.strings.size() * 8);
+    w.out = l.head;
+    w.uv(l.strings.size());
+    size_t r = 0;   // `replaced` is sorted by string index
+    for (size_t i = 0; i < l.strings.size(); ++i) {
+        if (r < replaced.size() && replaced[r].first == i) w.str(replaced[r++].second);
+        else w.str(l.strings[i]);
+    }
+    w.out += l.body;
+    return std::move(w.out);
 }
 
 std::unique_ptr<Compiled> load_bytecode(const std::string& bytes, std::string* err) {

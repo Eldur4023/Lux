@@ -22,12 +22,24 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <script/page_compile.hpp>
 
 namespace luxium::script {
 
 std::string serialize(const Compiled& c);
+
+// serialize() in pieces, so a program that differs between requests only in some string constants is
+// serialized once and reassembled with those strings replaced (their table indexes, sorted).
+struct Layout {
+    std::string              head;      // magic, versions, native-name table
+    std::vector<std::string> strings;   // the string-constant table
+    std::string              body;      // functions; refers to the strings by index
+};
+Layout serialize_layout(const Compiled& c);
+std::string assemble(const Layout& l, const std::vector<std::pair<size_t, std::string>>& replaced);
 
 // Parses AND verifies.  nullptr (err filled) on any problem.
 std::unique_ptr<Compiled> load_bytecode(const std::string& bytes, std::string* err);

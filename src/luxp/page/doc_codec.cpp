@@ -256,7 +256,7 @@ std::string encode_sheet(const std::vector<style::Rule>& rules) {
     SheetWriter s;
     s.w.uv(rules.size());
     for (const auto& r : rules) {
-        s.w.str(r.media);
+        s.w.str(r.container.empty() ? r.media : r.media + '\x01' + r.container);   // the container condition rides in the media string
         s.w.uv(r.selectors.size());
         for (const auto& sel : r.selectors) s.selector(sel);
         s.w.uv(r.decls.size());
@@ -281,6 +281,7 @@ bool decode_sheet(const std::string& bytes, std::vector<style::Rule>& out, std::
     for (uint32_t i = 0; i < nr && s.r.ok; ++i) {
         style::Rule rule;
         rule.media = s.r.str();
+        if (const size_t sep = rule.media.find('\x01'); sep != std::string::npos) { rule.container = rule.media.substr(sep + 1); rule.media.resize(sep); }
         const uint32_t nsel = s.r.count(kMaxList, 4);
         for (uint32_t k = 0; k < nsel && s.r.ok; ++k) {
             style::Selector sel;

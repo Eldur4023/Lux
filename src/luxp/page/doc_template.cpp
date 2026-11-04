@@ -34,6 +34,17 @@ bool read_marker(const std::string& s, size_t& i, char& kind, uint32_t& id) {
     return true;
 }
 
+// Every marker in `s` is an S (a value inside a script body).
+bool only_script_markers(const std::string& s) {
+    for (size_t i = 0; i < s.size();) {
+        if (s[i] != kStart) { ++i; continue; }
+        char kind;
+        uint32_t id;
+        if (!read_marker(s, i, kind, id) || kind != 'S') return false;
+    }
+    return true;
+}
+
 void put_uv(std::string& out, uint64_t v) {
     while (v >= 0x80) { out += char((v & 0x7F) | 0x80); v >>= 7; }
     out += char(v);
@@ -79,7 +90,8 @@ std::string scan_source(const std::string& s) {
             uint32_t id;
             const size_t at = i;
             if (!read_marker(s, i, kind, id)) return "marker mal formado";
-            if (!raw_close.empty() && raw_close.rfind("<pending:", 0) != 0) return "un valor dentro de <script>/<style>";
+            if (!raw_close.empty() && raw_close.rfind("<pending:", 0) != 0 && !(kind == 'S' && raw_close == "</script"))
+                return "un valor dentro de <script>/<style>";
             if (state == Comment || state == Bang) return "un valor dentro de un comentario o doctype";
             if (state == Tag) {
                 if (!quote) return "un valor fuera de comillas en una etiqueta";
@@ -292,9 +304,13 @@ struct Builder {
             if (has_marker(k)) return fail("un valor en un nombre de atributo");
             if (resource && has_marker(v)) return fail("un valor en un atributo de <link>/<script>");
         }
+        // A <script> body may hold values (S markers only: they sit inside a string literal and the program
+        // takes them as constants; the document never carries a script's text).  A <style> body, or any
+        // other marker there, makes the template ineligible.
         if (raw)
             for (const auto& c : n.children)
-                if (has_marker(c->text)) return fail("un valor dentro de <script>/<style>");
+                if (has_marker(c->text) && !(n.is_element("script") && only_script_markers(c->text)))
+                    return fail("un valor dentro de <script>/<style>");
 
         Item it;
         it.kind = Kind::Elem;
