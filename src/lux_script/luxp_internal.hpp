@@ -45,9 +45,23 @@ inline int64_t now_ms() {
 // (Cache-Control: no-cache); but its ETag is a hash of the bytes, so a client that already holds exactly
 // these bytes (If-None-Match) gets a 304 and no body.
 inline void send_luxp(const lux::Request& req, lux::Response& res, std::string body, const char* mime) {
-    uint64_t h = 0x9E3779B97F4A7C15ull ^ body.size();   // 8 bytes at a time: ~10 GB/s, no allocation
+    // Four independent lanes: a single multiply chain is latency-bound; four run in parallel.
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ body.size();
     const char* p = body.data();
     size_t n = body.size();
+    if (n >= 32) {
+        uint64_t l0 = h, l1 = h + 1, l2 = h + 2, l3 = h + 3;
+        for (; n >= 32; p += 32, n -= 32) {
+            uint64_t w[4];
+            std::memcpy(w, p, 32);
+            l0 = (l0 ^ w[0]) * 0xFF51AFD7ED558CCDull; l0 ^= l0 >> 32;
+            l1 = (l1 ^ w[1]) * 0xFF51AFD7ED558CCDull; l1 ^= l1 >> 32;
+            l2 = (l2 ^ w[2]) * 0xFF51AFD7ED558CCDull; l2 ^= l2 >> 32;
+            l3 = (l3 ^ w[3]) * 0xFF51AFD7ED558CCDull; l3 ^= l3 >> 32;
+        }
+        h = (l0 ^ (l1 << 1) ^ (l2 << 2) ^ (l3 << 3)) * 0xC4CEB9FE1A85EC53ull;
+        h ^= h >> 29;
+    }
     for (; n >= 8; p += 8, n -= 8) {
         uint64_t w;
         std::memcpy(&w, p, 8);

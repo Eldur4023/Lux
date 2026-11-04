@@ -5,6 +5,8 @@
 // (both the same whatever the data is, compressed once).  At request time the
 // plan only evaluates the holes, with the template engine's own machinery.
 
+#include <page/doc_template_run.hpp>
+#include <charconv>
 #include "luxp_internal.hpp"
 #include <lux_script/luxp_serve.hpp>
 #include <lux_script/natives.hpp>
@@ -30,7 +32,21 @@ namespace {
 using luxium::page::DocTemplate;
 namespace li = luxp_internal;
 
+// A hole {{ x }} / {{ x.a.b }} resolved when the plan is built: the slot and the member names, so a
+// request neither reads the expression's bytecode nor hashes a name; `hint` remembers where in the
+// dict each name was last found (see Dict::find_hint).
+struct Direct {
+    bool                       ok = false;
+    uint32_t                   slot = 0;
+    uint8_t                    nkeys = 0;
+    std::string_view           keys[4];
+    mutable std::atomic<uint8_t> hint[4]{};
+};
+
+const Value kNullValue;
+
 struct Plan {
+    std::unique_ptr<Direct[]>                         direct;     // one per t.exprs entry
     std::unique_ptr<DocTemplate>                      doc;        // null with html_only
     bool                                              html_only = false;   // JavaScript: never a .luxp
     std::string                                       skeleton;   // to rebuild the sheet when a file changes
@@ -44,6 +60,8 @@ struct Plan {
     std::shared_ptr<const luxium::script::Layout>     layout;     // set with patches
     std::vector<Patch>                                patches;    // sorted by string index
     std::atomic<size_t>                               size_hint{0};
+    luxium::page::Blob                                doc_blob;   // the document's template as a block (serialized, deflated once)
+    std::atomic<size_t>                               trace_hint{0};
 };
 
 bool env_on(const char* name) {
@@ -132,12 +150,22 @@ bool skeleton_range(const Template& t, size_t b, size_t e, std::string& out, int
 class TplHost final : public DocTemplate::Host {
 public:
     // Works on the caller's slots (the loops write their variables into them): no copy.
-    TplHost(const Template& t, std::vector<Value>& slots, NativeCtx& ctx)
-        : t_(t), ctx_(ctx), values_(slots) {
+    TplHost(const Template& t, std::vector<Value>& slots, NativeCtx& ctx, const Direct* direct = nullptr)
+        : t_(t), ctx_(ctx), values_(slots), direct_(direct) {
         if (values_.size() < t.names.size()) values_.resize(t.names.size());
     }
 
-    bool hole(uint32_t id, std::string& out) override {
+    [[gnu::always_inline]] bool hole(uint32_t id, std::string& out) override {
+        if (const Value* v = direct(id)) {
+            if (v->is_str()) { const std::string& t = v->as_str(); luxium::page::append_fast(out, t.data(), t.size()); }
+            else if (v->is_int()) { char buf[24]; const char* e = std::to_chars(buf, buf + sizeof buf, v->as_int()).ptr; luxium::page::append_fast(out, buf, size_t(e - buf)); }
+            else write_template_value(*v, false, out);   // raw: the document stores the string, not its HTML escape
+            return true;
+        }
+        return hole_slow(id, out);
+    }
+
+    [[gnu::noinline]] bool hole_slow(uint32_t id, std::string& out) {
         Value tmp;
         const Value* v = evaluate(id, tmp);
         if (!v) return false;
@@ -200,8 +228,27 @@ private:
     // {{ x }} and {{ x.a.b }} read straight from the slots; anything else, or
     // anything that would fail, goes through the VM -- the same as
     // render_template, so the value and the error are the VM's own.
+    // The plan's resolved form of the same read; null when the expression is not that simple, or
+    // a member is read from something that is not a dict (the VM reports that).
+    [[gnu::always_inline]] inline const Value* direct(uint32_t idx) {
+        if (!direct_) return nullptr;
+        const Direct& d = direct_[idx];
+        if (!d.ok || d.slot >= values_.size()) return nullptr;
+        const Value* v = &values_[d.slot];
+        for (uint8_t i = 0; i < d.nkeys; ++i) {
+            if (!v->is_dict()) return nullptr;
+            uint8_t h = d.hint[i].load(std::memory_order_relaxed);
+            const uint8_t h0 = h;
+            const Value* n = v->as_dict().find_hint(d.keys[i], h);
+            if (h != h0) d.hint[i].store(h, std::memory_order_relaxed);
+            v = n ? n : &kNullValue;
+        }
+        return v;
+    }
+
     const Value* evaluate(uint32_t idx, Value& tmp) {
         static const Value kNull;
+        if (const Value* v = direct(idx)) return v;
         const Chunk& c = t_.exprs[idx];
         const auto& code = c.code;
         if (code.size() >= 2 && code.front().op == Op::LoadLocal && code.back().op == Op::Return &&
@@ -229,6 +276,7 @@ private:
     const Template&    t_;
     NativeCtx&         ctx_;
     std::vector<Value>& values_;
+    const Direct*      direct_;
     std::vector<Value> lists_;   // each running loop's list, alive for as long as it runs
 };
 
@@ -349,6 +397,12 @@ void luxp_attach_plan(Template& t) {
         return;
     }
 
+    {   // the template itself, for a client that takes the document as template + trace
+        const std::string plain = plan->doc->serialize();
+        plan->doc_blob = luxium::page::blob_deflate(plain);
+        plan->doc_blob.id = luxium::page::block_id(plain);
+    }
+
     // The program is what the page's <script>s say, with no data in them (a
     // marker in a script made build() refuse above).
     luxium::page::ScriptsResult scripts = luxium::page::translate_scripts(*page.document);
@@ -368,7 +422,9 @@ void luxp_attach_plan(Template& t) {
         if (!find_patches(*layout, *plan)) return;
         plan->layout = std::move(layout);
     } else {
-        plan->program = luxium::page::blob_deflate(scripts.program ? luxium::script::serialize(*scripts.program) : std::string());
+        const std::string plain = scripts.program ? luxium::script::serialize(*scripts.program) : std::string();
+        plan->program = luxium::page::blob_deflate(plain);
+        if (!plain.empty()) plan->program.id = luxium::page::block_id(plain);   // the same on every visit
     }
 
     // The sheet depends on the path the page is served from only when a URL
@@ -381,6 +437,22 @@ void luxp_attach_plan(Template& t) {
     }
     plan->sheet.store(sheet);
     plan->checked.store(li::now_ms());
+    plan->direct = std::make_unique<Direct[]>(t.exprs.size());
+    for (size_t i = 0; i < t.exprs.size(); ++i) {
+        const Chunk& c = t.exprs[i];
+        const auto& code = c.code;
+        Direct& d = plan->direct[i];
+        if (code.size() < 2 || code.size() > 2 + 4 || code.front().op != Op::LoadLocal || code.back().op != Op::Return) continue;
+        bool ok = true;
+        for (size_t k = 1; k + 1 < code.size(); ++k) {
+            if (code[k].op != Op::GetMember || !c.constants[code[k].operand].is_str()) { ok = false; break; }
+            d.keys[k - 1] = c.constants[code[k].operand].as_str();
+        }
+        if (!ok) continue;
+        d.slot = uint32_t(code.front().operand);
+        d.nkeys = uint8_t(code.size() - 2);
+        d.ok = true;
+    }
     t.luxp = plan;
 }
 
@@ -389,22 +461,57 @@ LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& 
     if (!plan) return LuxpOutcome::Translate;
     if (plan->html_only) return LuxpOutcome::HtmlOnly;
 
-    // The document is rendered straight into the response, after the container's header.
     auto sheet = current_sheet(*plan);
-    TplHost host(t, slots, ctx);
+    TplHost host(t, slots, ctx, plan->direct.get());
+    static const bool check = env_on("LUX_LUXP_CHECK");
+    // LUX_LUXP_ZLEVEL=1..9: deflate the document (or its trace) on every request.  Off by default: it
+    // halves the bytes of a plain document but costs ~17 us of CPU a page, +50% on a request that
+    // otherwise takes 34 us -- worth it when the link is the bottleneck, not when the CPU is.
+    static const int zlevel = [] { const char* v = std::getenv("LUX_LUXP_ZLEVEL"); return v && *v ? std::atoi(v) : 0; }();
+    luxium::page::HaveSet have;
+    if (const std::string* h = ctx.req.header("x-luxp-have")) have = luxium::page::parse_have(*h);
+
+    // A client that says it takes the document as the template (a block it keeps) plus the trace of
+    // the values gets only the values once it holds the template.
+    const std::string* caps = ctx.req.header("x-luxp-caps");
+    if (caps && caps->find("trace") != std::string::npos) {
+        std::string tr;
+        tr.reserve(plan->trace_hint.load(std::memory_order_relaxed));
+        if (!plan->doc->trace(host, tr)) return LuxpOutcome::Translate;
+        plan->trace_hint.store(tr.size(), std::memory_order_relaxed);
+        if (check) {   // the trace, run over the template, must give the document run() writes
+            TplHost again(t, slots, ctx, plan->direct.get());
+            std::string want, got, why;
+            if (!plan->doc->run(again, want)) return LuxpOutcome::Translate;
+            if (!plan->doc->expand(tr, got, &why) || got != want) {
+                lux::log().error("luxp: a trace does not expand to the document the template writes (", why, ")");
+                return LuxpOutcome::Translate;
+            }
+            if (!plan_matches_translation(ctx, t, slots, want, *sheet)) return LuxpOutcome::Translate;
+        }
+        luxium::page::Blob patched;
+        if (plan->layout && !patched_program(*plan, host, patched)) return LuxpOutcome::Translate;
+        ctx.res.header("Vary", "Accept, X-Luxp-Have, X-Luxp-Caps");
+        li::send_luxp(ctx.req, ctx.res,
+                      luxium::page::encode_traced_page("index.html", plan->doc_blob, tr, zlevel, sheet->blob,
+                                                       plan->layout ? patched : plan->program, &have),
+                      luxium::page::kLuxpMime);
+        return LuxpOutcome::Sent;
+    }
+
+    // The document is rendered straight into the response, after the container's header.
     std::string body;
     body.reserve(plan->size_hint.load(std::memory_order_relaxed) + sheet->blob.data.size() + plan->program.data.size() + 96);
     const size_t doc_at = luxium::page::begin_single_page(body, "index.html");
-    if (!plan->doc->render(host, body)) return LuxpOutcome::Translate;   // the HTML path reports why
+    if (!plan->doc->run(host, body)) return LuxpOutcome::Translate;   // the HTML path reports why
     plan->size_hint.store(body.size() - doc_at, std::memory_order_relaxed);
 
-    static const bool check = env_on("LUX_LUXP_CHECK");
     if (check && !plan_matches_translation(ctx, t, slots, body.substr(doc_at), *sheet)) return LuxpOutcome::Translate;
 
     luxium::page::Blob patched;
     if (plan->layout && !patched_program(*plan, host, patched)) return LuxpOutcome::Translate;
-    luxium::page::finish_single_page(body, doc_at, sheet->blob, plan->layout ? patched : plan->program);
-    ctx.res.header("Vary", "Accept");
+    luxium::page::finish_single_page(body, doc_at, sheet->blob, plan->layout ? patched : plan->program, zlevel, &have);
+    ctx.res.header("Vary", "Accept, X-Luxp-Have");
     li::send_luxp(ctx.req, ctx.res, std::move(body), luxium::page::kLuxpMime);
     return LuxpOutcome::Sent;
 }

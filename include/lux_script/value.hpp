@@ -178,6 +178,41 @@ public:
 
         iterator       find(std::string_view k);
         const_iterator find(std::string_view k) const;
+        // find() that first tries position `hint` -- where the same key was last seen: rows of one
+        // query share their key order, so a template reading a column hits it every time.
+        // Returns null when absent; `hint` is updated.
+        const Value*   find_hint(std::string_view k, uint8_t& hint) const {
+            if (hint < v_.size()) {
+                const Pair& p = v_[hint];
+                if (p.first.size() == k.size() && key_eq(p.first.data(), k.data(), k.size())) return &p.second;
+            }
+            return find_hint_slow(k, hint);
+        }
+        // Equality of two short names without a call to memcmp (overlapping fixed-size loads).
+        static bool key_eq(const char* a, const char* b, size_t n) {
+            if (n >= 8) {
+                if (n > 16) return std::memcmp(a, b, n) == 0;
+                uint64_t x1, y1, x2, y2;
+                std::memcpy(&x1, a, 8); std::memcpy(&y1, b, 8);
+                std::memcpy(&x2, a + n - 8, 8); std::memcpy(&y2, b + n - 8, 8);
+                return ((x1 ^ y1) | (x2 ^ y2)) == 0;
+            }
+            if (n >= 4) {
+                uint32_t x1, y1, x2, y2;
+                std::memcpy(&x1, a, 4); std::memcpy(&y1, b, 4);
+                std::memcpy(&x2, a + n - 4, 4); std::memcpy(&y2, b + n - 4, 4);
+                return ((x1 ^ y1) | (x2 ^ y2)) == 0;
+            }
+            for (size_t i = 0; i < n; ++i) if (a[i] != b[i]) return false;
+            return true;
+        }
+        [[gnu::noinline]] const Value* find_hint_slow(std::string_view k, uint8_t& hint) const {
+            auto it = find(k);
+            if (it == v_.end()) return nullptr;
+            const size_t pos = size_t(it - v_.begin());
+            if (pos < 256) hint = uint8_t(pos);
+            return &it->second;
+        }
         Value&         operator[](std::string_view k);
         // operator[] = v, keeping a key the caller already built.
         void           set(std::string&& k, Value v);

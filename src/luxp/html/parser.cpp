@@ -292,7 +292,19 @@ ParseResult parse(std::string_view source) {
             // implicit <tr> (WHATWG "in table" insertion modes, the common paths)
             auto open_implicit = [&](const char* tag) {
                 auto el = b.make(NodeType::Element, tag, t.line);
-                Node* raw = &b.cur()->append(std::move(el));
+                Node* table = b.cur();
+                Node* raw = &table->append(std::move(el));
+                // The text written between <table> and its first row goes into the implicit tbody
+                // with the rows (whitespace, and a template's {{ }}/{% %} markers: a loop around the
+                // rows would open in the table and close inside the tbody, and the page could not be
+                // planned).  The same rule on filled HTML keeps both ways of translating a page equal.
+                if (std::string_view(tag) == "tbody") {
+                    const size_t last = table->children.size() - 1;
+                    size_t first = last;
+                    while (first > 0 && table->children[first - 1]->type == NodeType::Text) --first;
+                    for (size_t i = first; i < last; ++i) raw->append(std::move(table->children[i]));
+                    table->children.erase(table->children.begin() + first, table->children.begin() + last);
+                }
                 if (b.stack.size() < size_t(dom::kMaxDepth)) b.stack.push_back(raw);
             };
             auto is_section = [&](Node* n) {

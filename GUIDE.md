@@ -686,7 +686,8 @@ How much a request costs depends on the template:
 
 Diagnostics: `LUX_LUXP_VERBOSE=1` logs why a template has no plan; `LUX_LUXP_CHECK=1`
 computes every plan answer the long way too and logs any difference; `LUX_LUXP_PLAN=0` turns
-plans off.
+plans off. `LUX_LUXP_ZLEVEL=1` deflates each page's document before sending it (about half the
+bytes, ~17 µs of CPU per page): for when the connection, not the CPU, is the bottleneck.
 
 A static site, without a server:
 

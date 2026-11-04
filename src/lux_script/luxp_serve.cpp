@@ -151,7 +151,9 @@ std::shared_ptr<const ProgramEntry> program_for(luxium::dom::Node& doc, const st
             entry->error = kUsesJavaScript;
         }
     } else if (r.program) {
-        entry->blob = blob_deflate(luxium::script::serialize(*r.program), 1);   // rebuilt per script: speed over size
+        const std::string plain = luxium::script::serialize(*r.program);
+        entry->blob = blob_deflate(plain, 1);   // rebuilt per script: speed over size
+        entry->blob.id = luxium::page::block_id(plain);
     }
     std::lock_guard<std::mutex> lk(g_cache_m);
     if (g_program_misses.size() >= kCacheEntries) g_program_misses.clear();
@@ -196,6 +198,7 @@ std::shared_ptr<const SheetData> build_sheet(luxium::dom::Node& doc, const std::
     });
     data->plain = luxium::page::encode_sheet(styles.rules);
     data->blob = blob_deflate(data->plain, deflate_level);
+    data->blob.id = luxium::page::block_id(data->plain);
     return data;
 }
 
@@ -247,7 +250,7 @@ void set_luxp_statics(const std::vector<StaticMount>& mounts) {
 }
 
 std::optional<std::string> html_to_luxp(const std::string& html, const std::string& url_path,
-                                        std::string* err) {
+                                        std::string* err, const luxium::page::HaveSet* have) {
     luxium::page::ParsedPage page = luxium::page::parse_page(html);
     luxium::dom::Node& doc = *page.document;
 
@@ -258,14 +261,16 @@ std::optional<std::string> html_to_luxp(const std::string& html, const std::stri
     }
     auto sheet = sheet_for(doc, url_path);
     return luxium::page::encode_single_page("index.html", blob_plain(luxium::page::encode_document(doc)),
-                                            sheet->blob, program->blob);
+                                            sheet->blob, program->blob, have);
 }
 
 void send_page(const lux::Request& req, lux::Response& res, const std::string& html, bool allow_luxp) {
-    res.header("Vary", "Accept");   // one URL, two representations
+    res.header("Vary", "Accept, X-Luxp-Have");   // one URL, two representations (and which blocks it carries)
     if (allow_luxp && wants_luxp(req)) {
         std::string err;
-        if (auto luxp = html_to_luxp(html, req.path, &err)) {
+        luxium::page::HaveSet have;
+        if (const std::string* h = req.header("x-luxp-have")) have = luxium::page::parse_have(*h);
+        if (auto luxp = html_to_luxp(html, req.path, &err, &have)) {
             li::send_luxp(req, res, std::move(*luxp), luxium::page::kLuxpMime);
             return;
         }

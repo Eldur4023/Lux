@@ -38,6 +38,8 @@ class Request;
 class Response;
 }
 
+namespace luxium::page { struct HaveSet; }
+
 namespace lux_script {
 
 class Value;
@@ -61,8 +63,9 @@ std::optional<std::string> luxp_fetch_static(const std::string& url, const std::
 // request path (relative links resolve against it).  nullopt + err when the
 // page cannot be one: a LuxScript error, or JavaScript (the caller then
 // answers HTML).
+// `have`: the blocks the client already holds (X-Luxp-Have): they are left out of the answer.
 std::optional<std::string> html_to_luxp(const std::string& html, const std::string& url_path,
-                                        std::string* err);
+                                        std::string* err, const luxium::page::HaveSet* have = nullptr);
 
 // The LuxScript of a TEMPLATE's own <script>s, compiled for the browser at
 // project compile time (TemplateCtx::check_page), so `lux --check` catches it
