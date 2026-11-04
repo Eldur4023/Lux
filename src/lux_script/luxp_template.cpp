@@ -492,8 +492,12 @@ LuxpOutcome luxp_respond(NativeCtx& ctx, const Template& t, std::vector<Value>& 
         luxium::page::Blob patched;
         if (plan->layout && !patched_program(*plan, host, patched)) return LuxpOutcome::Translate;
         ctx.res.header("Vary", "Accept, X-Luxp-Have, X-Luxp-Caps");
+        // A client that does not hold the template yet is on its first visit to this page: that answer
+        // is the big one (template, stylesheet, program, values), and it happens once per client, so
+        // deflating the values then costs nothing that matters; the later ones go out plain.
+        const int level = zlevel ? zlevel : (have.has(plan->doc_blob.id) ? 0 : 6);
         li::send_luxp(ctx.req, ctx.res,
-                      luxium::page::encode_traced_page("index.html", plan->doc_blob, tr, zlevel, sheet->blob,
+                      luxium::page::encode_traced_page("index.html", plan->doc_blob, tr, level, sheet->blob,
                                                        plan->layout ? patched : plan->program, &have),
                       luxium::page::kLuxpMime);
         return LuxpOutcome::Sent;
