@@ -142,6 +142,11 @@ struct Parser {
                     ++c;
                     continue;
                 }
+                if (name == "first-letter" || name == "first-line") {   // also in the one-colon legacy form
+                    pseudo = name == "first-letter" ? Pseudo::FirstLetter : Pseudo::FirstLine;
+                    ++c;
+                    continue;
+                }
                 if (name == "placeholder" || name == "-webkit-input-placeholder") { pseudo = Pseudo::Placeholder; ++c; continue; }
                 if (dbl) { ok = false; return cp; }   // ::marker, ::selection, ...: not supported
                 if (name == "first-child") { ss.kind = SimpleSel::Kind::FirstChild; ++b; }

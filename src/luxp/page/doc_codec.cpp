@@ -145,7 +145,7 @@ struct SheetReader {
     bool selector(style::Selector& s, int nest) {
         if (nest > kMaxSelNest) return bad("selectores anidados en exceso");
         const uint8_t pseudo = r.u8();
-        if (pseudo > uint8_t(style::Pseudo::Placeholder)) return bad("pseudo-elemento invalido");
+        if (pseudo > uint8_t(style::Pseudo::FirstLine)) return bad("pseudo-elemento invalido");
         s.pseudo = style::Pseudo(pseudo);
         const int64_t spec = r.sv();
         if (spec < 0 || spec > INT32_MAX) return bad("especificidad invalida");
