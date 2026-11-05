@@ -37,7 +37,7 @@ endif()
 # .so that --native generates (a plain slim-LTO archive would not).  PGO is two
 # steps (tools/pgo.sh): build with -DLUX_PGO=gen, run a representative load, then
 # rebuild the same tree with -DLUX_PGO=use.  On the forum bench both together cut
-# ~4% of the instructions per request (SQLite, outside this tree, is half of them).
+# ~4% of the instructions per request (SQLite is half of them: the vendored amalgamation is built with the same flags, which is where most of the gain comes from).
 option(LUX_LTO "Link-time optimisation (-flto, fat objects)" OFF)
 set(LUX_PGO "" CACHE STRING "Profile-guided build: gen (instrumented) or use (apply the profile)")
 set(LUX_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the instrumented binary writes its .gcda files")
@@ -317,8 +317,30 @@ target_compile_definitions(lux_script PRIVATE
     LUX_NATIVE_LIB="$<TARGET_FILE:lux>")
 
 if(LUX_SQLITE)
-    find_path(SQLITE3_INC sqlite3.h)
-    find_library(SQLITE3_LIB sqlite3)
+    # SQLite is ~half of the instructions per request on a database-bound route, and the
+    # distro's libsqlite3 is a generic build outside LTO/PGO.  By default the amalgamation in
+    # third_party/sqlite is compiled here: tuned flags (no mutex per connection --Lux opens them
+    # NOMUTEX--, no memstatus, no shared cache, no deprecated API) and the same -O3/LTO/PGO as the
+    # rest.  Keeps FTS5/RTREE/math functions, the authorizer and decltype (the result cache and the
+    # BOOLEAN columns need them).  LUX_SQLITE_SYSTEM=ON links the system library instead.
+    option(LUX_SQLITE_SYSTEM "Link the system libsqlite3 instead of the vendored amalgamation" OFF)
+    if(NOT LUX_SQLITE_SYSTEM AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite/sqlite3.c)
+        add_library(lux_sqlite3 STATIC third_party/sqlite/sqlite3.c)
+        set_target_properties(lux_sqlite3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        target_compile_definitions(lux_sqlite3 PRIVATE
+            SQLITE_THREADSAFE=2 SQLITE_DEFAULT_MEMSTATUS=0 SQLITE_OMIT_SHARED_CACHE
+            SQLITE_OMIT_DEPRECATED SQLITE_OMIT_LOAD_EXTENSION SQLITE_LIKE_DOESNT_MATCH_BLOBS
+            SQLITE_USE_ALLOC_SIZE SQLITE_MAX_EXPR_DEPTH=0 SQLITE_DEFAULT_WAL_SYNCHRONOUS=1
+            SQLITE_ENABLE_FTS5 SQLITE_ENABLE_RTREE SQLITE_ENABLE_MATH_FUNCTIONS)
+        target_compile_options(lux_sqlite3 PRIVATE -O3 -w)
+        set(SQLITE3_INC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/sqlite)
+        set(SQLITE3_LIB lux_sqlite3)
+        find_package(Threads)
+        target_link_libraries(lux_sqlite3 PUBLIC ${CMAKE_DL_LIBS} Threads::Threads m)
+    else()
+        find_path(SQLITE3_INC sqlite3.h)
+        find_library(SQLITE3_LIB sqlite3)
+    endif()
     if(SQLITE3_INC AND SQLITE3_LIB)
         target_sources(lux_script PRIVATE src/lux_script/db_sqlite.cpp src/lux_script/sqlite_replica.cpp)
         target_compile_definitions(lux_script PRIVATE LUX_SQLITE)

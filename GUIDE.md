@@ -1832,6 +1832,12 @@ Environment variables, read at startup:
 For a production build, `-DLUX_LTO=ON` and a profile-guided pass (`tools/pgo.sh`) shave a few
 percent off the instructions per request.
 
+SQLite is compiled from the amalgamation in `third_party/sqlite` (3.53.4, tuned flags: no per-connection
+mutex, no memstatus, no shared cache; FTS5, RTREE and math functions kept) instead of the distro's
+`libsqlite3`, so LTO/PGO reach it too. On the forum bench with `tools/pgo.sh`, user CPU per request
+went 57.7 -> 47.4 us (-18%) with the result cache and 61.4 -> 50.6 us (-18%) without it; without PGO the
+vendored build equals the system one. `-DLUX_SQLITE_SYSTEM=ON` links the system library again.
+
 ## 23. Native modules
 
 Beyond `sqlite`/`postgres`/`mysql`, `import` reaches the compiled-in modules below. A call is

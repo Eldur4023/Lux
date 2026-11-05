@@ -13,10 +13,23 @@
 
 #include <dom/node.hpp>
 
+#include <cctype>
 #include <string>
 #include <vector>
 
 namespace luxium::style {
+
+// Shared by selector.cpp and stylesheet.cpp (C locale, ASCII whitespace/case).
+inline std::string lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+inline std::string trim(const std::string& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) --b;
+    return s.substr(a, b - a);
+}
 
 enum class Pseudo { None, Before, After, Placeholder, FirstLetter, FirstLine };
 
