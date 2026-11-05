@@ -1829,14 +1829,17 @@ Environment variables, read at startup:
 | `LUX_WAL_HIGH_PAGES=N` | the WAL size (pages, default 32000) past which each write batch waits up to 20 ms for the checkpointer |
 | `LUX_DB_CACHE_STATS=1` | logs the result cache's hits and misses at shutdown |
 
-For a production build, `-DLUX_LTO=ON` and a profile-guided pass (`tools/pgo.sh`) shave a few
-percent off the instructions per request.
+Every normal build is already optimised: LTO plus a profile-guided pass that applies the profile
+committed in `pgo/` (no extra step for the developer). `-DLUX_PGO=off` skips the profile and
+`-DLUX_LTO=OFF` skips LTO (faster to build while hacking on the C++ core). After big changes to the hot
+paths or a compiler upgrade, regenerate it with `tools/pgo.sh build-pgo -- <training load>` and commit
+`pgo/`; code the profile never saw is compiled normally.
 
 SQLite is compiled from the amalgamation in `third_party/sqlite` (3.53.4, tuned flags: no per-connection
 mutex, no memstatus, no shared cache; FTS5, RTREE and math functions kept) instead of the distro's
-`libsqlite3`, so LTO/PGO reach it too. On the forum bench with `tools/pgo.sh`, user CPU per request
-went 57.7 -> 47.4 us (-18%) with the result cache and 61.4 -> 50.6 us (-18%) without it; without PGO the
-vendored build equals the system one. `-DLUX_SQLITE_SYSTEM=ON` links the system library again.
+`libsqlite3`, so the profile reaches it too. On the forum bench, user CPU per request went 57.7 -> 48.4 us
+(-16%) with the result cache; without the profile the vendored build equals the system one.
+`-DLUX_SQLITE_SYSTEM=ON` links the system library again.
 
 ## 23. Native modules
 

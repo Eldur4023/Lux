@@ -33,26 +33,42 @@ if(WIN32 AND LUX_IO_URING)
     message(WARNING "LUX_IO_URING is Linux-only: ignored on Windows")
     set(LUX_IO_URING OFF CACHE BOOL "" FORCE)
 endif()
-# Optimised builds.  LTO keeps "fat" objects so the .a archives still link into the
-# .so that --native generates (a plain slim-LTO archive would not).  PGO is two
-# steps (tools/pgo.sh): build with -DLUX_PGO=gen, run a representative load, then
-# rebuild the same tree with -DLUX_PGO=use.  On the forum bench both together cut
-# ~4% of the instructions per request (SQLite is half of them: the vendored amalgamation is built with the same flags, which is where most of the gain comes from).
-option(LUX_LTO "Link-time optimisation (-flto, fat objects)" OFF)
-set(LUX_PGO "" CACHE STRING "Profile-guided build: gen (instrumented) or use (apply the profile)")
+# Optimised builds, on by default and invisible to the developer: LTO (fat objects, so the .a
+# archives still link into the .so that --native generates) plus profile-guided optimisation
+# from the profile committed in pgo/ (about -18% user CPU per request on the forum bench; SQLite
+# is half of the instructions and is built here with the same flags).  The profile is applied
+# when it exists and the compiler is GCC; code the profile never saw is compiled normally
+# (-fprofile-partial-training) and a profile older than the sources only costs the changed
+# functions their data.  -DLUX_PGO=off skips it; tools/pgo.sh regenerates pgo/ (LUX_PGO=gen builds
+# the instrumented binary).
+option(LUX_LTO "Link-time optimisation (-flto, fat objects)" ON)
+set(LUX_PGO "auto" CACHE STRING "Profile-guided build: auto (use pgo/ if present), off, gen (instrumented), use")
 set(LUX_PGO_DIR "${CMAKE_BINARY_DIR}/pgo" CACHE PATH "Where the instrumented binary writes its .gcda files")
+set(LUX_PGO_PROFILE "${CMAKE_SOURCE_DIR}/pgo" CACHE PATH "The committed profile applied by LUX_PGO=auto/use")
+set(_pgo "${LUX_PGO}")
+if(_pgo STREQUAL "" OR _pgo STREQUAL "auto")   # "" = a build dir configured before auto existed
+    file(GLOB _pgo_files "${LUX_PGO_PROFILE}/*.gcda")
+    if(_pgo_files AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(_pgo use)
+    else()
+        set(_pgo off)
+    endif()
+endif()
 if(NOT WIN32)
     if(LUX_LTO)
         add_compile_options(-flto=auto -ffat-lto-objects)
         add_link_options(-flto=auto)
     endif()
-    if(LUX_PGO STREQUAL "gen")
-        add_compile_options(-fprofile-generate=${LUX_PGO_DIR} -fprofile-update=prefer-atomic)
+    # Profile names carry the object's path: strip the build dir so any build tree finds them.
+    if(_pgo STREQUAL "gen")
+        add_compile_options(-fprofile-generate=${LUX_PGO_DIR} -fprofile-prefix-path=${CMAKE_BINARY_DIR} -fprofile-update=prefer-atomic)
         add_link_options(-fprofile-generate=${LUX_PGO_DIR})
-    elseif(LUX_PGO STREQUAL "use")
-        add_compile_options(-fprofile-use=${LUX_PGO_DIR} -fprofile-correction -Wno-missing-profile)
-    elseif(NOT LUX_PGO STREQUAL "")
-        message(FATAL_ERROR "LUX_PGO must be gen, use or empty")
+    elseif(_pgo STREQUAL "use")
+        add_compile_options(-fprofile-use=${LUX_PGO_PROFILE} -fprofile-prefix-path=${CMAKE_BINARY_DIR}
+                            -fprofile-correction -fprofile-partial-training
+                            -Wno-missing-profile -Wno-coverage-mismatch -Wno-error=coverage-mismatch)
+    elseif(NOT _pgo STREQUAL "off")
+        message(FATAL_ERROR "LUX_PGO must be auto, off, gen or use")
     endif()
 endif()
 
