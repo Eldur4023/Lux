@@ -44,7 +44,7 @@ struct Direct {
     mutable std::atomic<uint8_t> hint[4]{};
 };
 
-const Value kNullValue;
+const Value kNullValue{};
 
 struct Plan {
     std::unique_ptr<Direct[]>                         direct;     // one per t.exprs entry

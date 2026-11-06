@@ -249,7 +249,11 @@ static void send_static(const Request& req, Response& res, std::string file,
                         const std::filesystem::file_time_type& mtime, std::uintmax_t filesize) {
     std::string ct; const char* cc;
     static_class(file, ct, cc);
+#ifdef __ANDROID__   // libc++'s file_clock::to_sys yields a 128-bit duration; its file clock counts from the Unix epoch
+    const std::time_t t = std::chrono::duration_cast<std::chrono::seconds>(mtime.time_since_epoch()).count();
+#else
     const std::time_t t = std::chrono::system_clock::to_time_t(std::chrono::file_clock::to_sys(mtime));
+#endif
     if (static_headers(req, res, ct, cc, {make_etag(mtime, filesize), http_date(t), t}, nullptr, false)) return;
     res.send_file(file, filesize);   // zero-copy: sendfile(2)
 }
@@ -845,7 +849,11 @@ void App::run(const std::string& host, uint16_t port) {
         cpu_set_t one;
         CPU_ZERO(&one);
         CPU_SET(cpu, &one);
+#ifdef __ANDROID__   // bionic has no pthread_setaffinity_np; pid 0 is the calling thread
+        return ::sched_setaffinity(0, sizeof(one), &one) == 0 ? cpu : -1;
+#else
         return ::pthread_setaffinity_np(::pthread_self(), sizeof(one), &one) == 0 ? cpu : -1;
+#endif
 #else
         (void)index;
         return -1;

@@ -55,7 +55,7 @@ if(_pgo STREQUAL "" OR _pgo STREQUAL "auto")   # "" = a build dir configured bef
     endif()
 endif()
 if(NOT WIN32)
-    if(LUX_LTO)
+    if(LUX_LTO AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")   # -flto=auto and fat objects are GCC; clang (the NDK) builds without
         add_compile_options(-flto=auto -ffat-lto-objects)
         add_link_options(-flto=auto)
     endif()
