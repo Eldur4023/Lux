@@ -1994,9 +1994,9 @@ public:
             // `o` es de una clase que de verdad tiene ese campo.
             case IrExprKind::Member:
                 if (!e.object && e.call_name.empty())
-                    return "lux_dyn_global(l_ctx, " + std::to_string(native_id("__session_get")) + ", LuxL{}.add(Value::str(" +
+                    return "lux_dyn_global(lux_nctx, " + std::to_string(native_id("__session_get")) + ", LuxL{}.add(Value::str(" +
                            literal_string(e.text) + ")).items())";
-                if (!e.object) return "lux_dyn_global(" + std::string(con_ctx() ? "l_ctx" : "lux_ctx()") + ", " +
+                if (!e.object) return "lux_dyn_global(" + std::string(con_ctx() ? "lux_nctx" : "lux_ctx()") + ", " +
                                       std::to_string(e.call_index) + ", Value::List{})";
                 if (comprobador_.dinamica(e))
                     return "lux_json_member(" + valor_json(*e.object) + ", " + literal_string(e.text) + ")";
@@ -2080,7 +2080,7 @@ public:
                 if (e.call_shape == IrCallShape::ConstructorCall && comprobador_.dinamica(e))
                     return instancia_dinamica(e);
                 if (comprobador_.dinamica(e)) {
-                    const std::string ctx = con_ctx() ? "l_ctx" : "lux_ctx()";
+                    const std::string ctx = con_ctx() ? "lux_nctx" : "lux_ctx()";
                     std::string args = "LuxL{}";
                     for (const auto& a : e.args) args += ".add(" + consumir(*a.value, true) + ")";
                     args += ".items()";
@@ -2137,7 +2137,7 @@ public:
                 if (e.call_shape == IrCallShape::ClassMethodCall) {
                     const auto& rol = comprobador_.roles().at(e.call_index);
                     const std::string f = "l_" + rol.clase + "_" + rol.metodo;
-                    std::string s = con_ctx() ? "lux_call_in(l_ctx, " + f + ", " + expr(*e.object)
+                    std::string s = con_ctx() ? "lux_call_in(lux_nctx, " + f + ", " + expr(*e.object)
                                           : f + "(" + expr(*e.object);
                     const FirmaNativa* m = comprobador_.metodo(rol.clase, rol.metodo);
                     for (size_t i = 0; i < e.args.size(); ++i)
@@ -2301,7 +2301,7 @@ public:
                 std::string s = metodo ? "lux_str_" + e.call_name
                                        : nombre_cpp(nombre_por_indice_.at(static_cast<size_t>(e.call_index)));
                 const bool en_ctx = !metodo && con_ctx();
-                s = en_ctx ? "lux_call_in(l_ctx, " + s : s + "(";
+                s = en_ctx ? "lux_call_in(lux_nctx, " + s : s + "(";
                 if (metodo) {
                     s += expr(*e.object);
                     for (const auto& a : e.args) s += ", " + expr(*a.value);
@@ -2372,8 +2372,8 @@ public:
         for (const auto& a : call.args) params += ".add(" + consumir(*a.value, true) + ")";
         params += ".items()";
         const std::string id = std::to_string(call.call_index);
-        const std::string v = awaited ? "(co_await lux_module_await(l_ctx, " + id + ", " + params + "))"
-                            : con_ctx() ? "lux_module_call(l_ctx, " + id + ", " + params + ")"
+        const std::string v = awaited ? "(co_await lux_module_await(lux_nctx, " + id + ", " + params + "))"
+                            : con_ctx() ? "lux_module_call(lux_nctx, " + id + ", " + params + ")"
                                     : "lux_fn_module_call(" + id + ", " + params + ")";
         const std::string& r = builtin_module_function_at(call.call_index).returns;
         if (r == "string") return "lux_module_str(" + v + ")";
@@ -2406,7 +2406,7 @@ public:
     std::string llamada_asincrona(const IrExpr& call) const {
         const std::string args = argumentos_usuario(call);
         return "(co_await " + nombre_cpp(nombre_por_indice_.at(static_cast<size_t>(call.call_index))) +
-               "(l_ctx" + (args.empty() ? "" : ", " + args) + "))";
+               "(lux_nctx" + (args.empty() ? "" : ", " + args) + "))";
     }
 
     // A user function's arguments; one for a Value parameter goes through
@@ -2750,7 +2750,7 @@ public:
 
             case IrStmtKind::Assign: {
                 if (s.assign_target == IrAssignTarget::Session)
-                    return "lux_dyn_global(l_ctx, " + std::to_string(native_id("__session_set")) + ", LuxL{}.add(Value::str(" +
+                    return "lux_dyn_global(lux_nctx, " + std::to_string(native_id("__session_set")) + ", LuxL{}.add(Value::str(" +
                            literal_string(s.assign_field) + ")).add(" + valor_json(*s.value) + ").items());";
                 if (comprobador_.en_value(s) && s.assign_target == IrAssignTarget::Member)
                     return "lux_json_set_member(" + expr(*s.assign_object) + ", " + literal_string(s.assign_field) +
@@ -2882,22 +2882,22 @@ public:
     // Like bytecode's ctx.response_written: when something in the body
     // already wrote the response (pdf.send()), the return value is dropped.
     std::string respuesta_de_retorno(const IrExpr* e) const {
-        if (!e) return "if (!lux_answered(res, l_ctx)) res.status(204).send(\"\"); " + ret_vacio();
+        if (!e) return "if (!lux_answered(res, lux_nctx)) res.status(204).send(\"\"); " + ret_vacio();
         if (registro(e))
-            return "if (!lux_answered(res, l_ctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(lux_rec_json(" +
+            return "if (!lux_answered(res, lux_nctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(lux_rec_json(" +
                    nombre_cpp(e->text) + ")); " + ret_vacio();
         // A literal's JSON is the same every time: serialized here, once,
         // by the very Value::to_json_text() the request would have run.
         if (Value k; constante(*e, k) && !k.is_null())
-            return "if (!lux_answered(res, l_ctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(std::string(" +
+            return "if (!lux_answered(res, lux_nctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(std::string(" +
                    literal_string(k.to_json_text()) + ")); " + ret_vacio();
         // A dynamic value may turn out null at run time: a 204, as in bytecode.
         auto t = comprobador_.tipo_provable(*e);
         if (t && es_json_dinamico(*t))
-            return "{ Value __r = " + valor_json(*e) + "; if (!lux_answered(res, l_ctx)) { if (__r.is_null()) "
+            return "{ Value __r = " + valor_json(*e) + "; if (!lux_answered(res, lux_nctx)) { if (__r.is_null()) "
                    "res.status(204).send(\"\"); else res.header(\"Content-Type\", \"application/json; "
                    "charset=utf-8\").send(__r.to_json_text()); } } " + ret_vacio();
-        return "if (!lux_answered(res, l_ctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
+        return "if (!lux_answered(res, lux_nctx)) res.header(\"Content-Type\", \"application/json; charset=utf-8\").send(" +
                valor_json(*e) + ".to_json_text()); " + ret_vacio();
     }
 
@@ -3011,7 +3011,7 @@ public:
     // de una transaccion abierta ya es un fallo grave del motor, y este
     // documento evita a proposito que bytecode y --native diverjan en que
     // limpian y que no.
-    // A route, or an async function: it has the request's NativeCtx as l_ctx.
+    // A route, or an async function: it has the request's NativeCtx as lux_nctx.
     bool con_ctx() const { return ruta_ || asincrona_; }
 
     std::string ret_vacio() const {
@@ -3231,17 +3231,17 @@ std::optional<FuncionNativa> generar_funcion_nativa(const FnDecl& fn, const IrBl
     // ponytail: no LuxDepth here -- a thread_local count is wrong across
     // suspensions; recursion through await grows the heap, not the stack.
     if (comprobador.usa_await()) {
-        std::string params = "lux_script::NativeCtx& l_ctx";
+        std::string params = "lux_script::NativeCtx& lux_nctx";
         for (size_t i = 0; i < fn.params.size(); ++i)
             params += ", " + tipo_cpp(firma.params[i]) + " " + nombre_cpp(fn.params[i].name);
         out.firma_cpp = "lux::Task<" + tipo_cpp(retorno_decl) + "> " + nombre_cpp(fn.name) + "(" + params + ")";
         Generador gen(nombre_por_indice, comprobador, /*ruta=*/false, /*asincrona=*/true);
         gen.retorno_json(es_json_dinamico(retorno_decl));
         for (size_t i = 0; i < fn.params.size(); ++i) gen.registrar(static_cast<int>(i), fn.params[i].name);
-        out.cuerpo_cpp = "{\n    lux::Request& req = l_ctx.req; lux::Response& res = l_ctx.res; (void)req; (void)res;\n"
-                         "    auto& l_pinned_workers = l_ctx.pinned_workers; (void)l_pinned_workers;\n"
-                         "    auto& l_last_insert_ids = l_ctx.last_insert_ids; (void)l_last_insert_ids;\n"
-                         "    auto& l_poisoned_db = l_ctx.poisoned_db; (void)l_poisoned_db;\n" +
+        out.cuerpo_cpp = "{\n    lux::Request& req = lux_nctx.req; lux::Response& res = lux_nctx.res; (void)req; (void)res;\n"
+                         "    auto& l_pinned_workers = lux_nctx.pinned_workers; (void)l_pinned_workers;\n"
+                         "    auto& l_last_insert_ids = lux_nctx.last_insert_ids; (void)l_last_insert_ids;\n"
+                         "    auto& l_poisoned_db = lux_nctx.poisoned_db; (void)l_poisoned_db;\n" +
                          gen.block(body, 1) +
                          (retorno_decl.kind() == Type::Kind::Void ? "    co_return;\n}"
                           : cae_al_final ? "    co_return Value::null();\n}" : "}");
@@ -3770,10 +3770,10 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // mismo hilo. Barato: un vector vacio no reasigna memoria al
     // limpiarse.
     cuerpo += "    lux_script::last_validation_messages().clear();\n";
-    cuerpo += "    lux_script::NativeCtx l_ctx = lux_route_ctx(req, res);\n";
+    cuerpo += "    lux_script::NativeCtx lux_nctx = lux_route_ctx(req, res);\n";
     if (comprobador.usa_sesion())
         cuerpo += "    lux_script::SessionState l_session;\n    Value l_claims;\n"
-                  "    lux_script::begin_auth(*g_lux_auth, req, l_session, l_claims, l_ctx);\n";
+                  "    lux_script::begin_auth(*g_lux_auth, req, l_session, l_claims, lux_nctx);\n";
     // Parsed at most once per request, only if some query-style parameter
     // below actually needs it (req.form() itself is cheap when the
     // content-type is not application/x-www-form-urlencoded -- it returns
@@ -3800,13 +3800,13 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     // The ctx's own: an async function called from here pins the same
     // connections (NativeCtx is what the VM shares across calls too).
     if (asincrona)
-        cuerpo += "    auto& l_pinned_workers = l_ctx.pinned_workers;\n"
-                  "    auto& l_last_insert_ids = l_ctx.last_insert_ids;\n"
-                  "    auto& l_poisoned_db = l_ctx.poisoned_db;\n";
+        cuerpo += "    auto& l_pinned_workers = lux_nctx.pinned_workers;\n"
+                  "    auto& l_last_insert_ids = lux_nctx.last_insert_ids;\n"
+                  "    auto& l_poisoned_db = lux_nctx.poisoned_db;\n";
     if (preparar) {
         if (con_archivos)
             cuerpo += "    std::vector<lux::MultipartPart> l__parts;\n"
-                      "    if (auto p = lux::parse_multipart(req)) { l__parts = std::move(*p); l_ctx.parts = &l__parts; l_ctx.uploads = true; }\n";
+                      "    if (auto p = lux::parse_multipart(req)) { l__parts = std::move(*p); lux_nctx.parts = &l__parts; lux_nctx.uploads = true; }\n";
         // A Dict class body whose validate: rules compiled: bytecode binds
         // it, the rules run here (see construir_clases).
         const ClaseNativa* reglas = nullptr;
@@ -3819,7 +3819,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
         }
         cuerpo += "    std::vector<Value> l__args;\n"
                   "    if (!lux_script::prepare_native_args(g_lux_binds, " + std::to_string(indice) +
-                  ", req, res, l_ctx, l__args" + (reglas ? ", false" : "") + ")) { " + gen.ret_vacio() + " }\n";
+                  ", req, res, lux_nctx, l__args" + (reglas ? ", false" : "") + ")) { " + gen.ret_vacio() + " }\n";
         if (reglas) {
             cuerpo += "    {\n        const Value::Dict& __d = l__args[" + std::to_string(reglas_en) + "].as_dict();\n";
             for (const auto& c : reglas->campos)
@@ -3955,7 +3955,7 @@ std::optional<RutaNativa> generate_native_route(const RouteDecl& route, const Ir
     if (asincrona && comprobador.usa_transaccion())
         cuerpo += "    co_await lux_script::rollback_pending_db(l_pinned_workers, req.loop);\n";
     if (comprobador.usa_sesion()) cuerpo += "    lux_script::end_auth(*g_lux_auth, l_session, res);\n";
-    cuerpo += "    if (!lux_answered(res, l_ctx)) res.status(204).send(\"\");\n";
+    cuerpo += "    if (!lux_answered(res, lux_nctx)) res.status(204).send(\"\");\n";
     cuerpo += "    } catch (const LuxNativeError&) {\n";
     cuerpo += "        Value::Dict __e;\n";
     // is_production_mode() (natives.hpp) -- same function bytecode's own
@@ -4765,6 +4765,14 @@ std::string string_runtime_prelude() {
         "static bool lux_str_contains(const std::string& s, const std::string& n) {\n"
         "    return s.find(n) != std::string::npos;\n"
         "}\n"
+        // A Json argument (an element of a List<Json>, a slice of one...): it has to be a string at run time.
+        "static const std::string& lux_str_arg(const lux_script::Value& v) {\n"
+        "    if (!v.is_str()) lux_native_fail(\"string method: the argument must be a string\");\n"
+        "    return v.as_str();\n"
+        "}\n"
+        "static bool lux_str_starts_with(const std::string& s, const lux_script::Value& n) { return lux_str_starts_with(s, lux_str_arg(n)); }\n"
+        "static bool lux_str_ends_with(const std::string& s, const lux_script::Value& n) { return lux_str_ends_with(s, lux_str_arg(n)); }\n"
+        "static bool lux_str_contains(const std::string& s, const lux_script::Value& n) { return lux_str_contains(s, lux_str_arg(n)); }\n"
         // lux_script::utf8_upper/lower (value.hpp, already included -- see
         // this file's header comment) is called directly rather than
         // reimplemented here, the same as lux_json_len() calls
@@ -5076,7 +5084,7 @@ std::string route_runtime_prelude() {
         "}\n"
         // generate_native_template: a field of a Dict in place (null if it is
         // not there), or nullptr when the VM has to say why it cannot be read.
-        "static const Value lux_tpl_none;\n"
+        "static const Value lux_tpl_none{};\n"
         // `hint`: where this {{ }} found its key last time -- rows built from
         // one literal keep their keys in the same order. The key's length is
         // a constant, so the compare is a couple of loads, not a memcmp call.

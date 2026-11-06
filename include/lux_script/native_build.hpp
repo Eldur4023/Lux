@@ -119,4 +119,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
                                               const FunctionTable* chunks = nullptr,
                                               const EnumSigs* enums = nullptr);
 
+// True when this binary (or library) carries an app compiled ahead of time: generated with LUX_NATIVE_EMIT, built
+// into it, and found through its `lux_native_manifest`. Then --native needs no compiler at run time.
+bool native_prebuilt_available();
+
 } // namespace lux_script

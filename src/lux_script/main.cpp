@@ -33,10 +33,19 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <thread>
 
 namespace fs = std::filesystem;
+
+#ifdef LUX_EMBEDDED
+// Hooks of the embedding shell (Lux-Local's Android boot): `vet` sees the app's declaration once compiled and
+// returns an error text to refuse it (so the shell need not compile the app a second time); `listening` fires on
+// the main loop as soon as the server accepts connections (so the shell need not poll the port).
+std::function<std::string(const lux_script::AppDecl&)> lux_embedded_vet;
+std::function<void()>                                  lux_embedded_listening;
+#endif
 
 namespace {
 
@@ -538,6 +547,10 @@ int main(int argc, char** argv) {
     publish_module(mod);
 
     const lux_script::AppDecl& cfg = mod->program.app;
+#ifdef LUX_EMBEDDED
+    if (lux_embedded_vet)
+        if (std::string why = lux_embedded_vet(cfg); !why.empty()) { std::cerr << "lux: " << why << "\n"; return 1; }
+#endif
     const lux_script::TlsDecl& tls = mod->program.tls;
     lux::App app;
     // One line per request, with its flush, costs close to 25% of the
@@ -678,6 +691,10 @@ int main(int argc, char** argv) {
             std::thread(run_tests, std::cref(*mod), lux::DispatchFn(dispatch), filter).detach();
         };
     }
+#ifdef LUX_EMBEDDED
+    if (lux_embedded_listening)
+        boot = [inner = std::move(boot)](lux::core::EventLoop& loop) { if (inner) inner(loop); lux_embedded_listening(); };
+#endif
     if (boot) app.on_start(boot);
 
     // See App::set_route_probe's comment: router_ only ever holds the two

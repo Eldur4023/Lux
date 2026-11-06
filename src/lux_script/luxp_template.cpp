@@ -5,6 +5,7 @@
 // (both the same whatever the data is, compressed once).  At request time the
 // plan only evaluates the holes, with the template engine's own machinery.
 
+#include <lux/atomic_shared.hpp>
 #include <page/doc_template_run.hpp>
 #include <charconv>
 #include "luxp_internal.hpp"
@@ -50,7 +51,7 @@ struct Plan {
     std::unique_ptr<DocTemplate>                      doc;        // null with html_only
     bool                                              html_only = false;   // JavaScript: never a .luxp
     std::string                                       skeleton;   // to rebuild the sheet when a file changes
-    std::atomic<std::shared_ptr<const li::SheetData>> sheet;
+    lux::atomic_shared_ptr<const li::SheetData>       sheet;
     std::atomic<int64_t>                              checked{0};
     luxium::page::Blob                                program;    // compressed once; empty without a script
     // A script with {{ }} in string literals: the program is compiled once with a marker in each such constant,
@@ -247,7 +248,7 @@ private:
     }
 
     const Value* evaluate(uint32_t idx, Value& tmp) {
-        static const Value kNull;
+        static const Value kNull{};
         if (const Value* v = direct(idx)) return v;
         const Chunk& c = t_.exprs[idx];
         const auto& code = c.code;

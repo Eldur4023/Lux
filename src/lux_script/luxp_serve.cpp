@@ -1,3 +1,4 @@
+#include <lux/atomic_shared.hpp>
 #include <lux_script/luxp_serve.hpp>
 
 #include <lux/logger.hpp>
@@ -32,7 +33,7 @@ using luxium::page::blob_plain;
 using luxium::page::PageSections;
 namespace li = luxp_internal;
 
-std::atomic<std::shared_ptr<const std::vector<StaticMount>>> g_statics{
+lux::atomic_shared_ptr<const std::vector<StaticMount>> g_statics{
     std::make_shared<const std::vector<StaticMount>>()};
 
 std::optional<std::string> read_disk(const fs::path& p) {
