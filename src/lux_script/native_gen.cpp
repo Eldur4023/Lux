@@ -2983,8 +2983,7 @@ public:
                          : valor_json(*a[0].value) + ".to_json_text()") + ")";
         if (e.call_name == "redirect") {
             const std::string codigo = a.size() > 1 ? expr(*a[1].value) : "302";
-            return "res.status(" + codigo + ").header(\"Location\", " + expr(*a[0].value) +
-                   ").send(\"\")";
+            return "lux_script::redirect_checked(res, " + codigo + ", " + expr(*a[0].value) + ")";
         }
         if (e.call_name == "send_file") return "lux_script::send_file_checked(req, res, " + expr(*a[0].value) + ")";
         return ""; // inalcanzable: es_llamada_respuesta() ya lo descarto

@@ -140,6 +140,13 @@ static int cb_on_headers_complete(llhttp_t* p) {
     int minor = llhttp_get_http_minor(p);
     c->current.version = (major == 1 && minor == 0) ? "HTTP/1.0" : "HTTP/1.1";
 
+    // RFC 9112 §3.2: an HTTP/1.1 request without Host is a 400.
+    if (!(major == 1 && minor == 0)) {
+        bool has_host = false;
+        for (const auto& h : c->current.headers) if (h.first == "host") { has_host = true; break; }
+        if (!has_host) { c->error = true; return HPE_USER; }
+    }
+
     // A declared Content-Length over the cap is refused now, before a byte of
     // the body is read (chunked bodies are still caught in cb_on_body).
     for (const auto& h : c->current.headers)

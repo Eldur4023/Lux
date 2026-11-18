@@ -94,10 +94,14 @@ bool verify_jwt(const std::string& token, const std::string& secret,
     Value payload;
     if (!Value::parse_json(payload_text, payload) || !payload.is_dict()) return false;
 
-    if (auto it = payload.as_dict().find("exp");
-        it != payload.as_dict().end() && it->second.is_num()) {
-        const long long now = static_cast<long long>(std::time(nullptr));
-        if (static_cast<long long>(it->second.as_float()) < now) return false;
+    const long long now = static_cast<long long>(std::time(nullptr));
+    // A claim that is present but not a number used to be skipped: {"exp":"x"} made a token that never expires.
+    for (const char* claim : {"exp", "nbf"}) {
+        auto it = payload.as_dict().find(claim);
+        if (it == payload.as_dict().end()) continue;
+        if (!it->second.is_num()) return false;
+        const long long t = static_cast<long long>(it->second.as_float());
+        if (claim[0] == 'e' ? t < now : t > now) return false;
     }
     if (!issuer.empty()) {
         // When an issuer is configured, a token with no `iss` claim at all

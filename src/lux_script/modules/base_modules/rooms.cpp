@@ -78,6 +78,13 @@ public:
 
     void join(const std::string& room, Member conn) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Dead members are otherwise only dropped from a room something touches again: clients joining
+        // rooms with names of their own and disconnecting grew rooms_ forever. Every 1024 joins, all of it.
+        if (++joins_ % 1024 == 0)
+            for (auto it = rooms_.begin(); it != rooms_.end();) {
+                remove_locked(it->second, nullptr);
+                it = it->second.empty() ? rooms_.erase(it) : std::next(it);
+            }
         auto& members = rooms_[room];
         remove_locked(members, conn.who);   // joining twice is still one membership
         members.push_back(std::move(conn));
@@ -135,6 +142,7 @@ private:
 
     std::mutex                               mutex_;
     std::unordered_map<std::string, Members> rooms_;
+    unsigned long long                       joins_ = 0;
 };
 
 // The calling connection's identity (see Member::who), or an error outside

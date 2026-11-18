@@ -286,7 +286,7 @@ public:
         const fs::path to = root_ / key, tmp = to.string() + ".tmp";
         std::error_code ec;
         fs::create_directories(to.parent_path(), ec);
-        FILE* out = std::fopen(tmp.c_str(), "wb");
+        FILE* out = std::fopen(tmp.c_str(), "wbe");
         if (!out) { err = "cannot write " + tmp.string() + ": " + std::strerror(errno); return false; }
         char   buf[1 << 16];
         size_t n;
@@ -412,7 +412,7 @@ protected:
         return true;
     }
     bool download(const std::string& url, const std::string& to_file, std::string& err) {
-        FILE* out = std::fopen(to_file.c_str(), "wb");
+        FILE* out = std::fopen(to_file.c_str(), "wbe");
         if (!out) { err = "cannot write " + to_file; return false; }
         long code = 0;
         bool ok = run(url, err, &code, [&](CURL* h) { curl_easy_setopt(h, CURLOPT_WRITEDATA, out); });
@@ -1075,7 +1075,7 @@ private:
         } else {
             std::error_code ec;
             size = fs::file_size(item.file->path, ec);
-            in   = std::fopen(item.file->path.c_str(), "rb");
+            in   = std::fopen(item.file->path.c_str(), "rbe");
         }
         if (!in) { err = std::string("replicate: ") + std::strerror(errno); return false; }
         const bool ok = t.put(item.key, in, size, err);

@@ -180,9 +180,16 @@ std::string param(const std::string& value, const std::string& key) {
                 if (b == std::string::npos) return r;
                 std::string out;
                 const std::string enc = r.substr(b + 1);
-                for (size_t i = 0; i < enc.size(); ++i)
-                    out += enc[i] == '%' && i + 2 < enc.size() ? static_cast<char>(std::stoi(enc.substr(i + 1, 2), nullptr, 16)) : enc[i],
-                           i += enc[i] == '%' && i + 2 < enc.size() ? 2 : 0;
+                // Not std::stoi: it throws on "%zz" (a hostile message aborting the whole parse) and takes "+1"/"-1".
+                for (size_t i = 0; i < enc.size(); ++i) {
+                    if (enc[i] == '%' && i + 2 < enc.size() &&
+                        std::isxdigit(static_cast<unsigned char>(enc[i + 1])) && std::isxdigit(static_cast<unsigned char>(enc[i + 2]))) {
+                        out += static_cast<char>(std::stoi(enc.substr(i + 1, 2), nullptr, 16));
+                        i += 2;
+                    } else {
+                        out += enc[i];
+                    }
+                }
                 return to_utf8(out, r.substr(0, a));
             }
             return r;
@@ -267,13 +274,29 @@ std::string b64_standard(const std::string& in) {
 }
 
 // html with every `cid:<id>` of an inline image replaced by a data: URI, so it displays without the message.
+// The message picks both how many times html says cid:x and how big x is: 1 MB of "cid:x" over a 1.5 MB
+// image was terabytes. Past kMaxEmbeddedHtml the remaining references stay cid: (html_cid has them all anyway).
+constexpr size_t kMaxEmbeddedHtml = 32u << 20;
+
 std::string embed_cid_images(std::string html, const Value::List& atts, const std::vector<std::string>& bytes) {
     for (size_t i = 0; i < atts.size() && i < bytes.size(); ++i) {
         const auto& d = atts[i].as_dict();
         auto cid = d.find("cid"), type = d.find("type");
         if (bytes[i].empty() || cid == d.end() || cid->second.as_str().empty()) continue;
-        const std::string needle = "cid:" + cid->second.as_str(), uri = "data:" + type->second.as_str() + ";base64," + b64_standard(bytes[i]);
-        for (size_t pos = 0; (pos = html.find(needle, pos)) != std::string::npos; pos += uri.size()) html.replace(pos, needle.size(), uri);
+        // The type comes from the message's Content-Type: only a plain token may go inside src="...".
+        const std::string& t = type->second.as_str();
+        if (!std::all_of(t.begin(), t.end(), [](unsigned char c) { return std::isalnum(c) || c == '/' || c == '+' || c == '-' || c == '.'; }))
+            continue;
+        const std::string needle = "cid:" + cid->second.as_str(), uri = "data:" + t + ";base64," + b64_standard(bytes[i]);
+        std::string out;
+        size_t from = 0;
+        for (size_t pos; (pos = html.find(needle, from)) != std::string::npos; from = pos + needle.size()) {
+            if (out.size() + (pos - from) + uri.size() > kMaxEmbeddedHtml) break;
+            out.append(html, from, pos - from);
+            out += uri;
+        }
+        out.append(html, from, std::string::npos);
+        html = std::move(out);
     }
     return html;
 }

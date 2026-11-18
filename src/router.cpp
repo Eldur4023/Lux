@@ -192,11 +192,18 @@ bool Router::match_recursive(
     if (next) {
         // Decode only the bound value (static segments match literally); no '+'
         // folding in a path, so GET /echo/%34%32 binds "42".
-        params[next->segment] = lux::percent_decode(std::string(seg), false);
-        if (match_recursive(next, segments, index + 1, method, params, out_handler, out_via_wildcard)) {
-            return true;
+        std::string value = lux::percent_decode(std::string(seg), false);
+        // A path parameter is one segment, and handlers routinely feed it to a path ("uploads/" + id).
+        // "%2F" decoded to '/', and "%2e%2e" (or a plain "..") to a traversal; none is a real identifier,
+        // so such a segment simply does not match a :param (a 404, or another route).
+        const bool unsafe = value.find('/') != std::string::npos || value == "." || value == "..";
+        if (!unsafe) {
+            params[next->segment] = std::move(value);
+            if (match_recursive(next, segments, index + 1, method, params, out_handler, out_via_wildcard)) {
+                return true;
+            }
+            params.erase(next->segment); // backtrack
         }
-        params.erase(next->segment); // backtrack
     }
 
     // 3. Try wildcard

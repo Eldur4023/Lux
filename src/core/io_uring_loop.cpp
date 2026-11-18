@@ -129,6 +129,13 @@ IoUringLoop::IoUringLoop() {
 }
 
 IoUringLoop::~IoUringLoop() {
+    // The callbacks own connections whose destructors call back into remove()/cancel_timer(): run them
+    // out of a local map, while the rings are still mapped, not from inside entries_' own destructor.
+    {
+        auto doomed = std::move(entries_);
+        entries_.clear();
+        doomed.clear();
+    }
     if (sqes_map_ && sqes_map_ != MAP_FAILED) munmap(sqes_map_, sqes_sz_);
     if (cq_ring_ && cq_ring_ != MAP_FAILED && cq_ring_ != sq_ring_)
         munmap(cq_ring_, cq_ring_sz_);
@@ -313,27 +320,33 @@ void IoUringLoop::run() {
             auto it = entries_.find(token);
             if (it == entries_.end()) continue;
 
-            // Convert io_uring poll result bits to epoll-style events
+            // Convert io_uring poll result bits to epoll-style events. A negative res is an
+            // error (-EBADF, -ECANCELED...), not a bit set: reading its bits invented events.
             uint32_t ev = 0;
-            if (res & POLLIN)  ev |= EPOLLIN;
-            if (res & POLLOUT) ev |= EPOLLOUT;
-            if (res & POLLHUP) ev |= EPOLLHUP;
-            if (res & POLLERR) ev |= EPOLLERR;
+            if (res < 0) ev = EPOLLERR;
+            else {
+                if (res & POLLIN)  ev |= EPOLLIN;
+                if (res & POLLOUT) ev |= EPOLLOUT;
+                if (res & POLLHUP) ev |= EPOLLHUP;
+                if (res & POLLERR) ev |= EPOLLERR;
+            }
 
-            // Make a copy so callback can call remove() / modify() safely
+            // Copies: the callback may remove()/modify() this fd, erasing the entry `it` points to.
             Callback cb = it->second.cb;
+            const int      efd     = it->second.fd;
+            const uint32_t eevents = it->second.events;
 
             // If the multishot was cancelled (no MORE flag) and the fd is
             // still registered, re-arm it.
-            bool rearm = !(flags & IORING_CQE_F_MORE) && (fd_token_.count(it->second.fd));
+            bool rearm = !(flags & IORING_CQE_F_MORE) && (fd_token_.count(efd));
 
             cb(ev);
 
             if (rearm) {
-                auto it2 = fd_token_.find(it->second.fd);
+                auto it2 = fd_token_.find(efd);
                 if (it2 != fd_token_.end() && it2->second == token) {
                     // Still the same token — re-arm
-                    submit_poll(it->second.fd, it->second.events, token);
+                    submit_poll(efd, eevents, token);
                     flush_sqes();
                 }
             }

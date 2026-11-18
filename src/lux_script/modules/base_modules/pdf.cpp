@@ -35,6 +35,8 @@ struct PdfDoc {
     std::string      family = "sans";
     bool             bold = false, italic = false;
 
+    std::mutex       mu;           // cairo contexts are not thread-safe, and a handle can be used by any request
+
     PdfDoc() = default;
     PdfDoc(const PdfDoc&) = delete;
     PdfDoc& operator=(const PdfDoc&) = delete;
@@ -79,11 +81,24 @@ Value fn_pdf_create(NativeCtx&, std::vector<Value>& a, std::string& error) {
     return Value::integer(handles().put(std::move(doc)));
 }
 
-std::shared_ptr<PdfDoc> doc(std::vector<Value>& a, std::string& error, bool drawing = true) {
-    auto d = handles().get(a[0].as_int());
-    if (!d) error = "pdf: unknown handle";
-    else if (drawing && d->finished) { error = "pdf: document already saved; cannot draw on it anymore"; return nullptr; }
-    return d;
+// A document held with its own lock for as long as the call runs: the same handle drawn from two
+// requests at once (a shared handle is legal) corrupted cairo's state, a crash in the worst case.
+struct Locked {
+    std::shared_ptr<PdfDoc>      p;
+    std::unique_lock<std::mutex> lock;
+    explicit operator bool() const { return static_cast<bool>(p); }
+    PdfDoc* operator->() const { return p.get(); }
+    PdfDoc& operator*() const { return *p; }
+    PdfDoc* get() const { return p.get(); }
+};
+
+Locked doc(std::vector<Value>& a, std::string& error, bool drawing = true) {
+    Locked l;
+    l.p = handles().get(a[0].as_int());
+    if (!l.p) { error = "pdf: unknown handle"; return l; }
+    l.lock = std::unique_lock<std::mutex>(l.p->mu);
+    if (drawing && l.p->finished) { error = "pdf: document already saved; cannot draw on it anymore"; return Locked{}; }
+    return l;
 }
 
 double num(const std::vector<Value>& a, size_t i) { return a[i].as_float(); }
@@ -305,7 +320,7 @@ Value fn_pdf_image(NativeCtx&, std::vector<Value>& a, std::string& error) {
 }
 
 // The document, finished (its bytes in ->buffer), or nullptr with `error`.
-std::shared_ptr<PdfDoc> finished(std::vector<Value>& a, std::string& error) {
+Locked finished(std::vector<Value>& a, std::string& error) {
     auto d = doc(a, error, false);
     if (d) finish(*d);
     return d;

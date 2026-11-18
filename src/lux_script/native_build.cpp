@@ -21,6 +21,17 @@
 
 namespace lux_script {
 
+namespace {
+// One shell word. std::quoted() gave "..." with backslash escapes, and inside double quotes the shell still
+// expands $(...), `...` and $VAR: a project directory named after a command ran that command.
+std::string sh_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) { if (c == '\'') out += "'\\''"; else out += c; }
+    return out + "'";
+}
+}
+
+
 NativeModule::~NativeModule() {
 #ifndef LUX_NATIVE_UNAVAILABLE
     if (handle_) dlclose(handle_);
@@ -594,9 +605,9 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // saber, en tiempo de ejecucion, donde viven las cabeceras del proyecto
     // ni donde quedo liblux_script.a ya compilada. Necesarias siempre
     // (Value ya no es opcional, ver arriba), no solo "si con_rutas".
-    cmd << "-I" << std::quoted(std::string(LUX_NATIVE_INCLUDE_DIR)) << " ";
-    cmd << std::quoted(src_path.string()) << " -o " << std::quoted(so_path.string());
-    cmd << " " << std::quoted(std::string(LUX_NATIVE_SCRIPT_LIB));
+    cmd << "-I" << sh_quote(std::string(LUX_NATIVE_INCLUDE_DIR)) << " ";
+    cmd << sh_quote(src_path.string()) << " -o " << sh_quote(so_path.string());
+    cmd << " " << sh_quote(std::string(LUX_NATIVE_SCRIPT_LIB));
 // The optional modules' libraries (cairo, curl, libcrypto...): the archive
     // carries their objects whatever this .lux uses -- see
     // lux_optional_module() in CMakeLists.txt. Several flags, not quoted.
@@ -608,8 +619,8 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // .cpp (que la necesita directamente para Task<void>::promise_type::
     // FinalAwaitable::await_suspend -- EpollLoop::post -- en cualquier ruta
     // con `await`, ver el comentario de LUX_NATIVE_LIB en CMakeLists.txt).
-    if (con_rutas) cmd << " " << std::quoted(std::string(LUX_NATIVE_LIB));
-    cmd << " 2> " << std::quoted(err_path.string());
+    if (con_rutas) cmd << " " << sh_quote(std::string(LUX_NATIVE_LIB));
+    cmd << " 2> " << sh_quote(err_path.string());
 
     // Build cache: g++ takes seconds, and the same program generates the
     // same .cpp every start. The key covers the source, the exact command

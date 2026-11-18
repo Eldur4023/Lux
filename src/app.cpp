@@ -401,10 +401,9 @@ static void serve_from_mount(const App::StaticMount& m, const Request& req, Resp
         if (rel.find('\0') != std::string::npos) return fail(404, R"({"error":"Not Found"})");
         static const std::string kWellKnown = "/.well-known/";
         bool is_well_known = rel.compare(0, kWellKnown.size(), kWellKnown) == 0;
-        if (!is_well_known) {
-            for (size_t i = 0; i < rel.size(); ++i) {
-                if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') return fail(404, R"({"error":"Not Found"})");
-            }
+        // Inside /.well-known/ only the prefix itself is exempt: "/.well-known/../.env" must still hit the dotfile block.
+        for (size_t i = is_well_known ? kWellKnown.size() - 1 : 0; i < rel.size(); ++i) {
+            if (rel[i] == '/' && i + 1 < rel.size() && rel[i + 1] == '.') return fail(404, R"({"error":"Not Found"})");
         }
 
 #ifndef _WIN32

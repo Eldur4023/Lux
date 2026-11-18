@@ -170,7 +170,7 @@ Value fn_redirect(NativeCtx& ctx, std::vector<Value>& args, std::string& error) 
         }
         code = static_cast<int>(args[1].as_int());
     }
-    ctx.res.status(code).header("Location", args[0].as_str()).send("");
+    redirect_checked(ctx.res, code, args[0].as_str());
     ctx.response_written = true;
     return Value::null();
 }
@@ -194,6 +194,31 @@ std::string percent(const std::string& s) {
 } // namespace
 
 } // namespace (the file-wide anonymous one: send_file_checked is public)
+
+bool redirect_checked(lux::Response& res, long long code, const std::string& target) {
+    auto bad = [&](const char* why) {
+        lux::log().error(std::string("redirect(): ") + why);
+        res.status(500).json_text(R"({"error":"Internal Server Error"})");
+        return false;
+    };
+    if (code != 301 && code != 302 && code != 303 && code != 307 && code != 308)
+        return bad("the status must be 301, 302, 303, 307 or 308");
+    // Browsers drop tabs/newlines inside a URL ("/\t/evil.com" is "//evil.com") and ignore leading controls/spaces.
+    std::string t;
+    for (char c : target)
+        if (c != '\t' && c != '\r' && c != '\n' && c != '\0') t += c;
+    const size_t start = t.find_first_not_of(' ');
+    t = start == std::string::npos ? std::string() : t.substr(start);
+    if (t.size() >= 2 && (t[0] == '/' || t[0] == '\\') && (t[1] == '/' || t[1] == '\\'))
+        return bad("a target starting with // or /\\ points at another host");
+    std::string scheme;
+    for (char c : t) { if (c == ':') break; if (c == '/' || c == '?' || c == '#') { scheme.clear(); break; } scheme += static_cast<char>(std::tolower(static_cast<unsigned char>(c))); }
+    if (scheme == "javascript" || scheme == "data" || scheme == "vbscript")
+        return bad("a javascript:, data: or vbscript: target is never a redirect");
+    res.status(static_cast<int>(code)).header("Location", target).send("");
+    return true;
+}
+
 
 void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
                        const std::string* root, const std::string& filename, bool inline_) {
@@ -331,9 +356,19 @@ Value fn_range(NativeCtx&, std::vector<Value>& args, std::string& error) {
 
     if (step == 0) { error = "range(): step cannot be 0"; return Value::null(); }
 
+    // Element count computed in unsigned arithmetic (end - start overflows a long long for far-apart bounds),
+    // and capped: range(n) with an n from the request must not be able to exhaust memory.
+    constexpr unsigned long long kMaxRange = 10'000'000;
+    unsigned long long count = 0;
+    if (step > 0 && end > start)      count = (static_cast<unsigned long long>(end) - static_cast<unsigned long long>(start) - 1) / static_cast<unsigned long long>(step) + 1;
+    else if (step < 0 && start > end) count = (static_cast<unsigned long long>(start) - static_cast<unsigned long long>(end) - 1) / (0ull - static_cast<unsigned long long>(step)) + 1;
+    if (count > kMaxRange) { error = "range(): more than " + std::to_string(kMaxRange) + " elements"; return Value::null(); }
+
     Value::List out;
-    if (step > 0) for (long long i = start; i < end; i += step) out.push_back(Value::integer(i));
-    else          for (long long i = start; i > end; i += step) out.push_back(Value::integer(i));
+    out.reserve(static_cast<size_t>(count));
+    unsigned long long cur = static_cast<unsigned long long>(start);
+    for (unsigned long long k = 0; k < count; ++k, cur += static_cast<unsigned long long>(step))
+        out.push_back(Value::integer(static_cast<long long>(cur)));
     return Value::list(std::move(out));
 }
 
@@ -1151,6 +1186,11 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             if (!args[0].is_int()) { error = "'repeat()' expects an int"; return Value::null(); }
             long long n = args[0].as_int();
             if (n < 0) { error = "'repeat()': the count cannot be negative"; return Value::null(); }
+            constexpr size_t kMaxRepeat = 256u << 20;   // 256 MB: a count from the request must not exhaust memory
+            if (!s.empty() && static_cast<unsigned long long>(n) > kMaxRepeat / s.size()) {
+                error = "'repeat()': the result would be over 256 MB";
+                return Value::null();
+            }
             std::string out;
             out.reserve(s.size() * static_cast<size_t>(n));
             for (long long i = 0; i < n; ++i) out += s;
@@ -1468,6 +1508,15 @@ Value call_method(NativeCtx& ctx, Value& recv, const std::string& name,
             auto  fn   = d.find("filename");
             // save(dir, name) picks the name (still cut to a bare file name); the client's is the default.
             std::string base = safe_name(args.size() > 1 ? args[1].as_str() : fn == d.end() ? "" : fn->second.to_string());
+            if (args.size() == 1) {
+                // A name picked by the client: an extension a browser renders as active content would be stored XSS
+                // if the directory is ever served (static mount, send_file). Neutralised by appending ".txt";
+                // a name the script picks itself (save(dir, name)) is trusted as given.
+                std::string low = split_ext(base).second;
+                for (auto& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                for (const char* bad : {".html", ".htm", ".xhtml", ".shtml", ".svg", ".svgz", ".xml", ".xsl", ".js", ".mjs", ".css", ".swf", ".hta"})
+                    if (low == bad) { base += ".txt"; break; }
+            }
             std::string dir  = args[0].as_str();
             if (!dir.empty() && dir.back() != '/') dir += "/";
 

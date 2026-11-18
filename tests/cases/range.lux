@@ -13,3 +13,7 @@ get endpoint("/range/file"):
 # components than the root itself -- must be a 403, not a read past the end.
 get endpoint("/rooted/:name", string name):
     return send_file(name, "tests/cases")
+
+# The same check with the name arriving by a route the router does not filter (a query value).
+get endpoint("/rooted-q"):
+    return send_file(query("name", ""), "tests/cases")
