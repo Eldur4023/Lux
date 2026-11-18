@@ -710,6 +710,11 @@ check "records: two shapes stay Dicts"       GET /records_mixed 200 '[{"a":1},{"
 check "records: a reused slot is not one"   GET /records_slot 200 '{"x":1}'
 check "records: ...and its own branch is"    GET '/records_slot?c=1' 200 '[{"a":1}]'
 
+# .luxp is optional (cmake -DLUX_LUXP=ON); without it these suites do not apply.
+if "$LUX" pack 2>&1 | grep -q "without .luxp support"; then HAS_LUXP=0; else HAS_LUXP=1; fi
+if [ "$HAS_LUXP" = 0 ]; then
+    skip ".luxp suites" "skipped: built without -DLUX_LUXP=ON"
+else
 echo "== .luxp: render() for Luxium (luxp.lux) =="
 export LUX_LUXP_CHECK=1   # the server compares every plan answer with translating its HTML
 next_server "$HERE/cases/luxp.lux" || exit 1
@@ -760,6 +765,7 @@ for n in 1 2 3 4; do
     if [ $? -ne 0 ] && printf '%s' "$out" | grep -qF "$want"; then ok "browser API checked at compile time ($want)"
     else fail "browser API checked at compile time ($want)" "an error containing '$want'" "$(printf '%s' "$out" | head -2)"; fi
 done
+fi
 
 echo "== --native semantics (native_edges.lux) =="
 next_server "$HERE/cases/native_edges.lux" /mixed || exit 1

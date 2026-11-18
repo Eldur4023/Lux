@@ -105,6 +105,7 @@ void usage() {
         "  Runs the `command \"name\":` block (after the `on start:` blocks)\n"
         "  once, as a script: os.argv(), os.input(), os.exit(code)\n"
         "\n"
+#ifdef LUX_LUXP
         "       lux pack <page.html> <out.luxp>\n"
         "\n"
         "  Compiles a static HTML+CSS+LuxScript site (the page, every local\n"
@@ -112,6 +113,7 @@ void usage() {
         "  Luxium.  render() answers .luxp by itself to a client that sends\n"
         "  Accept: application/x-luxp\n"
         "\n"
+#endif
         "       lux test <files|directory> [-- name-filter]\n"
         "\n"
         "  Starts the app on a free port and runs its `test \"name\":` blocks\n"
@@ -410,6 +412,10 @@ int main(int argc, char** argv) {
     // lux pack page.html out.luxp: a static HTML+CSS+LuxScript site compiled
     // into one .luxp (Luxium's format; luxp_serve.hpp).
     if (argc >= 2 && std::string(argv[1]) == "pack") {
+#ifndef LUX_LUXP
+        std::fputs("lux pack: this binary was built without .luxp support (cmake -DLUX_LUXP=ON)\n", stderr);
+        return 2;
+#endif
         if (argc != 4) {
             std::fprintf(stderr, "usage: lux pack <page.html> <out.luxp>\n");
             return 2;

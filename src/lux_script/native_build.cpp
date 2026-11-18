@@ -474,6 +474,11 @@ std::unique_ptr<NativeModule> compile_native(const Program& prog, const Function
     // mas abajo.
     cmd << "-DLUX_IO_URING ";
 #endif
+#ifdef LUX_LUXP
+    // luxp_serve.hpp is the real API only with this defined; the generated code is built against the
+    // same header, so it has to see the same switch as the binary that loads it.
+    cmd << "-DLUX_LUXP ";
+#endif
     // LUX_NATIVE_INCLUDE_DIR/LUX_NATIVE_SCRIPT_LIB: horneadas por CMake
     // (ver CMakeLists.txt) -- el binario `lux` no tiene otra forma de
     // saber, en tiempo de ejecucion, donde viven las cabeceras del proyecto

@@ -309,7 +309,9 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
         }
         std::optional<std::string> luxp = html_to_luxp(html, "/" + name, nullptr);
         return [html, luxp](lux::Request& req, lux::Response& res) {
+#ifdef LUX_LUXP
             res.header("Vary", "Accept");
+#endif
             if (luxp && wants_luxp(req))
                 res.header("Content-Type", "application/x-luxp").send(*luxp);
             else

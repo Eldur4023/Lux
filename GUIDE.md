@@ -654,6 +654,10 @@ served in full, exactly as if the header had never arrived.
 
 ### Pages for Luxium (`.luxp`)
 
+**Optional, off by default.** Build with `cmake -DLUX_LUXP=ON` to get it. Without it `render()`
+answers HTML to every client, `Accept: application/x-luxp` is ignored, and `lux pack` says the
+binary was built without it (the binary is also ~0.8 MB smaller).
+
 [Luxium](../Luxium) is the browser that runs LuxScript instead of JavaScript. It does not
 read your HTML: it reads `.luxp`, pages already compiled into its own structures (DOM tree,
 parsed stylesheets, verified LuxScript bytecode). Lux produces them:
