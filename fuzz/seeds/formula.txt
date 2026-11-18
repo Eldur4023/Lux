@@ -1,0 +1,1 @@
+4d6kh3 + (nivel)d8! + si(d100 <= habilidad; 1; 0) + suma(partes.leves) * 2 ^ 3 & "x"

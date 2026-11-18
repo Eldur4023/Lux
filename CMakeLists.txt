@@ -609,6 +609,10 @@ if(LUX_FUZZ)
     add_executable(fuzz_http fuzz/fuzz_http.cpp)
     target_include_directories(fuzz_http PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     lux_link_script(fuzz_http)
+
+    # The parsers of the built-in modules (mail, images, JSON, CSV, gzip, regex, formula) and templates.
+    add_executable(fuzz_modules fuzz/fuzz_modules.cpp)
+    lux_link_script(fuzz_modules)
 endif()
 
 # ── Examples ──────────────────────────────────────────────────────────────────

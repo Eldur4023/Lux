@@ -1,0 +1,18 @@
+# `http` with NO `http:` block: the default for public_only is true, so a call to a private address
+# (the echo server on 127.0.0.1) is refused unless the call says { "public_only": false }.
+import http
+
+app:
+    name "http-default"
+
+get endpoint("/default"):
+    string msg = ""
+    try:
+        await http.get("http://127.0.0.1:8899/echo")
+    catch e:
+        msg = e.message
+    return { "refused": msg }
+
+get endpoint("/opt_out"):
+    Json r = await http.get("http://127.0.0.1:8899/echo", null, { "public_only": false })
+    return { "status": r["status"] }

@@ -21,6 +21,13 @@ reproduced separately.
   `lux` (it lives in `src/`, not in `include/`); the harness includes it
   directly, as `tests/placeholders.cpp` already does with the postgres driver.
 
+- **`fuzz_modules`** — the parsers that take bytes from outside: `mailparse`,
+  `image` (JPEG/PNG/WebP + EXIF), `json`, `csv`, `gzip`, `regex`, `formula`, and the
+  template compiler. Each module function is called through
+  `BuiltinModuleRegistry`, the way the VM calls it. Seeds are in `fuzz/seeds/`
+  (run from the repository root, or set `LUX_FUZZ_SEEDS`). Pass target names to
+  run only some: `./fuzz_modules 20000 mailparse image`.
+
 ## Building
 
 Separate from the normal build: for ASan/UBSan to be worth anything they have to
@@ -32,8 +39,12 @@ mkdir -p build-fuzz && cd build-fuzz
 cmake -S .. -B . -DCMAKE_BUILD_TYPE=Debug -DLUX_FUZZ=ON -DLUX_JEMALLOC=OFF \
     -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1" \
     -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-cmake --build . -j"$(nproc)" --target fuzz_language fuzz_http
+cmake --build . -j"$(nproc)" --target fuzz_language fuzz_http fuzz_modules
 ```
+
+The same build also gives a sanitizer `lux` (`--target lux-bin`): run the whole
+test suite against it (`tests/run_tests.sh build-fuzz/lux`) to look for memory
+errors in the paths the suites already exercise.
 
 ## Running
 
@@ -43,6 +54,7 @@ export UBSAN_OPTIONS=abort_on_error=1:print_stacktrace=1
 
 ./fuzz_language ../tests/cases 100000   # seeds, iterations
 ./fuzz_http 100000                      # iterations (both internal targets)
+./fuzz_modules 20000                    # iterations per target, from the repo root
 ```
 
 `abort_on_error=1` is what lets `chaos::run()` tell a failing case from a

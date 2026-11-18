@@ -66,6 +66,18 @@ struct AuthConfig {
     std::string jwt_issuer;
 };
 
+// Revocation. The session cookie is stateless, so "log this session out" needs a denylist: each
+// session carries a random id (`lux.sid` in the cookie; `session.sid()`), and a revoked id
+// is refused until the cookie it came in would have expired anyway.
+// ponytail: the denylist is in memory, per process. It covers logout/"log out everywhere" on one
+// instance; for several instances or a restart, store session.sid() in your database and check it
+// (the id is stable for the life of the cookie).
+void revoke_session_id(const std::string& sid, int ttl_seconds);
+bool session_id_revoked(const std::string& sid);
+
+// The session's id, made (and the cookie marked dirty) if it has none yet.
+std::string session_sid(SessionState& session);
+
 // Prepares session and claims before running the handler.
 void begin_auth(const AuthConfig& cfg, lux::Request& req,
                 SessionState& session, Value& claims, NativeCtx& ctx);

@@ -9,6 +9,8 @@
 #include <lux/response.hpp>
 
 #include <ctime>
+#include <mutex>
+#include <unordered_map>
 #include <string_view>
 
 namespace lux_script {
@@ -119,12 +121,49 @@ bool verify_jwt(const std::string& token, const std::string& secret,
     return true;
 }
 
+namespace {
+std::mutex& revoked_mutex() { static std::mutex m; return m; }
+std::unordered_map<std::string, long long>& revoked_map() { static std::unordered_map<std::string, long long> m; return m; }
+}  // namespace
+
+void revoke_session_id(const std::string& sid, int ttl_seconds) {
+    if (sid.empty()) return;
+    const long long now = static_cast<long long>(std::time(nullptr));
+    std::lock_guard<std::mutex> lock(revoked_mutex());
+    auto& m = revoked_map();
+    if (m.size() > 10000)   // entries past their expiry cannot match a live cookie any more
+        std::erase_if(m, [&](const auto& kv) { return kv.second < now; });
+    m[sid] = now + ttl_seconds + 1;
+}
+
+bool session_id_revoked(const std::string& sid) {
+    if (sid.empty()) return false;
+    std::lock_guard<std::mutex> lock(revoked_mutex());
+    auto it = revoked_map().find(sid);
+    return it != revoked_map().end() && it->second >= static_cast<long long>(std::time(nullptr));
+}
+
+std::string session_sid(SessionState& session) {
+    auto it = session.data.find("lux.sid");
+    if (it != session.data.end() && it->second.is_str()) return it->second.as_str();
+    std::string sid = crypto::hex_encode(crypto::random_bytes(16));
+    if (sid.empty()) return {};
+    session.data["lux.sid"] = Value::str(sid);
+    session.dirty = true;
+    return sid;
+}
+
 void begin_auth(const AuthConfig& cfg, lux::Request& req,
                 SessionState& session, Value& claims, NativeCtx& ctx) {
     session.secret = cfg.session_secret;
     if (!cfg.session_secret.empty()) {
         auto cookie = req.cookie(kSessionCookie);
-        if (cookie) load_session(*cookie, cfg.session_secret, session.data);
+        if (cookie && load_session(*cookie, cfg.session_secret, session.data)) {
+            // A revoked session starts empty, exactly like one with a bad signature.
+            auto sid = session.data.find("lux.sid");
+            if (sid != session.data.end() && sid->second.is_str() && session_id_revoked(sid->second.as_str()))
+                session.data.clear();
+        }
         session.loaded = true;
     }
     ctx.session = &session;

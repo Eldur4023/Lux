@@ -11,12 +11,16 @@ import http
 import mail
 
 app:
+    http:
+        public_only false     # the echo server is on 127.0.0.1; the default (true) would refuse it
     mail:
         host "127.0.0.1"
         port 8898
         tls  "none"
         from "Lux Tests <tests@lux.local>"
 
+# With no `http:` override a call refuses private addresses unless it says so; this app turned the
+# default off, so the explicit true is what the /public_only route checks.
 get endpoint("/get_basic"):
     Json r = await http.get("http://127.0.0.1:8899/echo?x=1")
     return r

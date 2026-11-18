@@ -110,4 +110,9 @@ check "'+' is not special on input"     GET /url_encode 200 '"plus_not_special":
 check "unreserved set passes through"   GET /url_encode 200 '"unreserved_untouched":"AZaz09-_.~"'
 check "a full query value round-trips"  GET /url_encode 200 '"full_query_value":"hello%20world%20%26%20more%20%3Dtest"'
 
+echo "== public_only is the default =="
+PORT=$((PORT + 1)); start_server "$HERE/cases/http_default.lux" /default || exit 1
+check "a private address is refused by default" GET /default  200 '"refused":"http.get(): the address is not public (public_only)"'
+check "a call can opt out per request"          GET /opt_out  200 '"status":200'
+
 summary

@@ -434,6 +434,7 @@ app:
         "Content-Security-Policy" "default-src 'self'"
         "Strict-Transport-Security" "max-age=31536000"
     max_body "16MB"                 # request body cap (default 16MB; 512KB, 2GB, bytes or env()).
+    max_memory "512MB"              # bytes a handler may create (strings built, lists grown, what builtins return) before it fails with an error (default 512MB). Not applied to --native routes.
                                     # Past 16MB only multipart uploads are accepted: they stream to a temp file
 
     static "/static" -> "./public"

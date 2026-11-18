@@ -1,0 +1,30 @@
+From: =?UTF-8?B?QW5hIETDrWF6?= <ana@x.com>
+To: b@y.com
+Subject: =?utf-8?q?Hola_caf=C3=A9?=
+Date: Tue, 10 Nov 2026 10:00:00 +0000
+Message-ID: <1@x>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="AA"
+
+--AA
+Content-Type: multipart/related; boundary="BB"
+
+--BB
+Content-Type: text/html; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+<p>caf=E9 <img src=3D"cid:logo"></p>
+--BB
+Content-Type: image/png
+Content-ID: <logo>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--BB--
+--AA
+Content-Type: application/pdf; name="a.pdf"
+Content-Disposition: attachment; filename*=UTF-8''a%C3%B1.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQK
+--AA--
