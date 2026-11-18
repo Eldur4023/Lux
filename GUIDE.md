@@ -187,6 +187,7 @@ app:
     tls_cert  "fullchain.pem" # with tls_key: the port speaks HTTPS (needs -DLUX_TLS=ON)
     tls_key   "privkey.pem"
     max_body  "16MB"          # request body cap (see §16 for bigger uploads)
+    max_memory "512MB"        # bytes one handler may create before it fails (default 512MB)
     templates "./templates"
 
     log:                      # optional; without it, console only
@@ -810,16 +811,18 @@ post endpoint("/logout"):
     return redirect("/")
 ```
 
-`session.clear()` tells the BROWSER to drop the cookie (a `Set-Cookie` that expires it
-immediately) — it does not, and structurally cannot, invalidate a COPY of the old cookie taken
-before logout (saved by other software, replayed from a proxy log, lifted via a
-vulnerability elsewhere in a page). There is no server-side session store to revoke an entry
-in (that is the whole design, see above): the signature alone is what a request is checked
-against, and a signature stays valid until its own `exp`, logout or not. Keep `max_age` only
-as long as the session actually needs to live, and put anything that truly must be
-revocable-on-demand (a password reset, a banned user) behind a check against real data —
-`state.*` or a database row keyed by user id, consulted alongside the session, not instead of
-it.
+**Revoking a session.** Every session that is written gets a random id inside the (signed) cookie.
+`session.sid()` returns it. `session.revoke()` clears the session **and** refuses that id from then
+on, so a saved copy of the old cookie is dead too; `session.revoke(sid)` ends another session
+(a "log out everywhere" built from ids you stored per user). The refused ids live in memory, per
+process, until the cookie would have expired anyway: with several instances, or to survive a
+restart, store `session.sid()` in your database and check it alongside the session.
+
+`session.clear()` only tells the BROWSER to drop the cookie (a `Set-Cookie` that expires it
+immediately). It cannot invalidate a COPY of the old cookie taken before logout (saved by other
+software, replayed from a proxy log, lifted via a vulnerability elsewhere in a page): the
+signature stays valid until its own `exp`. For logout, a password reset or a banned user use
+`session.revoke()` as above, and keep `max_age` only as long as the session needs to live.
 
 `session.<whatever>` accepts any name: it is a store, not an object with fixed fields. A
 field that does not exist is `null`.
@@ -1884,7 +1887,8 @@ Two-factor codes for authenticator apps (TOTP, RFC 6238: SHA-1, 6 digits, 30 s).
 | `new_secret()` | A random base32 secret (160 bits) to store per user |
 | `uri(secret, account[, issuer])` | The `otpauth://` URI to show as a QR code |
 | `code(secret[, unix_seconds])` | The code for now, or for a given moment |
-| `verify(secret, code[, window])` | `true` if the code is valid; `window` steps of 30 s either side are tolerated (default 1) |
+| `verify(secret, code[, window])` | `true` if the code is valid; `window` steps of 30 s either side are tolerated (default 1). A code is accepted **once** (RFC 6238 §5.2): the same code a second time is `false`. That memory is in the process, so it is lost on restart and not shared between instances: for those, use `step` |
+| `step(secret, code[, window])` | The 30 s step number the code belongs to, or `-1`. Stateless: keep the last step you accepted for that user **in your database** and require `step > last_step`; that survives restarts and several instances |
 
 ### hash
 
@@ -2123,7 +2127,7 @@ parsed when it is JSON. A `Dict` body is sent as JSON. `options`:
 | | |
 |---|---|
 | `timeout_ms` | Default 15 s, up to 120 s |
-| `public_only` | Refuse private, loopback and link-local addresses (checked on the address connected to, redirects included) — for a URL that comes from a user |
+| `public_only` | **On by default**: refuses private, loopback, link-local and other non-public addresses (checked on the address connected to, redirects included), so a URL that comes from a user cannot reach your internal network or the cloud metadata endpoint. Pass `false` to call an internal service, or flip the default for the whole app with `http:` / `public_only false` in `app:` |
 | `follow_redirects` | `false` to get the `3xx` itself (and its `location` header) instead of following it; default `true` |
 | `cookies` | `{name: value}` sent as the `Cookie` header on every hop; the result's `cookies` holds what the server set (also across redirects) |
 | `form` | Send the `Dict` body as `application/x-www-form-urlencoded` (OAuth token endpoints) |

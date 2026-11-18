@@ -125,9 +125,12 @@ int only_public(void*, char* ip, char*, int, int) {
     return netaddr::parse(ip, a) && !netaddr::is_private(a) ? CURL_PREREQFUNC_OK : CURL_PREREQFUNC_ABORT;
 }
 
+// The default for `public_only` (see Options). On unless the app turns it off with `http: public_only false`.
+bool& default_public_only() { static bool v = true; return v; }
+
 struct Options {
     long         timeout_ms = kDefaultTimeoutMs;
-    bool         public_only = false, form = false, follow = true;
+    bool         public_only = default_public_only(), form = false, follow = true;
     std::string  cookies;   // "a=1; b=2" sent with every hop
     std::string  save_to;
     const Value* files = nullptr;
@@ -361,13 +364,33 @@ Value fn_http_url_encode(NativeCtx&, std::vector<Value>& a, std::string&) {
 
 } // namespace
 
-LUX_MODULE(http, {
-    {"get",        "s|DD>d",  fn_http_get,    /*is_async=*/true},
-    {"post",       "sx|DD>d", fn_http_post,   /*is_async=*/true},
-    {"put",        "sx|DD>d", fn_http_put,    /*is_async=*/true},
-    {"patch",      "sx|DD>d", fn_http_patch,  /*is_async=*/true},
-    {"delete",     "s|DD>d",  fn_http_delete, /*is_async=*/true},
-    {"url_encode", "s>s",     fn_http_url_encode},
-})
+// `http:` in app: sets the default for `public_only`. Outbound calls refuse loopback, private and
+// link-local addresses unless a call passes { "public_only": false } or the app says
+// `http:\n    public_only false` (an app whose job is calling its own internal services).
+class HttpModule : public BuiltinModule {
+public:
+    const char* name() const override { return "http"; }
+    const std::vector<BuiltinModuleFn>& functions() const override {
+        static const std::vector<BuiltinModuleFn> fns = {
+            {"get",        "s|DD>d",  fn_http_get,    /*is_async=*/true},
+            {"post",       "sx|DD>d", fn_http_post,   /*is_async=*/true},
+            {"put",        "sx|DD>d", fn_http_put,    /*is_async=*/true},
+            {"patch",      "sx|DD>d", fn_http_patch,  /*is_async=*/true},
+            {"delete",     "s|DD>d",  fn_http_delete, /*is_async=*/true},
+            {"url_encode", "s>s",     fn_http_url_encode},
+        };
+        return fns;
+    }
+    bool configure(const std::map<std::string, std::string>& o, std::string& error) override {
+        for (const auto& [k, v] : o) {
+            if (k != "public_only") { error = "http: unknown key '" + k + "' (public_only)"; return false; }
+            if (v != "true" && v != "false") { error = "http: public_only is true or false"; return false; }
+            default_public_only() = v == "true";
+        }
+        return true;
+    }
+};
+
+LUX_REGISTER_MODULE(HttpModule)
 
 } // namespace lux_script

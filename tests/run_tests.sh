@@ -264,6 +264,14 @@ check "class field: POST body rejects a wrong type INSIDE a nested element" POST
 check "class field: POST body rejects a missing field INSIDE a nested element" POST /nested/ingest 422 'episodes: expected List' '{"name":"S1","episodes":[{"title":"A"}]}'
 check "class field: POST body rejects the list itself being the wrong shape" POST /nested/ingest 422 'episodes: expected List' '{"name":"S1","episodes":"not-a-list"}'
 
+echo "== per-request memory budget =="
+next_server "$HERE/cases/memory.lux" || exit 1
+check "a handler within the budget runs"          GET /ok      200 '"n":2000000'
+check "many small appends are not charged twice"  GET /append  200 '"n":200000'
+check "doubling a string past the budget fails"   GET /double  500 'request memory limit exceeded'
+check "a huge list fails"                         GET /list    500 'request memory limit exceeded'
+check "a try catches the budget error"            GET /caught  200 '"caught":"request memory limit exceeded'
+
 echo "== session and jwt =="
 next_server "$HERE/cases/session.lux" || exit 1
 check "no session"          GET /whoami           200 '"user":null'
@@ -282,6 +290,23 @@ code=$(curl -sS -b "$jar" -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT
 curl -sS -b "$jar" -c "$jar" -X POST "http://127.0.0.1:$PORT/logout" > /dev/null
 got=$(curl -sS -b "$jar" "http://127.0.0.1:$PORT/whoami")
 case "$got" in *'"user":null'*) ok "session.clear() logs out" ;; *) fail "session.clear() logs out" 'user null' "$got" ;; esac
+# Revocation: a COPY of the cookie taken before logout stays dead after session.revoke(), unlike
+# session.clear() which only asks the browser to drop it.
+curl -sS -c "$jar" -X POST "http://127.0.0.1:$PORT/login?user=bea&role=admin" > /dev/null
+cp "$jar" "$jar.saved"
+sid=$(curl -sS -b "$jar" "http://127.0.0.1:$PORT/sid" | python3 -c "import json,sys; print(json.load(sys.stdin)['sid'])")
+[ ${#sid} = 32 ] && ok "session.sid() is a stable 128-bit id" || fail "session.sid() is a stable 128-bit id" "32 hex" "$sid"
+got=$(curl -sS -b "$jar" "http://127.0.0.1:$PORT/whoami")
+case "$got" in *'"user":"bea"'*) ok "a session with an id still reads back" ;; *) fail "a session with an id still reads back" 'bea' "$got" ;; esac
+curl -sS -b "$jar" -c "$jar" -X POST "http://127.0.0.1:$PORT/revoke" > /dev/null
+got=$(curl -sS -b "$jar.saved" "http://127.0.0.1:$PORT/whoami")
+case "$got" in *'"user":null'*) ok "a copy of a revoked session's cookie is refused" ;; *) fail "a copy of a revoked session's cookie is refused" 'user null' "$got" ;; esac
+curl -sS -c "$jar" -X POST "http://127.0.0.1:$PORT/login?user=cy&role=user" > /dev/null
+cp "$jar" "$jar.saved"
+sid=$(curl -sS -b "$jar" "http://127.0.0.1:$PORT/sid" | python3 -c "import json,sys; print(json.load(sys.stdin)['sid'])")
+curl -sS -X POST "http://127.0.0.1:$PORT/revoke-sid?sid=$sid" > /dev/null
+got=$(curl -sS -b "$jar.saved" "http://127.0.0.1:$PORT/whoami")
+case "$got" in *'"user":null'*) ok "session.revoke(sid) ends another session" ;; *) fail "session.revoke(sid) ends another session" 'user null' "$got" ;; esac
 token=$(python3 -c "
 import hmac, hashlib, base64, json, time
 b = lambda d: base64.urlsafe_b64encode(d).rstrip(b'=').decode()
@@ -873,6 +898,7 @@ check "request.scheme without a proxy"      GET /form 200 '"scheme":"http"'
 check "state.hit counts a sliding window"   GET /hit 200 '"n":1,"ttl_ok":true'
 check "state.hit counts again"              GET /hit 200 '"n":2'
 check "a List is a list of SQL parameters"  GET /in 200 '"r":[{"name":"n2"}],"e":[]'
+check "otp.step is stateless: the same code matches twice, a wrong one is -1" GET /otp-step 200 '"match":true,"again":true,"wrong":-1'
 check "a TOTP code is accepted only once"    GET /otp-replay 200 '"first":true,"second":false'
 check "redirect to a local path works"       GET "/redir?t=/ok"              302
 check "redirect refuses //host"              GET "/redir?t=//evil.com"       500

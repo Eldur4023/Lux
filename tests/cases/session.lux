@@ -36,6 +36,18 @@ post endpoint("/logout"):
     session.clear()
     return { "ok": true }
 
+# session.revoke(): clears AND refuses the id from now on, even from a saved copy of the cookie.
+post endpoint("/revoke"):
+    session.revoke()
+    return { "ok": true }
+
+get endpoint("/sid"):
+    return { "sid": session.sid() }
+
+post endpoint("/revoke-sid", string sid):
+    session.revoke(sid)
+    return { "ok": true }
+
 post endpoint("/token"):
     return { "token": jwt.sign({ "sub": "u7" }, 600) }
 

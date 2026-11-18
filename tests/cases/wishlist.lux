@@ -95,6 +95,12 @@ get endpoint("/otp-replay"):
     bool second = otp.verify(secret, c)
     return { "first": first, "second": second }
 
+# otp.step() is stateless: the matched step, or -1.
+get endpoint("/otp-step"):
+    string secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJS"
+    string c = otp.code(secret)
+    return { "match": otp.step(secret, c) > 0, "again": otp.step(secret, c) > 0, "wrong": otp.step(secret, "000000") }
+
 # redirect() with a target that is not a literal: a variable the checker cannot trace.
 get endpoint("/redir"):
     string t = query("t", "/ok")

@@ -739,6 +739,7 @@ int main(int argc, char** argv) {
         }
     }
     lux::http::g_max_body_size = cfg.max_body;
+    lux_script::VM::memory_limit = cfg.max_memory;
     lux::global_headers() = cfg.headers;
     app.run(test_mode ? std::string("127.0.0.1") : cfg.host, port_override ? static_cast<uint16_t>(port_override)
                                     : static_cast<uint16_t>(cfg.port));

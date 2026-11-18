@@ -1,9 +1,26 @@
+#include <algorithm>
 #include <lux_script/vm.hpp>
 #include <lux_script/builtin_module.hpp>
 
 namespace lux_script {
 
 namespace {
+
+// Makes `b` the budget charge_memory() draws from for the duration of one execute().
+struct BudgetScope {
+    MemBudget* prev;
+    explicit BudgetScope(MemBudget* b) : prev(current_budget()) { current_budget() = b; }
+    ~BudgetScope() { current_budget() = prev; }
+};
+
+// What a value costs, shallow and cheap: strings by length, containers by slot count.
+size_t approx_bytes(const Value& v) {
+    if (v.is_str())  return v.as_str().size();
+    if (v.is_list()) return v.as_list().size() * 16;
+    if (v.is_dict()) return v.as_dict().size() * 48;
+    return 0;
+}
+
 
 // Fails with a message naming the types involved: a runtime error in a .lux
 // has to be as readable as a compile-time one.
@@ -76,6 +93,7 @@ void VM::begin(const Chunk& chunk, const FunctionTable* functions, const NativeD
     locals_.reserve(256);
 
     locals_.assign(static_cast<size_t>(chunk.num_locals), Value::null());
+    mem_ = MemBudget{memory_limit, 0};
 }
 
 VM::Result VM::start(const Chunk& chunk, std::vector<Value>&& params, NativeCtx& ctx,
@@ -98,6 +116,11 @@ VM::Result VM::start(const Chunk& chunk, const std::vector<Value>& params, Nativ
 
 VM::Result VM::resume(Value awaited, NativeCtx& ctx) {
     // The awaited value takes the slot the `await` expression left behind.
+    {
+        BudgetScope scope(&mem_);
+        try { charge_memory(approx_bytes(awaited)); }
+        catch (const std::runtime_error& e) { return unwind(fail(e.what(), SourceLoc{}), ctx); }
+    }
     push(std::move(awaited));
     return execute(ctx);
 }
@@ -124,7 +147,16 @@ Value error_value(const std::string& message) {
 
 // Runs and, if something fails inside a `try`, jumps to its `catch` and goes on.
 // The error is delivered as one more value, on top of the stack.
-VM::Result VM::execute(NativeCtx& ctx) { return unwind(run_until_error(ctx), ctx); }
+VM::Result VM::execute(NativeCtx& ctx) {
+    BudgetScope scope(&mem_);
+    // A std::runtime_error from below (the memory budget, a value that contains itself) is a language
+    // error here: a `try` around the call can catch it, otherwise the handler fails cleanly.
+    try {
+        return unwind(run_until_error(ctx), ctx);
+    } catch (const std::runtime_error& e) {
+        return unwind(fail(e.what(), SourceLoc{}), ctx);
+    }
+}
 
 VM::Result VM::resume_error(std::string message, SourceLoc loc, NativeCtx& ctx) {
     return unwind(fail(std::move(message), loc), ctx);
@@ -177,6 +209,8 @@ VM::Result VM::unwind(Result r, NativeCtx& ctx) {
 // to a string you have to say so: "n = " + str(n).
 bool add_values(const Value& a, const Value& b, Value& out, std::string& err) {
     if (a.is_str() && b.is_str()) {
+        // Growth, not the whole result: `s = s + x` in a loop must cost |x| a time, not |s|.
+        charge_memory(a.as_str().size() + b.as_str().size() - std::max(a.as_str().size(), b.as_str().size()));
         out = Value::str(a.as_str() + b.as_str());
         return true;
     }
@@ -192,6 +226,7 @@ bool add_values(const Value& a, const Value& b, Value& out, std::string& err) {
         return true;
     }
     if (a.is_list() && b.is_list()) {
+        charge_memory(b.as_list().size() * 16);
         Value::List l = a.as_list();
         for (const auto& v : b.as_list()) l.push_back(v);
         out = Value::list(std::move(l));
@@ -291,6 +326,9 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 }
 
                 if (todas) {
+                    size_t biggest = 0;
+                    for (size_t i = 0; i < n; ++i) biggest = std::max(biggest, stack_[base + i].as_str().size());
+                    charge_memory(total - biggest);
                     std::string out;
                     out.reserve(total);
                     for (size_t i = 0; i < n; ++i) out += stack_[base + i].as_str();
@@ -541,6 +579,21 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 Value out = call_method(ctx, recv, chunk.constants[name_k].as_str(),
                                         args, error);
                 if (!error.empty()) return fail(std::move(error), in.loc);
+                // A mutator hands back the SAME list/dict it changed (`l.add(x)` returns `l`): charging its
+                // size each call would be quadratic. For those, what is created is the growth, the item.
+                // Everything else (map, filter, slice, split, upper, replace...) returns something new.
+                {
+                    const std::string& m = chunk.constants[name_k].as_str();
+                    const bool mutator = (recv.is_list() || recv.is_dict()) &&
+                        (m == "add" || m == "insert" || m == "merge" || m == "reverse" || m == "sort" ||
+                         m == "sort_by" || m == "remove" || m == "remove_at" || m == "pop");
+                    if (mutator) {
+                        if (m == "add" || m == "insert" || m == "merge")
+                            for (const Value& a : args) charge_memory(16 + approx_bytes(a));
+                    } else {
+                        charge_memory(approx_bytes(out));
+                    }
+                }
                 push(std::move(out));
                 break;
             }
@@ -554,6 +607,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 Value out = in.op == Op::CallNative ? native_at(id).fn(ctx, args, error)
                                                     : builtin_module_function_at(id).call(ctx, args, error);
                 if (!error.empty()) return fail(std::move(error), in.loc);
+                charge_memory(approx_bytes(out));
                 push(std::move(out));
                 break;
             }
@@ -591,6 +645,7 @@ VM::Result VM::run_until_error(NativeCtx& ctx) {
                 } else if (obj.is_dict()) {
                     if (!idx.is_str())
                         return fail("a Dict key must be a string", in.loc);
+                    charge_memory(48 + idx.as_str().size() + approx_bytes(v));
                     obj.as_dict()[idx.as_str()] = v;
                 } else {
                     return fail(std::string("cannot index ") + obj.type_name(),

@@ -82,6 +82,22 @@ Value fn_verify(NativeCtx&, std::vector<Value>& a, std::string& error) {
     return Value::boolean(ok);
 }
 
+// step(secret, code[, window = 1]) -> the 30 s step number the code belongs to, or -1 if it matches
+// none. Stateless: the app keeps the last step it accepted for that user in ITS database and
+// requires `step > last_step` (RFC 6238 §5.2), which also holds across restarts and several
+// instances, unlike verify()'s in-memory guard.
+Value fn_step(NativeCtx&, std::vector<Value>& a, std::string& error) {
+    std::string key;
+    if (!crypto::base32_decode(a[0].as_str(), key) || key.empty()) { error = "otp.step(): invalid base32 secret"; return Value::null(); }
+    const long long window = a.size() > 2 ? a[2].as_int() : 1;
+    if (window < 0 || window > 10) { error = "otp.step(): window must be between 0 and 10"; return Value::null(); }
+    const long long step = now_seconds() / kStep;
+    long long matched = -1;
+    for (long long d = -window; d <= window; ++d)
+        if (crypto::constant_time_equal(code_at(key, step + d), a[1].as_str())) matched = step + d;
+    return Value::integer(matched);
+}
+
 std::string uri_encode(const std::string& s) {
     static constexpr char hex[] = "0123456789ABCDEF";
     std::string out;
@@ -109,6 +125,7 @@ LUX_MODULE(otp, {
     {"new_secret", ">s",    fn_new_secret},
     {"code",       "s|i>s", fn_code},
     {"verify",     "ss|i>b", fn_verify},
+    {"step",       "ss|i>i", fn_step},
     {"uri",        "ss|s>s", fn_uri},
 })
 

@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "bytecode.hpp"
+#include "memory_budget.hpp"
 #include "native_abi.hpp"
 #include "natives.hpp"
 #include "value.hpp"
@@ -80,6 +81,9 @@ public:
     // error, not exhaust the process memory.
     static constexpr size_t kMaxFrames = 200;
 
+    // Bytes a handler may create (see memory_budget.hpp). Set once at startup from `max_memory`.
+    static inline size_t memory_limit = size_t{512} << 20;
+
 private:
     // One frame per call in progress.  Locals and stack live in single vectors
     // with a base per frame: that way suspending and resuming is keeping two
@@ -94,6 +98,7 @@ private:
     std::vector<Frame> frames_;
     std::vector<Value> stack_;
     std::vector<Value> locals_;
+    MemBudget          mem_;
     const FunctionTable*  functions_ = nullptr;
     const NativeDispatch* native_    = nullptr;
 

@@ -464,6 +464,7 @@ Value fn_session_set(NativeCtx& ctx, std::vector<Value>& args, std::string& erro
         error = "the session is not configured: missing 'session: secret ...' in app:";
         return Value::null();
     }
+    session_sid(*ctx.session);   // every session that is written gets an id, so it can be revoked later
     ctx.session->data[args[0].as_str()] = args[1];
     ctx.session->dirty = true;
     return args[1];
@@ -474,6 +475,36 @@ Value fn_session_clear(NativeCtx& ctx, std::vector<Value>&, std::string& error) 
         error = "the session is not configured: missing 'session: secret ...' in app:";
         return Value::null();
     }
+    ctx.session->data.clear();
+    ctx.session->dirty = true;
+    return Value::null();
+}
+
+// session.sid(): the id of this session ("" if the session is empty and nothing was written yet is
+// not possible: asking for it creates it).
+Value fn_session_sid(NativeCtx& ctx, std::vector<Value>&, std::string& error) {
+    if (!ctx.session || ctx.session->secret.empty()) {
+        error = "the session is not configured: missing 'session: secret ...' in app:";
+        return Value::null();
+    }
+    return Value::str(session_sid(*ctx.session));
+}
+
+// session.revoke() ends this session for good: it is cleared AND its id is refused from now on, even
+// from a copy of the old cookie. session.revoke(sid) revokes another one ("log out everywhere").
+Value fn_session_revoke(NativeCtx& ctx, std::vector<Value>& args, std::string& error) {
+    if (!ctx.session || ctx.session->secret.empty() || !ctx.auth) {
+        error = "the session is not configured: missing 'session: secret ...' in app:";
+        return Value::null();
+    }
+    if (!args.empty()) {
+        if (!args[0].is_str()) { error = "session.revoke() takes a session id (see session.sid())"; return Value::null(); }
+        revoke_session_id(args[0].as_str(), ctx.auth->session_max_age);
+        return Value::null();
+    }
+    auto it = ctx.session->data.find("lux.sid");
+    if (it != ctx.session->data.end() && it->second.is_str())
+        revoke_session_id(it->second.as_str(), ctx.auth->session_max_age);
     ctx.session->data.clear();
     ctx.session->dirty = true;
     return Value::null();
@@ -705,7 +736,7 @@ Value fn_req_body(NativeCtx& ctx, std::vector<Value>&, std::string&) {
     return Value::str(ctx.req.body);
 }
 
-const std::array<NativeDef, 62> kNatives = {{
+const std::array<NativeDef, 64> kNatives = {{
     // Response
     {"text",      1, 1,  fn_text},
     {"html",      1, 1,  fn_html},
@@ -737,6 +768,8 @@ const std::array<NativeDef, 62> kNatives = {{
     {"__session_get",   1, 1,  fn_session_get},
     {"__session_set",   2, 2,  fn_session_set},
     {"__session_clear", 0, 0,  fn_session_clear},
+    {"__session_sid",   0, 0,  fn_session_sid},
+    {"__session_revoke", 0, 1, fn_session_revoke},
     {"__jwt_valid",     0, 0,  fn_jwt_valid},
     {"__jwt_claims",    0, 0,  fn_jwt_claims},
     {"__jwt_sign",      2, 2,  fn_jwt_sign},
@@ -1714,7 +1747,7 @@ const std::vector<BuiltinMethod>* methods_of(const std::string& type) {
 namespace {
 struct MemberMap { const char* object; const char* member; const char* native; };
 
-const std::array<MemberMap, 39> kMembers = {{
+const std::array<MemberMap, 41> kMembers = {{
     {"sse", "send",  "__sse_send"},
     {"sse", "ping",  "__sse_ping"},
     {"sse", "open",  "__sse_open"},
@@ -1723,6 +1756,8 @@ const std::array<MemberMap, 39> kMembers = {{
     {"ws",  "close", "__ws_close"},
     {"ws",  "recv",  "__ws_recv"},
     {"session", "clear",  "__session_clear"},
+    {"session", "sid",    "__session_sid"},
+    {"session", "revoke", "__session_revoke"},
     {"jwt",     "valid",  "__jwt_valid"},
     {"jwt",     "claims", "__jwt_claims"},
     {"jwt",     "sign",   "__jwt_sign"},

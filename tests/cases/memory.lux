@@ -1,0 +1,37 @@
+# The per-request memory budget (max_memory): a handler that creates more than it may fails with an
+# error instead of taking the process down.
+app:
+    max_memory "64MB"
+
+get endpoint("/ok"):
+    string s = "a".repeat(1000000)
+    string t = s + s
+    return { "n": len(t) }
+
+# 30 doublings: each one is cheap in steps, the last is gigabytes.
+get endpoint("/double"):
+    string s = "abcdefghij"
+    for int i in range(30):
+        s = s + s
+    return { "n": len(s) }
+
+get endpoint("/list"):
+    List<Json> l = range(5000000)
+    return { "n": len(l) }
+
+get endpoint("/caught"):
+    string msg = ""
+    try:
+        string s = "abcdefghij"
+        for int i in range(30):
+            s = s + s
+    catch e:
+        msg = e.message
+    return { "caught": msg }
+
+# Many small appends stay far under the budget: growth is counted, not the whole string each time.
+get endpoint("/append"):
+    string s = ""
+    for int i in range(20000):
+        s = s + "0123456789"
+    return { "n": len(s) }

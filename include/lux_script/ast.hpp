@@ -211,6 +211,7 @@ struct AppDecl {
     std::string              tls_cert, tls_key;   // both set: the listener speaks HTTPS
     std::vector<std::pair<std::string, std::string>> headers;   // sent on every response
     size_t                   max_body = 16u * 1024 * 1024;   // request body cap, bytes
+    size_t                   max_memory = size_t{512} << 20; // bytes a handler may create (VM memory budget)
     std::string              templates_dir = "./templates";
     std::vector<StaticMount> statics;
     bool                     docs = false, health = false, metrics = false;

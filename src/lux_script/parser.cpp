@@ -854,6 +854,8 @@ void Parser::parse_app(Program& out) {
                 match(Tok::Dedent);
             } else if (k == "max_body") {
                 size_config("max_body", out.app.max_body);
+            } else if (k == "max_memory") {
+                size_config("max_memory", out.app.max_memory);
             } else if (k == "docs")    { out.app.docs    = true; }
             else if   (k == "health")  { out.app.health  = true; }
             else if   (k == "metrics") { out.app.metrics = true; }
