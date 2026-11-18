@@ -58,7 +58,10 @@ std::string one_line(std::string s) {
 // "Ana <ana@x.com>" -> "<ana@x.com>", what the SMTP envelope wants.
 std::string envelope(const std::string& addr) {
     const size_t lt = addr.rfind('<'), gt = addr.rfind('>');
-    return lt != std::string::npos && gt > lt ? addr.substr(lt, gt - lt + 1) : "<" + addr + ">";
+    std::string inner = lt != std::string::npos && gt > lt ? addr.substr(lt + 1, gt - lt - 1) : addr;
+    // Nothing that could close the path early and append ESMTP parameters ("a@b> BODY=...") or a second command.
+    std::erase_if(inner, [](unsigned char c) { return c <= 0x20 || c == 0x7F || c == '<' || c == '>'; });
+    return "<" + inner + ">";
 }
 
 // RFC 2047 for anything outside printable ASCII: "Café" -> =?UTF-8?B?...?=
@@ -163,6 +166,12 @@ bool resolve_config(const Value::Dict& m, const char* fn, Config& cfg, std::stri
     }
     if (cfg.tls != "starttls" && cfg.tls != "tls" && cfg.tls != "none") {
         error = std::string(fn) + "(): smtp tls is \"starttls\", \"tls\" or \"none\""; return false;
+    }
+    {
+        const std::string p = field(o, "port");
+        if (!p.empty() && (p.size() > 5 || !std::all_of(p.begin(), p.end(), [](unsigned char c) { return std::isdigit(c); }))) {
+            error = std::string(fn) + "(): smtp port must be a number"; return false;
+        }
     }
     const std::string port = field(o, "port").empty() ? (cfg.tls == "tls" ? "465" : "587") : field(o, "port");
     cfg.url = std::string(cfg.tls == "tls" ? "smtps://" : "smtp://") + host + ":" + port;

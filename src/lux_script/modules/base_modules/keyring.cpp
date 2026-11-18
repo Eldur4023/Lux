@@ -18,6 +18,7 @@
 #  include <wincred.h>
 #else
 #  include <spawn.h>
+#  include <fcntl.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
 #endif
@@ -43,14 +44,20 @@ constexpr size_t kMaxSecretBytes = 64 * 1024;
 std::string run(const std::vector<std::string>& args, const std::string& input, bool& ok, std::string& error, const char* fn) {
     ok = false;
     int in[2], out[2];
-    if (pipe(in) != 0) { error = std::string(fn) + "(): pipe failed"; return ""; }
-    if (pipe(out) != 0) { close(in[0]); close(in[1]); error = std::string(fn) + "(): pipe failed"; return ""; }
+    // O_CLOEXEC: a child another thread spawns meanwhile must not inherit the pipe that carries the secret.
+    if (pipe2(in, O_CLOEXEC) != 0) { error = std::string(fn) + "(): pipe failed"; return ""; }
+    if (pipe2(out, O_CLOEXEC) != 0) { close(in[0]); close(in[1]); error = std::string(fn) + "(): pipe failed"; return ""; }
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, in[0], 0);
     posix_spawn_file_actions_adddup2(&fa, out[1], 1);
     for (int fd : {in[0], in[1], out[0], out[1]}) posix_spawn_file_actions_addclose(&fa, fd);
     posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", 1, 0);
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+    // Nothing past stdio reaches the child: a socket, DB connection or file some library opened without
+    // O_CLOEXEC (and another thread's pipe, opened a moment before) would otherwise leak into it.
+    posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+#endif
     std::vector<char*> argv;
     for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
     argv.push_back(nullptr);

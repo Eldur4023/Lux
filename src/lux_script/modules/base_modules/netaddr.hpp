@@ -55,7 +55,11 @@ inline bool in_cidr(const Addr& a, const std::string& cidr) {
 inline bool is_private(const Addr& a) {
     for (const char* c : {"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
                           "169.254.0.0/16", "100.64.0.0/10", "0.0.0.0/8",
-                          "::1/128", "::/128", "fc00::/7", "fe80::/10"})
+                          "::1/128", "::/128", "fc00::/7", "fe80::/10",
+                          // multicast, reserved, benchmarking, IETF protocol assignments
+                          "224.0.0.0/4", "240.0.0.0/4", "198.18.0.0/15", "192.0.0.0/24",
+                          // IPv6 forms that embed or tunnel an IPv4 address (NAT64, 6to4, Teredo), multicast
+                          "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32", "ff00::/8"})
         if (in_cidr(a, c)) return true;
     return false;
 }

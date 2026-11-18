@@ -4,6 +4,8 @@
 // literal `null` stays distinguishable from a broken one.
 #include <lux_script/builtin_module.hpp>
 
+#include <stdexcept>
+
 namespace lux_script {
 
 namespace {
@@ -19,6 +21,8 @@ Value fn_parse(NativeCtx&, std::vector<Value>& a, std::string& error) {
 void pretty(const Value& v, size_t indent, size_t depth, std::string& out) {
     const bool list = v.is_list();
     if (!list && !v.is_dict()) { v.write_json(out); return; }
+    // Same bound as Value::write_json(): a List/Dict that contains itself would recurse until the stack overflows.
+    if (depth > 1000) throw std::runtime_error("json.pretty(): value nested too deeply (does a List or Dict contain itself?)");
     if (list ? v.as_list().empty() : v.as_dict().empty()) { out += list ? "[]" : "{}"; return; }
     const std::string pad(indent * (depth + 1), ' ');
     out += list ? '[' : '{';

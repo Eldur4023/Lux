@@ -277,6 +277,11 @@ public:
         auto [ri, fi] = std::mismatch(canonical_root.begin(), canonical_root.end(),
                                        canonical_file.begin(), canonical_file.end());
         if (ri != canonical_root.end()) return fail(403, "Forbidden");
+        // Same rule as the static mounts: a dotfile (.env, .git/...) under root is never served.
+        for (auto it = fi; it != canonical_file.end(); ++it) {
+            const std::string part = it->string();
+            if (part.size() > 1 && part[0] == '.') return fail(404, "Not Found");
+        }
         return send_file(canonical_file);
     }
 

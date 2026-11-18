@@ -5,6 +5,8 @@
 #include <lux_script/crypto.hpp>
 
 #include <chrono>
+#include <mutex>
+#include <unordered_map>
 
 namespace lux_script {
 
@@ -35,6 +37,22 @@ Value fn_new_secret(NativeCtx&, std::vector<Value>&, std::string& error) {
     return Value::str(crypto::base32_encode(raw));
 }
 
+// Last accepted step per secret (keyed by the secret's SHA-256, never the secret itself).
+bool accept_once(const std::string& key, long long matched, long long now_step) {
+    static std::mutex m;
+    static std::unordered_map<std::string, long long> last;
+    const std::string id = crypto::hex_encode(crypto::sha256(key));
+    std::lock_guard<std::mutex> lock(m);
+    // Entries older than any window can still match are dead weight: drop them so the map stays small.
+    if (last.size() > 4096)
+        std::erase_if(last, [&](const auto& kv) { return kv.second < now_step - 20; });
+    auto [it, fresh] = last.try_emplace(id, matched);
+    if (fresh) return true;
+    if (matched <= it->second) return false;
+    it->second = matched;
+    return true;
+}
+
 // The current code for a secret; code(secret, unix_seconds) for a given moment.
 Value fn_code(NativeCtx&, std::vector<Value>& a, std::string& error) {
     std::string key;
@@ -52,9 +70,15 @@ Value fn_verify(NativeCtx&, std::vector<Value>& a, std::string& error) {
     if (window < 0 || window > 10) { error = "otp.verify(): window must be between 0 and 10"; return Value::null(); }
     const long long step = now_seconds() / kStep;
     bool ok = false;
+    long long matched = 0;
     // No early exit: the time taken does not say which step matched.
     for (long long d = -window; d <= window; ++d)
-        ok |= crypto::constant_time_equal(code_at(key, step + d), a[1].as_str());
+        if (crypto::constant_time_equal(code_at(key, step + d), a[1].as_str())) { ok = true; matched = step + d; }
+    // RFC 6238 §5.2: a code is accepted once. Without this an observed code (shoulder-surfing, a phishing
+    // proxy relaying it) stays valid for the whole window, ~90 s with the default of 1.
+    // ponytail: per process and in memory; across several instances or a restart a code can be replayed
+    // once more -- keep the last step in the database for that.
+    if (ok) ok = accept_once(key, matched, step);
     return Value::boolean(ok);
 }
 

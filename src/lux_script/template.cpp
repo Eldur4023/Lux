@@ -218,7 +218,7 @@ private:
     }
 
     bool read_template(const std::string& name, std::string& out) {
-        if (name.empty() || name.find("..") != std::string::npos) return false;
+        if (name.empty() || name.front() == '/' || name.find("..") != std::string::npos) return false;
         auto text = read_whole_file(plat::to_path(dir_) / plat::to_path(name));
         if (!text) return false;
         out = std::move(*text);
@@ -495,7 +495,7 @@ void Compiler::body(const std::string& src, const std::string& file,
             if (name.size() >= 2 && (name.front() == '"' || name.front() == '\''))
                 name = name.substr(1, name.size() - 2);
             std::filesystem::path path = plat::to_path(dir_) / plat::to_path(name);
-            if (name.empty() || name.find("..") != std::string::npos) {
+            if (name.empty() || name.front() == '/' || name.find("..") != std::string::npos) {
                 error(loc, "invalid template name in {% include %}");
                 continue;
             }

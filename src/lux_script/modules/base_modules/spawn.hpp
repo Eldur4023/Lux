@@ -256,6 +256,11 @@ inline bool start(const std::vector<std::string>& argv, const Options& o, Child&
     };
     bool ok = wire(o.in, STDIN_FILENO, c.in) && wire(o.out, STDOUT_FILENO, c.out) &&
               wire(o.err, STDERR_FILENO, c.err);
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+    // Nothing past stdio reaches the child: a socket, DB connection or file some library opened without
+    // O_CLOEXEC (and another thread's pipe, opened a moment before) would otherwise leak into it.
+    posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+#endif
 #ifndef __ANDROID__   // ponytail: bionic (API 28) has no usable addchdir_np, so `cwd` is ignored on Android
     if (ok && !o.cwd.empty()) posix_spawn_file_actions_addchdir_np(&fa, o.cwd.c_str());
 #endif

@@ -213,9 +213,9 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     }
     if (!opts.save_to.empty()) {
         #ifdef _WIN32
-        sink.file = _wfopen(plat::widen(opts.save_to).c_str(), L"wb");
+        sink.file = _wfopen(plat::widen(opts.save_to).c_str(), L"wbe");
 #else
-        sink.file = std::fopen(opts.save_to.c_str(), "wb");
+        sink.file = std::fopen(opts.save_to.c_str(), "wbe");
 #endif
         if (!sink.file) { error = "http." + method + "(): cannot write '" + opts.save_to + "'"; return Value::null(); }
         sink.max = 4ULL << 30;
@@ -268,7 +268,12 @@ Value do_request(const std::string& method, const std::string& url, const Value*
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &response_headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, opts.timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, opts.timeout_ms);
-    if (opts.public_only) curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, only_public);
+    if (opts.public_only) {
+        curl_easy_setopt(curl, CURLOPT_PREREQFUNCTION, only_public);
+        // The check sees the peer address: with an http_proxy/https_proxy in the environment that is the proxy's,
+        // and the proxy would then reach the internal address on our behalf.
+        curl_easy_setopt(curl, CURLOPT_PROXY, "");
+    }
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, opts.follow ? 1L : 0L);
     // Cookie engine on: cookies set along a redirect chain travel with the next
     // hop, and come back in the result's `cookies`.

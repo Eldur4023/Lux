@@ -191,9 +191,14 @@ HttpConnection::~HttpConnection() {
         // Safe closure: we skip loop_.remove() to avoid re-entrant erase if
         // this destructor is called during EventLoop callbacks_ teardown.
 #ifdef LUX_IO_URING
-        // IoUringLoop timers are timerfds. EpollLoop's are map ids, not fds:
-        // a pending one only holds a weak_ptr and fires as a no-op.
-        if (timer_ >= 0) ::close(timer_);
+        // IoUringLoop timers are timerfds, and the loop's poll on one keeps
+        // running after a bare ::close(): when it fired, its callback read,
+        // remove()d and closed whatever fd had reused that number by then --
+        // another client's socket. cancel_timer() takes it out of the loop
+        // first (safe from the loop's own teardown, see ~IoUringLoop).
+        // EpollLoop's are map ids, not fds: a pending one only holds a
+        // weak_ptr and fires as a no-op.
+        if (timer_ >= 0) loop_.cancel_timer(timer_);
 #endif
         if (file_fd_     >= 0) ::close(file_fd_);
         free_tls();
@@ -459,17 +464,28 @@ static bool parse_single_byte_range(const std::string& header, std::uintmax_t to
     auto dash = spec.find('-');
     if (dash == std::string::npos) return false;
     std::string a = spec.substr(0, dash), b = spec.substr(dash + 1);
-    try {
-        if (a.empty()) {
-            if (b.empty()) return false;
-            std::uintmax_t suffix = std::stoull(b);
-            start = suffix >= total ? 0 : total - suffix;
-            end   = total > 0 ? total - 1 : 0;
-        } else {
-            start = std::stoull(a);
-            end   = b.empty() ? (total > 0 ? total - 1 : 0) : std::stoull(b);
+    // Digits only, saturating: stoull() accepts "+5"/" 5"/"-5" (wrapping) and throws on a huge number, which
+    // sent a legal "bytes=0-99999999999999999999" down the "ignore the Range" path (a 200 with the whole file).
+    auto num = [](const std::string& t, std::uintmax_t& v) {
+        if (t.empty()) return false;
+        v = 0;
+        for (char c : t) {
+            if (c < '0' || c > '9') return false;
+            const std::uintmax_t d = static_cast<std::uintmax_t>(c - '0');
+            v = v > (UINTMAX_MAX - d) / 10 ? UINTMAX_MAX : v * 10 + d;
         }
-    } catch (...) { return false; }
+        return true;
+    };
+    if (a.empty()) {
+        std::uintmax_t suffix = 0;
+        if (!num(b, suffix)) return false;
+        start = suffix >= total ? 0 : total - suffix;
+        end   = total > 0 ? total - 1 : 0;
+    } else {
+        if (!num(a, start)) return false;
+        if (b.empty()) end = total > 0 ? total - 1 : 0;
+        else if (!num(b, end)) return false;
+    }
 
     // RFC 7233 §2.1: a range where last-byte-pos < first-byte-pos is
     // syntactically invalid. Treating it the same as "unparseable" — ignore
@@ -805,7 +821,7 @@ void HttpConnection::do_sendfile() {
                 if (errno == EAGAIN) { arm(EPOLLOUT); return; }
                 close(); return;
             }
-            if (n == 0) break;
+            if (n == 0) { close(); return; }   // the file shrank under us: Content-Length promised more
             file_offset_    += n;
             file_remaining_ -= static_cast<size_t>(n);
             refresh_request_timeout();
@@ -839,7 +855,10 @@ void HttpConnection::do_sendfile() {
             if (errno == EINTR) continue;
             close(); return;
         }
-        if (n == 0) break; // EOF
+        // EOF before Content-Length: the file shrank under us. Answering as if complete left the
+        // connection alive with the client still waiting for those bytes, so the NEXT response on it
+        // was read as the rest of this body.
+        if (n == 0) { close(); return; }
         file_remaining_ -= static_cast<size_t>(n);
         // A slow-but-progressing download (rate-limited client, video
         // seek/playback) must not be cut off just because the whole

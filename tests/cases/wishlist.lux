@@ -87,6 +87,23 @@ get endpoint("/crypto"):
         "verify_bad": otp.verify("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "000000")
     }
 
+# A TOTP code is accepted once (RFC 6238 §5.2): the second verify of the same code is false.
+get endpoint("/otp-replay"):
+    string secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJR"
+    string c = otp.code(secret)
+    bool first = otp.verify(secret, c)
+    bool second = otp.verify(secret, c)
+    return { "first": first, "second": second }
+
+# redirect() with a target that is not a literal: a variable the checker cannot trace.
+get endpoint("/redir"):
+    string t = query("t", "/ok")
+    return redirect(t)
+
+get endpoint("/redir-code"):
+    int c = int(query("c", "302"))
+    return redirect("/ok", c)
+
 get endpoint("/pw"):
     string a = await hash.argon2("hunter2")
     string b = await hash.bcrypt("hunter2", 4)

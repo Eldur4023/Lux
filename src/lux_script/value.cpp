@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <sstream>
+#include <stdexcept>
 
 namespace lux_script {
 
@@ -261,6 +262,21 @@ void write_double(double d, std::string& out) {
 void json_string(const std::string& in, std::string& out) { escape_json(in, out); }
 void json_double(double d, std::string& out) { write_double(d, out); }
 
+namespace {
+// Lists and dicts are shared by reference, so `l.add(l)` or `d["x"] = d` makes a value that contains
+// itself: every recursive walk over it overflowed the stack and took the whole process down. Far
+// deeper than anything real (the JSON parser stops at 200), so past it it is a cycle: an error, which
+// the request turns into a 500.
+constexpr int kMaxValueDepth = 1000;
+struct DepthGuard {
+    static int& depth() { thread_local int d = 0; return d; }
+    DepthGuard() {
+        if (++depth() > kMaxValueDepth) { --depth(); throw std::runtime_error("value nested too deeply (does a List or Dict contain itself?)"); }
+    }
+    ~DepthGuard() { --depth(); }
+};
+}  // namespace
+
 void Value::write_json(std::string& out) const {
     switch (type_) {
         case Type::Null:  out += "null";                   return;
@@ -273,6 +289,7 @@ void Value::write_json(std::string& out) const {
         case Type::Float: write_double(d_, out);        return;
         case Type::Str:   escape_json(as_str(), out);          return;
         case Type::List: {
+            const DepthGuard guard;   // only containers recurse: scalars stay off the thread_local
             out.push_back('[');
             bool first = true;
             for (const auto& v : as_list()) {
@@ -284,6 +301,7 @@ void Value::write_json(std::string& out) const {
             return;
         }
         case Type::Dict: {
+            const DepthGuard guard;
             // Keys starting with "__" are internal and never come out.
             out.push_back('{');
             bool first = true;
@@ -324,12 +342,14 @@ bool Value::equals(const Value& o) const {
         case Type::Bool: return b_ == o.b_;
         case Type::Str:  return as_str() == o.as_str();
         case Type::List: {
+            const DepthGuard guard;
             if (as_list().size() != o.as_list().size()) return false;
             for (size_t i = 0; i < as_list().size(); ++i)
                 if (!as_list()[i].equals(o.as_list()[i])) return false;
             return true;
         }
         case Type::Dict: {
+            const DepthGuard guard;
             if (as_dict().size() != o.as_dict().size()) return false;
             for (const auto& [k, v] : as_dict()) {
                 auto it = o.as_dict().find(k);

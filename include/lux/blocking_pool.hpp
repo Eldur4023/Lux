@@ -1,4 +1,5 @@
 #pragma once
+#include <exception>
 #include <chrono>
 #include <condition_variable>
 #include <coroutine>
@@ -167,15 +168,22 @@ struct BlockingAwaitable {
         return false;
     }
 
+    // A throw inside `work` (bad_alloc from a huge image, a std::stoi on bad
+    // input...) is carried back and rethrown at the co_await. Letting it
+    // escape the job meant the worker swallowed it and never posted the
+    // resume: the request hung until its timeout and its coroutine frame,
+    // Request and Response leaked for good.
+    std::exception_ptr failure;
+
     void await_suspend(std::coroutine_handle<> h) {
         auto* l = loop;
-        target().submit([l, h, w = std::move(work)]() mutable {
-            w();
+        target().submit([this, l, h, w = std::move(work)]() mutable {
+            try { w(); } catch (...) { failure = std::current_exception(); }
             l->post([h]() mutable { h.resume(); });
         });
     }
 
-    void await_resume() const noexcept {}
+    void await_resume() const { if (failure) std::rethrow_exception(failure); }
 };
 
 } // namespace lux

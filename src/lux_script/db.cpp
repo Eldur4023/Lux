@@ -453,6 +453,11 @@ void expand_list_params(std::string& sql, std::vector<Value>& params) {
             const size_t end = sql.find('\n', i);
             out.append(sql, i, end == std::string::npos ? std::string::npos : end - i);
             i = end == std::string::npos ? sql.size() : end - 1;
+        } else if (c == '/' && i + 1 < sql.size() && sql[i + 1] == '*') {
+            const size_t end = sql.find("*/", i + 2);
+            const size_t stop = end == std::string::npos ? sql.size() : end + 2;
+            out.append(sql, i, stop - i);
+            i = stop - 1;
         } else if (c == '?' && next < params.size()) {
             const Value& v = params[next++];
             if (v.is_list()) {

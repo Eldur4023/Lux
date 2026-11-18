@@ -62,11 +62,14 @@ int exif_orientation(jpeg_decompress_struct& c) {
         const uint8_t* t = m->data + 6;
         const size_t n = m->data_length - 6;
         const bool le = t[0] == 'I';
-        auto u16 = [&](size_t o) { return o + 2 > n ? 0 : le ? t[o] | t[o + 1] << 8 : t[o] << 8 | t[o + 1]; };
-        auto u32 = [&](size_t o) -> size_t { return o + 4 > n ? 0 : le ? u16(o) | u16(o + 2) << 16 : u16(o) << 16 | u16(o + 2); };
+        // `o > n || n - o < k`, not `o + k > n`: o comes from the file, and on a 32-bit size_t (armv7 Android) o + 2 wraps.
+        auto u16 = [&](size_t o) { return o > n || n - o < 2 ? 0 : le ? t[o] | t[o + 1] << 8 : t[o] << 8 | t[o + 1]; };
+        auto u32 = [&](size_t o) -> size_t { return o > n || n - o < 4 ? 0 : le ? u16(o) | u16(o + 2) << 16 : u16(o) << 16 | u16(o + 2); };
         const size_t ifd = u32(4);
         for (int i = 0, count = u16(ifd); i < count; ++i) {
+            if (ifd > n) break;
             const size_t e = ifd + 2 + static_cast<size_t>(i) * 12;
+            if (e < ifd || e > n) break;
             if (u16(e) == 0x0112) { const int v = u16(e + 8); return v >= 1 && v <= 8 ? v : 1; }
         }
     }
@@ -378,6 +381,14 @@ Value fn_resize(NativeCtx&, std::vector<Value>& a, std::string& error) {
             w = std::max(1, static_cast<int>(std::lround(sw * r)));
             h = std::max(1, static_cast<int>(std::lround(sh * r)));
         }
+        w = std::max(1, w);
+        h = std::max(1, h);
+    }
+    // The source's aspect ratio is the uploader's: a 1x20000 PNG through "cover" 400x400 scales to
+    // 400x8000000 before the crop, gigabytes of float buffers. The intermediate is capped like the input.
+    if (static_cast<double>(w) * h > static_cast<double>(kMaxPixels)) {
+        error = "image.resize(): the result would be over " + std::to_string(kMaxPixels / 1'000'000) + " megapixels";
+        return Value::null();
     }
     img = scaled(img, w, h);
     if (fit == "cover" && bw && bh && (w > bw || h > bh))

@@ -272,6 +272,12 @@ inline constexpr const char* kAbortMessage = "\x01" "abort";
 // given), then adds what a download needs -- an ETag with a 304 for
 // If-None-Match, and Content-Disposition when `filename` is non-empty
 // (`inline_` shows it in the browser instead of saving it).
+// redirect(): the one place a Location is written from a script (the VM's fn_redirect and --native's
+// generated code both come here). Refuses a status that is not a redirect and a target a browser would
+// run or send to another host unintentionally: javascript:/data:/vbscript:, "//host" and "/\host".
+// Returns false (and answers 500) instead of redirecting.
+bool redirect_checked(lux::Response& res, long long code, const std::string& target);
+
 void send_file_checked(lux::Request& req, lux::Response& res, const std::string& path,
                        const std::string* root = nullptr, const std::string& filename = {},
                        bool inline_ = false);

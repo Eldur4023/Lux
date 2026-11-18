@@ -1,0 +1,136 @@
+# Módulo formula (src/lux_script/modules/formula.cpp): fórmulas de hoja de
+# cálculo con dados. Rangos deterministas con stats(); roll() solo se comprueba
+# dentro de su rango.
+import formula
+
+app:
+    port 8080
+
+fn Json vars():
+    return { "Maná base": 3, "dado": "1d6", "nivel": 4, "vital": true, "vacio": "",
+             "clase": { "mana_base": 2, "por_nivel": { "$formula": "mana_base + 1d4", "$vars": { "mana_base": 2 } } },
+             "tam": "Grande", "equipo": [{ "nombre": "Espada" }, { "nombre": "Escudo" }], "raza": { "nombre": "Humano" },
+             "partes": [{ "leves": 6 }, { "leves": 9 }],
+             "heridas": { "Cabeza": { "letal": 1, "parte": { "vital": true } },
+                          "Brazo": { "letal": 1, "parte": { "vital": false } },
+                          "Pecho": { "letal": 0, "parte": { "vital": true } } },
+             "progresion": [{ "nivel": 1, "mana": 2 }, { "nivel": 3, "mana": 5 }, { "nivel": 6, "mana": 10 }] }
+
+fn Json stats(string e):
+    try:
+        return formula.stats(e, vars())
+    catch err:
+        return { "error": err.message }
+
+get endpoint("/stats"):
+    return {
+        "arith":  stats("2 + 3 * 4 - (1 - 2) / 2"),
+        "dice":   stats("2d6 + 1"),
+        "names":  stats("[Maná base] + dado + clase.mana_base + vital + vacio"),
+        "lists":  stats("suma(partes.leves) + contar(partes)"),
+        "si":     stats("si(nivel >= 3; 10; 1d4)"),
+        "round":  stats("redondear(7 / 2) + entero(7 / 2) + techo(7 / 2)"),
+        "nested": stats("clase.por_nivel + dado"),
+        "sumif":  stats("sumar_si(progresion.mana; progresion.nivel <= nivel)"),
+        "countif":stats("contar_si(progresion.nivel <= nivel) + suma(partes.leves * 2)"),
+        "star":   stats("contar_si((heridas.*.letal >= 1) * heridas.*.parte.vital) * 10 + suma(heridas.*.letal)"),
+        "e_name": stats("fuerza + 1"),
+        "e_list": stats("partes.leves + 1"),
+        "e_row":  stats("suma(partes.nada)"),
+        "e_zero": stats("1 / 0")
+    }
+
+get endpoint("/check"):
+    return { "ok": formula.check("[Maná base] + clase.mana_base"), "bad": formula.check("(2 + 3") }
+
+get endpoint("/roll"):
+    Json r = formula.roll("3d6 + nivel", vars())
+    return { "in_range": r["total"] >= 7 and r["total"] <= 22, "detail": r["detail"].starts_with("3d6 → ") }
+
+fn Json between(string e, double lo, double hi):
+    Json s = formula.stats(e, vars())
+    return s["avg"] >= lo and s["avg"] <= hi
+
+# Todas las tiradas de `e` caen en [lo, hi]; devuelve también el desglose de la última.
+fn Json spread(string e, int lo, int hi):
+    bool all = true
+    string detail = ""
+    for int i in range(300):
+        Json r = formula.roll(e, vars())
+        all = all and r["total"] >= lo and r["total"] <= hi
+        detail = r["detail"]
+    return { "in_range": all, "detail": detail }
+
+get endpoint("/dice"):
+    return {
+        "kh":      stats("4d6kh3"),
+        "kh_avg":  between("4d6kh3", 12.1, 12.4),
+        "adv_avg": between("max(1d20; 1d20)", 13.5, 14.1),
+        "dis_avg": between("min(1d20; 1d20)", 6.9, 7.5),
+        "pool":    stats("(nivel)d6"),
+        "pool2":   stats("2d(nivel)"),
+        "fudge":   stats("4dF"),
+        "pct":     stats("d%"),
+        "succ":    stats("10d10s>=8"),
+        "succ_avg":between("10d10s>=8", 2.9, 3.1),
+        "boom_avg":between("1d6!", 4.0, 4.5),
+        "mix":     stats("(nivel)d6kh2 + 3"),
+        "r_kh":    spread("4d6kh3", 3, 18),
+        "r_dl":    spread("6d6dl2", 4, 24),
+        "r_kl":    spread("3d20kl1", 1, 20),
+        "r_pool":  spread("(nivel)d6", 4, 24),
+        "r_boom":  spread("2d6!", 2, 1000),
+        "r_succ":  spread("8d10s>=7f=1", -8, 8),
+        "r_fudge": spread("4dF", -4, 4),
+        "r_reroll":spread("4d6r<=2", 12, 24),
+        "r_once":  spread("4d6ro<=2", 4, 24),
+        "bad_boom":stats("2d6!>"),
+        "big":     stats("2000d6"),
+        "name_d":  stats("dado + d4")
+    }
+
+get endpoint("/tier"):
+    Json out = { "seen": {} }
+    for int i in range(300):
+        Json r = formula.roll("si(1d100 <= 20; \"Crítico\"; si(1d100 <= 60; \"Éxito\"; \"Fallo\"))", vars())
+        out["seen"][str(r["text"])] = true
+    return { "kinds": len(out["seen"].keys()), "text": formula.roll("si(1d6 > 0; \"hola\"; \"adiós\")", vars())["text"] }
+
+get endpoint("/text"):
+    return {
+        "eq":      stats("si(tam = \"Grande\"; 2; 1)"),
+        "eq_acc":  stats("si(tam = \"GRANDE\"; 2; 1)"),
+        "ne":      stats("si(tam <> \"Pequeño\"; 5; 1)"),
+        "ref":     stats("si(raza = \"humano\"; 7; 1)"),
+        "has":     stats("contiene(equipo; \"espada\") * 10 + contiene(equipo; \"Arco\")"),
+        "sub":     stats("contiene(tam; \"rand\") + contiene(tam; \"zzz\")"),
+        "oneof":   stats("uno_de(tam; \"Pequeño\"; \"Grande\") + uno_de(nivel; 1; 2)"),
+        "empty":   stats("vacio(vacio) + vacio(equipo) + vacio(tam)"),
+        "mod":     stats("resto(7; 3) + resto(0 - 7; 3)"),
+        "e_math":  stats("tam + 1"),
+        "e_cmp":   stats("si(tam > 1; 1; 2)"),
+        "t_result":stats("tam"),
+        "t_si":    stats("si(nivel >= 3; \"Veterano\"; \"Novato\")"),
+        "t_si2":   stats("si(nivel >= 9; \"Veterano\"; \"Novato\")"),
+        "t_amp":   stats("\"Nv \" & nivel & \" \" & raza"),
+        "t_unir":  stats("unir(equipo)"),
+        "t_unir2": stats("unir(\"a\"; 1; tam)"),
+        "t_cmp":   stats("si(si(nivel >= 3; \"Veterano\"; \"Novato\") = \"veterano\"; 7; 1)"),
+        "t_dice":  stats("si(1d6 > 3; \"a\"; \"b\")"),
+        "t_names": stats("equipo"),
+        "m_pow":   stats("2 ^ 3 ^ 2 + potencia(10; 2)"),
+        "m_prec":  stats("2 * 3 ^ 2 - -2 ^ 2"),
+        "m_funcs": stats("raiz(16) + logaritmo(1000) + logaritmo(8; 2) + redondear(ln(1) + 2.456; 1)"),
+        "m_round": stats("redondear(2.5) + redondear(1.005; 2)"),
+        "m_neg":   stats("(0 - 4) ^ 0.5"),
+        "m_sqrt":  stats("raiz(0 - 1)"),
+        "m_log":   stats("logaritmo(0)"),
+        "m_level": stats("entero(raiz(nivel * 100 / 4))"),
+        "tier":    stats("si(1d100 <= 20; \"Crítico\"; si(1d100 <= 60; \"Éxito\"; \"Fallo\"))"),
+        "tier_eq": stats("si(si(1d100 <= 20; \"Crítico\"; \"Fallo\") = \"Crítico\"; 1; 2)"),
+        "tier_amp":stats("\"Resultado: \" & si(1d6 > 3; \"alto\"; \"bajo\")"),
+        "t_dscale":stats("partes.leves * 2"),
+        "t_math":  stats("(\"a\" & \"b\") + 1"),
+        "e_ref":   stats("raza * 2"),
+        "e_quote": stats("\"abierto")
+    }

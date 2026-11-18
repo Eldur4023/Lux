@@ -367,8 +367,17 @@ Action compile_return(const Expr& e, DiagnosticBag& diags,
             code = static_cast<int>(e.args[1].value->int_value);
         }
         std::string to = *target;
+        // Literal target and status: refuse a bad one at compile time, same rules as the runtime check.
+        {
+            lux::Response probe;
+            if (!redirect_checked(probe, code, to)) {
+                diags.error(e.loc, "redirect(): the status must be 301, 302, 303, 307 or 308, and the target "
+                                   "cannot start with // or /\\ or be a javascript:/data: URL");
+                return {};
+            }
+        }
         return [to, code](lux::Request&, lux::Response& res) {
-            res.status(code).header("Location", to).send("");
+            redirect_checked(res, code, to);
         };
     }
 
@@ -2424,6 +2433,12 @@ std::shared_ptr<Module> compile(const std::vector<fs::path>& inputs,
         auth.session_secure  = mod->program.app.session_secure;
         auth.jwt_secret      = mod->program.app.jwt_secret;
         auth.jwt_issuer      = mod->program.app.jwt_issuer;
+        // The compile-time length check skips env("VAR"): what it resolved to is only known here.
+        for (const auto& [label, secret] : {std::pair<const char*, const std::string&>{"session", auth.session_secret},
+                                            std::pair<const char*, const std::string&>{"jwt", auth.jwt_secret}})
+            if (!secret.empty() && secret.size() < 32)
+                lux::log().warn(std::string(label) + " secret is only " + std::to_string(secret.size()) +
+                                " character(s) long (use at least 32): the HMAC can be brute-forced offline");
         if (mod->native) mod->native_binds = std::make_shared<std::vector<std::vector<ParamBind>>>(mod->program.routes.size());
         if (mod->native && mod->native->bind)
             mod->native->bind(&mod->functions, &mod->templates, &mod->auth, &mod->template_keys,
