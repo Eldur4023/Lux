@@ -1,5 +1,9 @@
 #pragma once
-// Lux's side of .luxp: PRODUCING them.  The format, its translator and its
+// Lux's side of .luxp: PRODUCING them.
+//
+// OPTIONAL: built only with -DLUX_LUXP=ON (CMake option, OFF by default). Without it every function
+// below is an inline stub (further down) that answers "HTML only", so render() and the rest of the
+// engine call the same API either way and a default build carries none of src/luxp/.  The format, its translator and its
 // verifiers live in src/luxp/ (page/luxp.hpp); Luxium vendors that directory
 // and only opens .luxp files.
 //
@@ -46,6 +50,14 @@ class Value;
 struct Template;
 struct NativeCtx;
 
+enum class LuxpOutcome {
+    Sent,        // the .luxp is written; nothing else to do
+    HtmlOnly,    // this page is HTML (JavaScript): render it and answer HTML, no translating
+    Translate,   // no plan: render the HTML and let send_page translate it
+};
+
+#ifdef LUX_LUXP
+
 // Does this request ask for a .luxp?
 bool wants_luxp(const lux::Request& req);
 
@@ -85,11 +97,6 @@ void send_page(const lux::Request& req, lux::Response& res, const std::string& h
 // filled HTML.
 void luxp_attach_plan(Template& t);
 
-enum class LuxpOutcome {
-    Sent,        // the .luxp is written; nothing else to do
-    HtmlOnly,    // this page is HTML (JavaScript): render it and answer HTML, no translating
-    Translate,   // no plan: render the HTML and let send_page translate it
-};
 // Answers a request that wants a .luxp from the template's plan.  `slots` are
 // the template's data in the order of Template::names (what render_template
 // takes).
@@ -99,5 +106,27 @@ LuxpOutcome luxp_respond_slots(NativeCtx& ctx, size_t template_index, const Valu
 // lux pack: entry_html, every local page it links to and the resources they
 // use -> out_path.  Lists what it wrote in `report`; false + report = why.
 bool pack_site(const std::string& entry_html, const std::string& out_path, std::string* report);
+
+#else  // !LUX_LUXP: the same API, doing nothing. Nobody asks for a .luxp, so every page is HTML.
+
+inline bool wants_luxp(const lux::Request&) { return false; }
+inline void set_luxp_statics(const std::vector<StaticMount>&) {}
+inline std::optional<std::string> luxp_fetch_static(const std::string&, const std::string&) { return std::nullopt; }
+inline std::optional<std::string> html_to_luxp(const std::string&, const std::string&, std::string* err) {
+    if (err) *err = "built without LUX_LUXP";
+    return std::nullopt;
+}
+inline std::vector<std::string> check_page_scripts(const std::string&) { return {}; }
+inline void luxp_attach_plan(Template&) {}
+inline LuxpOutcome luxp_respond(NativeCtx&, const Template&, const std::vector<Value>&) { return LuxpOutcome::HtmlOnly; }
+inline LuxpOutcome luxp_respond_slots(NativeCtx&, size_t, const Value*, size_t) { return LuxpOutcome::HtmlOnly; }
+// text/html always (luxp_off.cpp).
+void send_page(const lux::Request& req, lux::Response& res, const std::string& html, bool allow_luxp = true);
+inline bool pack_site(const std::string&, const std::string&, std::string* report) {
+    if (report) *report = "lux pack: this binary was built without .luxp support (cmake -DLUX_LUXP=ON)";
+    return false;
+}
+
+#endif  // LUX_LUXP
 
 } // namespace lux_script

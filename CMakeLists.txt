@@ -239,6 +239,28 @@ foreach(_excluded ${_lux_module_exclude})
 endforeach()
 
 # ── Lux Script: the language frontend ───────────────────────────────────────
+# .luxp: Luxium's application format -- translator, codecs, verifier. Optional and OFF by default:
+# a normal build neither compiles src/luxp/ nor answers application/x-luxp (every page is HTML).
+# Owned here; Luxium vendors src/luxp/ (its tools/sync_from_lux.sh).
+option(LUX_LUXP "Build .luxp support (pages for the Luxium browser, `lux pack`)" OFF)
+if(LUX_LUXP)
+    set(LUX_LUXP_SOURCES
+        src/lux_script/luxp_serve.cpp
+        src/lux_script/luxp_template.cpp
+        src/luxp/dom/node.cpp
+        src/luxp/html/tokenizer.cpp
+        src/luxp/html/parser.cpp
+        src/luxp/style/selector.cpp
+        src/luxp/style/stylesheet.cpp
+        src/luxp/page/doc_codec.cpp
+        src/luxp/page/doc_template.cpp
+        src/luxp/page/luxp.cpp
+        src/luxp/script/bytecode_io.cpp
+        src/luxp/script/page_compile.cpp)
+else()
+    set(LUX_LUXP_SOURCES src/lux_script/luxp_off.cpp)
+endif()
+
 add_library(lux_script STATIC
     src/lux_script/token.cpp
     src/lux_script/diagnostic.cpp
@@ -260,24 +282,15 @@ add_library(lux_script STATIC
     src/lux_script/autotest.cpp
     src/lux_script/project.cpp
     src/lux_script/tiny_regex.cpp
-    src/lux_script/luxp_serve.cpp
-    src/lux_script/luxp_template.cpp
-    # .luxp: Luxium's application format -- translator, codecs, verifier.
-    # Owned here; Luxium vendors src/luxp/ (its tools/sync_from_lux.sh).
-    src/luxp/dom/node.cpp
-    src/luxp/html/tokenizer.cpp
-    src/luxp/html/parser.cpp
-    src/luxp/style/selector.cpp
-    src/luxp/style/stylesheet.cpp
-    src/luxp/page/doc_codec.cpp
-    src/luxp/page/doc_template.cpp
-    src/luxp/page/luxp.cpp
-    src/luxp/script/bytecode_io.cpp
-    src/luxp/script/page_compile.cpp
+    ${LUX_LUXP_SOURCES}
     ${LUX_MODULE_SOURCES}
 )
-target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-                                             ${CMAKE_CURRENT_SOURCE_DIR}/src/luxp)
+target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+if(LUX_LUXP)
+    # PUBLIC: the headers of the --native generated code and every target that links lux_script see the same API.
+    target_compile_definitions(lux_script PUBLIC LUX_LUXP)
+    target_include_directories(lux_script PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src/luxp)
+endif()
 target_link_libraries(lux_script PUBLIC lux ${CMAKE_DL_LIBS})
 if(WIN32)
     target_compile_definitions(lux_script PUBLIC LUX_NO_NATIVE)
