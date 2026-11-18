@@ -522,21 +522,3 @@ A couple of things worth calling out instead of just letting the table speak:
 **Just so nobody has to ask:** one process per framework, not how any of these would actually be deployed in production. SQLite as BD, so write contention says as much about SQLite as it does about any framework. The load generator shares the machine with the server under test. And it's one 45-second sample, not an average of several runs, so the numbers may vary. The point is that Lux is well ahead.
 
 ---
-
-# A Manifesto
-
-I wish programming went back to when it was simpler. Just a small, optimized (and not RAM-hungry) binary that gets the job done, not a whole stack of software built upon software and software that nobody understands but chooses to use anyway because 'it's what everyone else is using'.
-
-In case I haven't made it clear during this whole file, I hate JavaScript. I really hate it. Not just the fact that it allows bullshit like 1 + "1" as if it were a normal Tuesday, but also that people have just internalized it as 'just a small quirk of the language' instead of what it is, bullshit. Someone really looked at ```const x = ({ a: { b } = {} }) => b;``` and thought this was fine. Someone really looked at this piece of bullshit glorified DOM scripting language and thought it had to go to the backend and make everyone else miserable.
-
-I'm sick of installing npm and downloading thousands of files of God knows what and tens of Gigabytes of bullshit dependencies that I don't need, especially when you could just have an LLM write that small module you need and can't be bothered to write yourself. And let's not forget that npm has had malware snuck into it a few times at least. And the fact that someone could just remove that one bullshit dependency that EVERYTHING depends on for some reason and half the internet would go down.
-
-I thought Web development was complicated and weird. Turns out it's just JavaScript that is complicated and weird. I loved Flask the first time I used it. It was easy, it was simple and it made sense. Then I wanted more performance, but, of course, I'm NOT touching Node.js, so I decided to make my own framework. I made it in C++, because C = Fast and Compiled = Good, but then I wanted it to be simpler to use so I made my own interpreted language around the framework so I didn't have to write C, but then I wanted it to be fast again so I ended up compiling the LuxScript code to C++.
-
-It **might** have a bug or two, I'm sure it can be optimized even more and I'm sure I've made poor decisions along the way, but it's good enough as it is now and I'm sure it will get better with time. I know writing a whole language so I don't have to write C++ just to end up compiling it back to C++ sounds weird, but it works **and it's not a 10GB shitbomb of malware**.
-
-And no, TypeScript doesn't cut it.
-
-
-Fuck JavaScript and Fuck Node.js.
-\- Eldur
